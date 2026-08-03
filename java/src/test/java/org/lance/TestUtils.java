@@ -48,6 +48,7 @@ import org.apache.arrow.vector.util.ByteArrayReadableSeekableByteChannel;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
 import java.io.IOException;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
@@ -55,6 +56,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -67,6 +70,25 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestUtils {
+  /** Write a valid Spark Bloom V1 sidecar with no set bits and return its SHA-256. */
+  public static String writeEmptySparkBloom(Path path)
+      throws IOException, NoSuchAlgorithmException {
+    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    try (DataOutputStream output = new DataOutputStream(bytes)) {
+      output.writeInt(1);
+      output.writeInt(1);
+      output.writeInt(1);
+      output.writeLong(0);
+    }
+    byte[] encoded = bytes.toByteArray();
+    Files.write(path, encoded);
+    StringBuilder checksum = new StringBuilder(64);
+    for (byte value : MessageDigest.getInstance("SHA-256").digest(encoded)) {
+      checksum.append(String.format("%02x", value & 0xff));
+    }
+    return checksum.toString();
+  }
+
   private abstract static class TestDataset {
     protected final BufferAllocator allocator;
     protected final String datasetPath;

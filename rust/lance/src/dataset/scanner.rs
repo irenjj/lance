@@ -19,6 +19,7 @@ use async_recursion::async_recursion;
 use chrono::Utc;
 use datafusion::common::{DFSchema, JoinType, NullEquality, SchemaExt, exec_datafusion_err};
 use datafusion::functions_aggregate;
+use datafusion::logical_expr::expr::ScalarFunction;
 use datafusion::logical_expr::{Expr, ScalarUDF, col, lit};
 use datafusion::physical_expr::PhysicalSortExpr;
 #[allow(deprecated)]
@@ -110,6 +111,10 @@ use crate::io::exec::{
 use crate::io::exec::{
     AddRowOffsetExec, LANCE_RELATIONAL_ALGEBRA_VERSION, LanceFilterExec, LanceScanConfig,
     get_physical_optimizer,
+};
+use crate::utils::external_bloom::{
+    ExternalBloomContains, ExternalBloomMetrics, load as load_external_bloom,
+    validate_params as validate_external_bloom_params,
 };
 use crate::{Error, Result};
 use crate::{
@@ -742,6 +747,8 @@ pub struct Scanner {
     /// Filter.
     filter: LanceFilter,
 
+    external_bloom: Option<ExternalBloomParams>,
+
     /// Optional full text search query
     full_text_query: Option<FullTextSearchQuery>,
 
@@ -868,6 +875,14 @@ pub struct Scanner {
     explicit_projection: bool,
     /// Whether the user wants to use the legacy projection behavior.
     autoproject_scoring_columns: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ExternalBloomParams {
+    path: String,
+    column: String,
+    sha256: String,
+    metrics: Arc<ExternalBloomMetrics>,
 }
 
 /// Represents a user-requested take operation
@@ -1036,6 +1051,7 @@ impl Scanner {
             prefilter: false,
             materialization_style: MaterializationStyle::Heuristic,
             filter: LanceFilter::default(),
+            external_bloom: None,
             full_text_query: None,
             batch_size: None,
             batch_size_bytes: None,
@@ -1204,6 +1220,46 @@ impl Scanner {
         self
     }
 
+    fn effective_scan_stats_callback(&self) -> Option<ExecutionStatsCallback> {
+        let callback = self.scan_stats_callback.clone()?;
+        let Some(metrics) = self
+            .external_bloom
+            .as_ref()
+            .map(|params| params.metrics.clone())
+        else {
+            return Some(callback);
+        };
+        Some(Arc::new(move |counts| {
+            let mut counts = counts.clone();
+            let as_usize = |value: u64| value.min(usize::MAX as u64) as usize;
+            counts.all_counts.insert(
+                "external_bloom_input_rows".to_string(),
+                as_usize(
+                    metrics
+                        .input_rows
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+            );
+            counts.all_counts.insert(
+                "external_bloom_pass_rows".to_string(),
+                as_usize(metrics.pass_rows.load(std::sync::atomic::Ordering::Relaxed)),
+            );
+            counts.all_counts.insert(
+                "external_bloom_bytes".to_string(),
+                as_usize(metrics.bytes.load(std::sync::atomic::Ordering::Relaxed)),
+            );
+            counts.all_times.insert(
+                "external_bloom_load_nanos".to_string(),
+                as_usize(
+                    metrics
+                        .load_nanos
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                ),
+            );
+            callback(&counts);
+        }))
+    }
+
     /// Set the materialization style for the scan
     ///
     /// This controls when columns are fetched from storage.  The default should work
@@ -1237,6 +1293,33 @@ impl Scanner {
     ///
     pub fn filter(&mut self, filter: &str) -> Result<&mut Self> {
         self.filter.expr_filter = Some(ExprFilter::Sql(filter.to_string()));
+        Ok(self)
+    }
+
+    /// Apply a Spark Bloom V1 sidecar to an Int64 column during a local scan.
+    ///
+    /// The sidecar path must be absolute and its contents must match `sha256`. Null keys do not
+    /// match. External Bloom filters are not supported with vector or full-text search.
+    ///
+    /// ```no_run
+    /// # use lance::{Dataset, Result};
+    /// # fn configure(dataset: &Dataset) -> Result<()> {
+    /// dataset.scan().external_bloom(
+    ///     "/mnt/shared/keys.sparkbf",
+    ///     "trip_second_key",
+    ///     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn external_bloom(&mut self, path: &str, column: &str, sha256: &str) -> Result<&mut Self> {
+        let sha256 = validate_external_bloom_params(path, column, sha256)?;
+        self.external_bloom = Some(ExternalBloomParams {
+            path: path.to_owned(),
+            column: column.to_owned(),
+            sha256,
+            metrics: Arc::new(ExternalBloomMetrics::default()),
+        });
         Ok(self)
     }
 
@@ -2097,7 +2180,7 @@ impl Scanner {
                 plan,
                 LanceExecutionOptions {
                     batch_size: self.batch_size,
-                    execution_stats_callback: self.scan_stats_callback.clone(),
+                    execution_stats_callback: self.effective_scan_stats_callback(),
                     ..Default::default()
                 },
             )?))
@@ -2113,7 +2196,7 @@ impl Scanner {
 
         // Use the scan stats callback if the user didn't set an execution stats callback
         if options.execution_stats_callback.is_none() {
-            options.execution_stats_callback = self.scan_stats_callback.clone();
+            options.execution_stats_callback = self.effective_scan_stats_callback();
         }
 
         execute_plan(plan, options)
@@ -2122,7 +2205,7 @@ impl Scanner {
     pub(crate) fn execution_options(&self) -> LanceExecutionOptions {
         LanceExecutionOptions {
             batch_size: self.batch_size,
-            execution_stats_callback: self.scan_stats_callback.clone(),
+            execution_stats_callback: self.effective_scan_stats_callback(),
             ..Default::default()
         }
     }
@@ -2434,6 +2517,15 @@ impl Scanner {
             ));
         }
 
+        if self.external_bloom.is_some()
+            && (self.nearest.is_some() || self.full_text_query.is_some())
+        {
+            return Err(Error::not_supported(
+                "external bloom is only supported for scans without vector or full-text search"
+                    .to_string(),
+            ));
+        }
+
         Ok(())
     }
 
@@ -2441,9 +2533,62 @@ impl Scanner {
         let filter_schema = self.filterable_schema()?;
         let planner = Planner::new(Arc::new(filter_schema.as_ref().into()));
 
+        let user_expr = self
+            .filter
+            .expr_filter
+            .as_ref()
+            .map(|filter| filter.to_datafusion(self.dataset.schema(), filter_schema.as_ref()))
+            .transpose()?;
+        let bloom_expr = if let Some(params) = self.external_bloom.as_ref() {
+            let field = self.dataset.schema().field(&params.column).ok_or_else(|| {
+                Error::invalid_input(format!(
+                    "external bloom column '{}' does not exist",
+                    params.column
+                ))
+            })?;
+            if field.data_type() != DataType::Int64 {
+                return Err(Error::invalid_input(format!(
+                    "external bloom column '{}' must be Int64, got {}",
+                    params.column,
+                    field.data_type()
+                )));
+            }
+            let loaded = load_external_bloom(&params.path, &params.sha256).await?;
+            params
+                .metrics
+                .bytes
+                .store(loaded.file_bytes(), std::sync::atomic::Ordering::Relaxed);
+            params.metrics.load_nanos.store(
+                if loaded.cache_miss {
+                    loaded.load_nanos
+                } else {
+                    0
+                },
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            let udf = Arc::new(ScalarUDF::new_from_impl(ExternalBloomContains::new(
+                loaded.bloom,
+                params.metrics.clone(),
+                &params.sha256,
+            )));
+            Some(Expr::ScalarFunction(ScalarFunction::new_udf(
+                udf,
+                vec![Expr::Column(datafusion::common::Column::new_unqualified(
+                    &params.column,
+                ))],
+            )))
+        } else {
+            None
+        };
+        let expr = match (user_expr, bloom_expr) {
+            (Some(user), Some(bloom)) => Some(user.and(bloom)),
+            (Some(user), None) => Some(user),
+            (None, Some(bloom)) => Some(bloom),
+            (None, None) => None,
+        };
+
         // Check expr filter
-        let filter_plan = if let Some(filter) = self.filter.expr_filter.as_ref() {
-            let expr = filter.to_datafusion(self.dataset.schema(), filter_schema.as_ref())?;
+        let filter_plan = if let Some(expr) = expr {
             let index_info = self.dataset.scalar_index_info().await?;
             let filter_plan =
                 planner.create_filter_plan(expr.clone(), &index_info, use_scalar_index)?;
@@ -5298,6 +5443,7 @@ pub mod test_dataset {
 mod test {
 
     use std::collections::BTreeSet;
+    use std::io::Write;
     use std::time::{Duration, Instant};
     use std::vec;
 
@@ -5336,6 +5482,8 @@ mod test {
     use lance_testing::datagen::{BatchGenerator, IncrementingInt32, RandomVector};
     use object_store::throttle::ThrottleConfig;
     use rstest::rstest;
+    use sha2::{Digest, Sha256};
+    use tempfile::NamedTempFile;
 
     use super::*;
     use crate::dataset::WriteMode;
@@ -5346,6 +5494,30 @@ mod test {
     use crate::utils::test::{
         DatagenExt, FragmentCount, FragmentRowCount, ThrottledStoreWrapper, assert_plan_node_equals,
     };
+
+    #[tokio::test]
+    async fn test_external_bloom_filters_mixed_case_column() {
+        let dataset = gen_batch()
+            .col("TripKey", array::step::<Int64Type>())
+            .into_ram_dataset(FragmentCount::from(2), FragmentRowCount::from(10))
+            .await
+            .unwrap();
+        let mut sidecar = NamedTempFile::new().unwrap();
+        let bytes = [
+            1_i32.to_be_bytes().as_slice(),
+            1_i32.to_be_bytes().as_slice(),
+            1_i32.to_be_bytes().as_slice(),
+            0_u64.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        sidecar.write_all(&bytes).unwrap();
+        let checksum = format!("{:x}", Sha256::digest(&bytes));
+
+        let mut scan = dataset.scan();
+        scan.external_bloom(sidecar.path().to_str().unwrap(), "TripKey", &checksum)
+            .unwrap();
+        assert_eq!(scan.try_into_batch().await.unwrap().num_rows(), 0);
+    }
 
     #[test]
     fn test_env_var_parsing() {

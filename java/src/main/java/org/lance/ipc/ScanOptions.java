@@ -17,7 +17,9 @@ import com.google.common.base.MoreObjects;
 import org.apache.arrow.util.Preconditions;
 
 import java.nio.ByteBuffer;
+import java.nio.file.Paths;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 
 /** Lance scan options. */
@@ -43,6 +45,7 @@ public class ScanOptions {
   private final boolean includeDeletedRows;
   private final boolean strictBatchSize;
   private final boolean disableScoringAutoprojection;
+  private final Optional<ExternalBloomOptions> externalBloom;
 
   public ScanOptions(
       Optional<List<Integer>> fragmentIds,
@@ -131,6 +134,54 @@ public class ScanOptions {
       boolean includeDeletedRows,
       boolean strictBatchSize,
       boolean disableScoringAutoprojection) {
+    this(
+        fragmentIds,
+        batchSize,
+        columns,
+        filter,
+        substraitFilter,
+        limit,
+        offset,
+        nearest,
+        fullTextQuery,
+        prefilter,
+        withRowId,
+        withRowAddress,
+        batchReadahead,
+        columnOrderings,
+        useScalarIndex,
+        substraitAggregate,
+        collectStats,
+        fastSearch,
+        includeDeletedRows,
+        strictBatchSize,
+        disableScoringAutoprojection,
+        Optional.empty());
+  }
+
+  private ScanOptions(
+      Optional<List<Integer>> fragmentIds,
+      Optional<Long> batchSize,
+      Optional<List<String>> columns,
+      Optional<String> filter,
+      Optional<ByteBuffer> substraitFilter,
+      Optional<Long> limit,
+      Optional<Long> offset,
+      Optional<Query> nearest,
+      Optional<FullTextQuery> fullTextQuery,
+      boolean prefilter,
+      boolean withRowId,
+      boolean withRowAddress,
+      int batchReadahead,
+      Optional<List<ColumnOrdering>> columnOrderings,
+      boolean useScalarIndex,
+      Optional<ByteBuffer> substraitAggregate,
+      boolean collectStats,
+      boolean fastSearch,
+      boolean includeDeletedRows,
+      boolean strictBatchSize,
+      boolean disableScoringAutoprojection,
+      Optional<ExternalBloomOptions> externalBloom) {
     Preconditions.checkArgument(
         !(filter.isPresent() && substraitFilter.isPresent()),
         "cannot set both substrait filter and string filter");
@@ -157,6 +208,7 @@ public class ScanOptions {
     this.includeDeletedRows = includeDeletedRows;
     this.strictBatchSize = strictBatchSize;
     this.disableScoringAutoprojection = disableScoringAutoprojection;
+    this.externalBloom = externalBloom;
   }
 
   /**
@@ -338,6 +390,15 @@ public class ScanOptions {
     return disableScoringAutoprojection;
   }
 
+  /**
+   * Get the external Bloom filter options.
+   *
+   * @return external Bloom options when configured, otherwise empty
+   */
+  public Optional<ExternalBloomOptions> getExternalBloom() {
+    return externalBloom;
+  }
+
   @Override
   public String toString() {
     return MoreObjects.toStringHelper(this)
@@ -366,7 +427,66 @@ public class ScanOptions {
         .add("includeDeletedRows", includeDeletedRows)
         .add("strictBatchSize", strictBatchSize)
         .add("disableScoringAutoprojection", disableScoringAutoprojection)
+        .add("externalBloom", externalBloom.orElse(null))
         .toString();
+  }
+
+  /** Options for filtering an Int64 column with a Spark Bloom V1 sidecar. */
+  public static final class ExternalBloomOptions {
+    private final String path;
+    private final String column;
+    private final String sha256;
+
+    private ExternalBloomOptions(String path, String column, String sha256) {
+      Preconditions.checkNotNull(path, "external bloom path must not be null");
+      Preconditions.checkNotNull(column, "external bloom column must not be null");
+      Preconditions.checkNotNull(sha256, "external bloom sha256 must not be null");
+      Preconditions.checkArgument(
+          !path.isEmpty() && Paths.get(path).isAbsolute(),
+          "external bloom path must be a non-empty absolute path, got %s",
+          path);
+      Preconditions.checkArgument(
+          !column.isEmpty() && !column.contains("."),
+          "external bloom column must be a non-empty top-level name, got %s",
+          column);
+      Preconditions.checkArgument(
+          sha256.matches("[0-9a-fA-F]{64}"),
+          "external bloom sha256 must contain exactly 64 hexadecimal characters, got %s",
+          sha256);
+      this.path = path;
+      this.column = column;
+      this.sha256 = sha256.toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * @return absolute local or NFS sidecar path
+     */
+    public String getPath() {
+      return path;
+    }
+
+    /**
+     * @return top-level Int64 column to filter
+     */
+    public String getColumn() {
+      return column;
+    }
+
+    /**
+     * @return lowercase SHA-256 of the sidecar
+     */
+    public String getSha256() {
+      return sha256;
+    }
+
+    @Override
+    public String toString() {
+      return MoreObjects.toStringHelper(this)
+          .add("path", path)
+          .add("column", column)
+          .add("sha256", sha256)
+          .toString();
+    }
   }
 
   /** Builder for constructing LanceScanOptions. */
@@ -392,6 +512,7 @@ public class ScanOptions {
     private boolean includeDeletedRows = false;
     private boolean strictBatchSize = false;
     private boolean disableScoringAutoprojection = false;
+    private Optional<ExternalBloomOptions> externalBloom = Optional.empty();
 
     public Builder() {}
 
@@ -422,6 +543,7 @@ public class ScanOptions {
       this.includeDeletedRows = options.isIncludeDeletedRows();
       this.strictBatchSize = options.isStrictBatchSize();
       this.disableScoringAutoprojection = options.isDisableScoringAutoprojection();
+      this.externalBloom = options.getExternalBloom();
     }
 
     /**
@@ -661,6 +783,19 @@ public class ScanOptions {
     }
 
     /**
+     * Filter an Int64 column with a Spark Bloom V1 sidecar.
+     *
+     * @param path absolute local or NFS sidecar path
+     * @param column top-level Int64 column to filter
+     * @param sha256 SHA-256 of the sidecar
+     * @return Builder instance for method chaining
+     */
+    public Builder externalBloom(String path, String column, String sha256) {
+      this.externalBloom = Optional.of(new ExternalBloomOptions(path, column, sha256));
+      return this;
+    }
+
+    /**
      * Build the LanceScanOptions instance.
      *
      * @return LanceScanOptions instance with the specified parameters.
@@ -687,7 +822,8 @@ public class ScanOptions {
           fastSearch,
           includeDeletedRows,
           strictBatchSize,
-          disableScoringAutoprojection);
+          disableScoringAutoprojection,
+          externalBloom);
     }
   }
 }

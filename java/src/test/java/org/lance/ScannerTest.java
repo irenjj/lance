@@ -49,6 +49,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ScannerTest {
@@ -96,6 +97,44 @@ public class ScannerTest {
         }
       }
     }
+  }
+
+  @Test
+  void testExternalBloomScanAndStats(@TempDir Path tempDir) throws Exception {
+    String datasetPath = tempDir.resolve("external_bloom_dataset").toString();
+    Path bloomPath = tempDir.resolve("empty.sparkbf");
+    String checksum = TestUtils.writeEmptySparkBloom(bloomPath);
+    try (BufferAllocator allocator = new RootAllocator();
+        Dataset dataset =
+            new TestUtils.BlobTestDataset(allocator, datasetPath).createAndAppendRows(4, 2)) {
+      ScanOptions options =
+          new ScanOptions.Builder()
+              .columns(List.of("filterer"))
+              .externalBloom(bloomPath.toString(), "filterer", checksum.toUpperCase())
+              .collectStats(true)
+              .build();
+      assertEquals(checksum, options.getExternalBloom().get().getSha256());
+      assertEquals(
+          checksum, new ScanOptions.Builder(options).build().getExternalBloom().get().getSha256());
+
+      try (LanceScanner scanner = dataset.newScan(options)) {
+        try (ArrowReader reader = scanner.scanBatches()) {
+          int rows = 0;
+          while (reader.loadNextBatch()) {
+            rows += reader.getVectorSchemaRoot().getRowCount();
+          }
+          assertEquals(0, rows);
+        }
+        ScanStats stats = scanner.getStats().get();
+        assertEquals(4L, stats.getAllCounts().get("external_bloom_input_rows"));
+        assertEquals(0L, stats.getAllCounts().get("external_bloom_pass_rows"));
+        assertEquals(20L, stats.getAllCounts().get("external_bloom_bytes"));
+      }
+    }
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> new ScanOptions.Builder().externalBloom("relative", "filterer", checksum));
   }
 
   @Test
