@@ -3,6 +3,7 @@
 
 //! Various utilities
 
+pub(crate) mod external_bloom;
 pub(crate) mod future;
 pub(crate) mod temporal;
 #[cfg(test)]

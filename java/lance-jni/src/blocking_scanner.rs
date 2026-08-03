@@ -235,6 +235,7 @@ pub(crate) struct ScannerOptions<'a> {
     pub columns_obj: JObject<'a>,
     pub substrait_filter_obj: JObject<'a>,
     pub filter_obj: JObject<'a>,
+    pub external_bloom_obj: JObject<'a>,
     pub batch_size_obj: JObject<'a>,
     pub limit_obj: JObject<'a>,
     pub offset_obj: JObject<'a>,
@@ -290,6 +291,14 @@ pub(crate) fn build_scanner_with_options<'a>(
     if let Some(filter) = filter_opt {
         scanner.filter(filter.as_str())?;
     }
+
+    env.get_optional(&options.external_bloom_obj, |env, bloom| {
+        let path = env.get_string_from_method(&bloom, "getPath")?;
+        let column = env.get_string_from_method(&bloom, "getColumn")?;
+        let sha256 = env.get_string_from_method(&bloom, "getSha256")?;
+        scanner.external_bloom(&path, &column, &sha256)?;
+        Ok(())
+    })?;
 
     let batch_size_opt = env.get_long_opt(&options.batch_size_obj)?;
     if let Some(batch_size) = batch_size_opt {
@@ -426,6 +435,7 @@ pub extern "system" fn Java_org_lance_ipc_LanceScanner_createScanner<'local>(
     columns_obj: JObject<'local>,      // Optional<List<String>>
     substrait_filter_obj: JObject<'local>, // Optional<ByteBuffer>
     filter_obj: JObject<'local>,       // Optional<String>
+    external_bloom_obj: JObject<'local>, // Optional<ExternalBloomOptions>
     batch_size_obj: JObject<'local>,   // Optional<Long>
     limit_obj: JObject<'local>,        // Optional<Integer>
     offset_obj: JObject<'local>,       // Optional<Integer>
@@ -453,6 +463,7 @@ pub extern "system" fn Java_org_lance_ipc_LanceScanner_createScanner<'local>(
             columns_obj,
             substrait_filter_obj,
             filter_obj,
+            external_bloom_obj,
             batch_size_obj,
             limit_obj,
             offset_obj,
@@ -482,6 +493,7 @@ fn inner_create_scanner<'local>(
     columns_obj: JObject<'local>,
     substrait_filter_obj: JObject<'local>,
     filter_obj: JObject<'local>,
+    external_bloom_obj: JObject<'local>,
     batch_size_obj: JObject<'local>,
     limit_obj: JObject<'local>,
     offset_obj: JObject<'local>,
@@ -510,6 +522,7 @@ fn inner_create_scanner<'local>(
         columns_obj,
         substrait_filter_obj,
         filter_obj,
+        external_bloom_obj,
         batch_size_obj,
         limit_obj,
         offset_obj,

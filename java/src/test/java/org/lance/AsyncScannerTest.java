@@ -143,6 +143,30 @@ public class AsyncScannerTest {
   }
 
   @Test
+  void testAsyncScanWithExternalBloom(@TempDir Path tempDir) throws Exception {
+    String datasetPath = tempDir.resolve("async_external_bloom").toString();
+    Path bloomPath = tempDir.resolve("empty.sparkbf");
+    String checksum = TestUtils.writeEmptySparkBloom(bloomPath);
+    try (BufferAllocator allocator = new RootAllocator();
+        Dataset dataset =
+            new TestUtils.BlobTestDataset(allocator, datasetPath).createAndAppendRows(4, 2)) {
+      ScanOptions options =
+          new ScanOptions.Builder()
+              .columns(List.of("filterer"))
+              .externalBloom(bloomPath.toString(), "filterer", checksum)
+              .build();
+      try (AsyncScanner scanner = AsyncScanner.create(dataset, options, allocator);
+          ArrowReader reader = scanner.scanBatchesAsync().get(10, TimeUnit.SECONDS)) {
+        int rows = 0;
+        while (reader.loadNextBatch()) {
+          rows += reader.getVectorSchemaRoot().getRowCount();
+        }
+        assertEquals(0, rows);
+      }
+    }
+  }
+
+  @Test
   void testFastSearchSkipsUnindexedFragments(@TempDir Path tempDir) throws Exception {
     String datasetPath = tempDir.resolve("async_scanner_fast_search_scalar_index").toString();
     try (BufferAllocator allocator = new RootAllocator()) {
