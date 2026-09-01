@@ -67,6 +67,29 @@ pub struct ExternalBloomContains {
     signature: Signature,
 }
 
+/// Tests a Spark Bloom V1 sidecar with Spark SQL's `xxhash64(Int64, Int64)` encoding.
+#[derive(Debug)]
+pub struct ExternalBloomContainsSparkXxHash64I64Pair {
+    bloom: Arc<SparkBloomFilter>,
+    metrics: Arc<ExternalBloomMetrics>,
+    name: String,
+    signature: Signature,
+}
+
+impl PartialEq for ExternalBloomContainsSparkXxHash64I64Pair {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for ExternalBloomContainsSparkXxHash64I64Pair {}
+
+impl Hash for ExternalBloomContainsSparkXxHash64I64Pair {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
+}
+
 impl PartialEq for ExternalBloomContains {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
@@ -102,6 +125,45 @@ impl ExternalBloomContains {
         let matches = values
             .iter()
             .map(|value| value.is_some_and(|value| self.bloom.might_contain_long(value)))
+            .collect::<Vec<_>>();
+        self.metrics.pass_rows.fetch_add(
+            matches.iter().filter(|value| **value).count() as u64,
+            Ordering::Relaxed,
+        );
+        BooleanArray::from(matches)
+    }
+}
+
+impl ExternalBloomContainsSparkXxHash64I64Pair {
+    pub(crate) fn new(
+        bloom: Arc<SparkBloomFilter>,
+        metrics: Arc<ExternalBloomMetrics>,
+        sha256: &str,
+    ) -> Self {
+        Self {
+            bloom,
+            metrics,
+            name: format!("external_bloom_spark_xxhash64_i64_pair_{sha256}"),
+            signature: Signature::exact(
+                vec![DataType::Int64, DataType::Int64],
+                Volatility::Immutable,
+            ),
+        }
+    }
+
+    fn evaluate_arrays(&self, first: &Int64Array, second: &Int64Array) -> BooleanArray {
+        self.metrics
+            .input_rows
+            .fetch_add(first.len() as u64, Ordering::Relaxed);
+        let matches = first
+            .iter()
+            .zip(second.iter())
+            .map(|(first, second)| match (first, second) {
+                (Some(first), Some(second)) => self
+                    .bloom
+                    .might_contain_long(spark_xxhash64_i64_pair(first, second)),
+                _ => false,
+            })
             .collect::<Vec<_>>();
         self.metrics.pass_rows.fetch_add(
             matches.iter().filter(|value| **value).count() as u64,
@@ -152,6 +214,77 @@ impl ScalarUDFImpl for ExternalBloomContains {
             value => Err(DataFusionError::Execution(format!(
                 "external bloom expected Int64 input, got {}",
                 value.data_type()
+            ))),
+        }
+    }
+}
+
+impl ScalarUDFImpl for ExternalBloomContainsSparkXxHash64I64Pair {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DataFusionResult<DataType> {
+        Ok(DataType::Boolean)
+    }
+
+    fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DataFusionResult<ColumnarValue> {
+        match (&args.args[0], &args.args[1]) {
+            (ColumnarValue::Array(first), ColumnarValue::Array(second)) => {
+                let first = first.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                    DataFusionError::Execution(format!(
+                        "external bloom expected first Int64 input, got {}",
+                        first.data_type()
+                    ))
+                })?;
+                let second = second
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "external bloom expected second Int64 input, got {}",
+                            second.data_type()
+                        ))
+                    })?;
+                if first.len() != second.len() {
+                    return Err(DataFusionError::Execution(format!(
+                        "external bloom pair inputs have different lengths: {} and {}",
+                        first.len(),
+                        second.len()
+                    )));
+                }
+                Ok(ColumnarValue::Array(
+                    Arc::new(self.evaluate_arrays(first, second)) as ArrayRef,
+                ))
+            }
+            (
+                ColumnarValue::Scalar(ScalarValue::Int64(first)),
+                ColumnarValue::Scalar(ScalarValue::Int64(second)),
+            ) => {
+                self.metrics.input_rows.fetch_add(1, Ordering::Relaxed);
+                let is_match = match (first, second) {
+                    (Some(first), Some(second)) => self
+                        .bloom
+                        .might_contain_long(spark_xxhash64_i64_pair(*first, *second)),
+                    _ => false,
+                };
+                self.metrics
+                    .pass_rows
+                    .fetch_add(u64::from(is_match), Ordering::Relaxed);
+                Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(is_match))))
+            }
+            (first, second) => Err(DataFusionError::Execution(format!(
+                "external bloom expected two Int64 inputs, got {} and {}",
+                first.data_type(),
+                second.data_type()
             ))),
         }
     }
@@ -334,6 +467,34 @@ fn murmur3_hash_long(input: i64, seed: i32) -> i32 {
     fmix(mix_h1(hash, mix_k1(high)), 8)
 }
 
+/// Spark SQL `xxhash64(first, second)` for two non-null Int64 values.
+pub(crate) fn spark_xxhash64_i64_pair(first: i64, second: i64) -> i64 {
+    xxhash64_long(second, xxhash64_long(first, 42))
+}
+
+fn xxhash64_long(input: i64, seed: i64) -> i64 {
+    const PRIME1: i64 = 0x9e37_79b1_85eb_ca87_u64 as i64;
+    const PRIME2: i64 = 0xc2b2_ae3d_27d4_eb4f_u64 as i64;
+    const PRIME3: i64 = 0x1656_67b1_9e37_79f9;
+    const PRIME4: i64 = 0x85eb_ca77_c2b2_ae63_u64 as i64;
+    const PRIME5: i64 = 0x27d4_eb2f_1656_67c5;
+
+    let mut hash = seed.wrapping_add(PRIME5).wrapping_add(8);
+    hash ^= input
+        .wrapping_mul(PRIME2)
+        .rotate_left(31)
+        .wrapping_mul(PRIME1);
+    hash = hash
+        .rotate_left(27)
+        .wrapping_mul(PRIME1)
+        .wrapping_add(PRIME4);
+    hash ^= (hash as u64 >> 33) as i64;
+    hash = hash.wrapping_mul(PRIME2);
+    hash ^= (hash as u64 >> 29) as i64;
+    hash = hash.wrapping_mul(PRIME3);
+    hash ^ (hash as u64 >> 32) as i64
+}
+
 fn mix_k1(value: i32) -> i32 {
     value
         .wrapping_mul(0xcc9e_2d51_u32 as i32)
@@ -391,6 +552,41 @@ mod tests {
         assert_eq!(murmur3_hash_long(0, 0), 1669671676);
         assert_eq!(murmur3_hash_long(1, 0), 1392991556);
         assert_eq!(murmur3_hash_long(i64::MAX, 0), -2106506049);
+    }
+
+    #[test]
+    fn test_xxhash64_i64_pair_matches_spark() {
+        assert_eq!(
+            spark_xxhash64_i64_pair(i64::MIN, i64::MIN),
+            -1467132691780465609
+        );
+        assert_eq!(spark_xxhash64_i64_pair(-1, 0), 6862433990644673549);
+        assert_eq!(spark_xxhash64_i64_pair(0, 0), -9199931545335556226);
+        assert_eq!(spark_xxhash64_i64_pair(0, 1), 8281773146650252936);
+        assert_eq!(spark_xxhash64_i64_pair(1, -1), -1659187159892528922);
+        assert_eq!(
+            spark_xxhash64_i64_pair(i64::MAX, i64::MAX),
+            3582563888758909168
+        );
+    }
+
+    #[test]
+    fn test_pair_lookup_and_nulls() {
+        let bloom = Arc::new(SparkBloomFilter {
+            num_hash_functions: 1,
+            words: vec![u64::MAX],
+            file_bytes: 20,
+        });
+        let metrics = Arc::new(ExternalBloomMetrics::default());
+        let udf =
+            ExternalBloomContainsSparkXxHash64I64Pair::new(bloom, metrics.clone(), &"0".repeat(64));
+        let result = udf.evaluate_arrays(
+            &Int64Array::from(vec![Some(1), None, Some(-1)]),
+            &Int64Array::from(vec![Some(2), Some(2), None]),
+        );
+        assert_eq!(result, BooleanArray::from(vec![true, false, false]));
+        assert_eq!(metrics.input_rows.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.pass_rows.load(Ordering::Relaxed), 1);
     }
 
     #[test]

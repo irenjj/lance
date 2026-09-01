@@ -113,8 +113,8 @@ use crate::io::exec::{
     get_physical_optimizer,
 };
 use crate::utils::external_bloom::{
-    ExternalBloomContains, ExternalBloomMetrics, load as load_external_bloom,
-    validate_params as validate_external_bloom_params,
+    ExternalBloomContains, ExternalBloomContainsSparkXxHash64I64Pair, ExternalBloomMetrics,
+    load as load_external_bloom, validate_params as validate_external_bloom_params,
 };
 use crate::{Error, Result};
 use crate::{
@@ -880,9 +880,18 @@ pub struct Scanner {
 #[derive(Debug, Clone)]
 struct ExternalBloomParams {
     path: String,
-    column: String,
+    probe: ExternalBloomProbe,
     sha256: String,
     metrics: Arc<ExternalBloomMetrics>,
+}
+
+#[derive(Debug, Clone)]
+enum ExternalBloomProbe {
+    Int64Column(String),
+    SparkXxHash64I64Pair {
+        first_column: String,
+        second_column: String,
+    },
 }
 
 /// Represents a user-requested take operation
@@ -1299,7 +1308,8 @@ impl Scanner {
     /// Apply a Spark Bloom V1 sidecar to an Int64 column during a local scan.
     ///
     /// The sidecar path must be absolute and its contents must match `sha256`. Null keys do not
-    /// match. External Bloom filters are not supported with vector or full-text search.
+    /// match. External Bloom filters can be combined with a prefiltered flat vector search, but
+    /// are not supported with vector indices, postfiltered vector search, or full-text search.
     ///
     /// ```no_run
     /// # use lance::{Dataset, Result};
@@ -1316,7 +1326,39 @@ impl Scanner {
         let sha256 = validate_external_bloom_params(path, column, sha256)?;
         self.external_bloom = Some(ExternalBloomParams {
             path: path.to_owned(),
-            column: column.to_owned(),
+            probe: ExternalBloomProbe::Int64Column(column.to_owned()),
+            sha256,
+            metrics: Arc::new(ExternalBloomMetrics::default()),
+        });
+        Ok(self)
+    }
+
+    /// Apply a Spark Bloom V1 sidecar to Spark SQL's `xxhash64` of two Int64 columns.
+    ///
+    /// The sidecar must be built from `xxhash64(first_column, second_column)` using Spark SQL.
+    /// Both columns must be distinct, non-nested Int64 fields. A null in either column does not
+    /// match. This is a coarse Bloom prefilter; callers that require exact pair membership must
+    /// still apply a collision-safe exact filter before limiting results.
+    pub fn external_bloom_spark_xxhash64_i64_pair(
+        &mut self,
+        path: &str,
+        first_column: &str,
+        second_column: &str,
+        sha256: &str,
+    ) -> Result<&mut Self> {
+        let sha256 = validate_external_bloom_params(path, first_column, sha256)?;
+        validate_external_bloom_params(path, second_column, &sha256)?;
+        if first_column == second_column {
+            return Err(Error::invalid_input(
+                "external bloom pair columns must be distinct".to_string(),
+            ));
+        }
+        self.external_bloom = Some(ExternalBloomParams {
+            path: path.to_owned(),
+            probe: ExternalBloomProbe::SparkXxHash64I64Pair {
+                first_column: first_column.to_owned(),
+                second_column: second_column.to_owned(),
+            },
             sha256,
             metrics: Arc::new(ExternalBloomMetrics::default()),
         });
@@ -2517,13 +2559,24 @@ impl Scanner {
             ));
         }
 
-        if self.external_bloom.is_some()
-            && (self.nearest.is_some() || self.full_text_query.is_some())
-        {
-            return Err(Error::not_supported(
-                "external bloom is only supported for scans without vector or full-text search"
-                    .to_string(),
-            ));
+        if self.external_bloom.is_some() {
+            if self.full_text_query.is_some() {
+                return Err(Error::not_supported(
+                    "external bloom is not supported with full-text search".to_string(),
+                ));
+            }
+            if let Some(nearest) = self.nearest.as_ref() {
+                if nearest.use_index {
+                    return Err(Error::not_supported(
+                        "external bloom with vector search requires use_index=false".to_string(),
+                    ));
+                }
+                if !self.prefilter {
+                    return Err(Error::not_supported(
+                        "external bloom with vector search requires prefilter=true".to_string(),
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -2540,18 +2593,27 @@ impl Scanner {
             .map(|filter| filter.to_datafusion(self.dataset.schema(), filter_schema.as_ref()))
             .transpose()?;
         let bloom_expr = if let Some(params) = self.external_bloom.as_ref() {
-            let field = self.dataset.schema().field(&params.column).ok_or_else(|| {
-                Error::invalid_input(format!(
-                    "external bloom column '{}' does not exist",
-                    params.column
-                ))
-            })?;
-            if field.data_type() != DataType::Int64 {
-                return Err(Error::invalid_input(format!(
-                    "external bloom column '{}' must be Int64, got {}",
-                    params.column,
-                    field.data_type()
-                )));
+            let validate_column = |column: &str| -> Result<()> {
+                let field = self.dataset.schema().field(column).ok_or_else(|| {
+                    Error::invalid_input(format!("external bloom column '{column}' does not exist"))
+                })?;
+                if field.data_type() != DataType::Int64 {
+                    return Err(Error::invalid_input(format!(
+                        "external bloom column '{column}' must be Int64, got {}",
+                        field.data_type()
+                    )));
+                }
+                Ok(())
+            };
+            match &params.probe {
+                ExternalBloomProbe::Int64Column(column) => validate_column(column)?,
+                ExternalBloomProbe::SparkXxHash64I64Pair {
+                    first_column,
+                    second_column,
+                } => {
+                    validate_column(first_column)?;
+                    validate_column(second_column)?;
+                }
             }
             let loaded = load_external_bloom(&params.path, &params.sha256).await?;
             params
@@ -2566,17 +2628,35 @@ impl Scanner {
                 },
                 std::sync::atomic::Ordering::Relaxed,
             );
-            let udf = Arc::new(ScalarUDF::new_from_impl(ExternalBloomContains::new(
-                loaded.bloom,
-                params.metrics.clone(),
-                &params.sha256,
-            )));
-            Some(Expr::ScalarFunction(ScalarFunction::new_udf(
-                udf,
-                vec![Expr::Column(datafusion::common::Column::new_unqualified(
-                    &params.column,
-                ))],
-            )))
+            let (udf, args) = match &params.probe {
+                ExternalBloomProbe::Int64Column(column) => (
+                    Arc::new(ScalarUDF::new_from_impl(ExternalBloomContains::new(
+                        loaded.bloom,
+                        params.metrics.clone(),
+                        &params.sha256,
+                    ))),
+                    vec![Expr::Column(datafusion::common::Column::new_unqualified(
+                        column,
+                    ))],
+                ),
+                ExternalBloomProbe::SparkXxHash64I64Pair {
+                    first_column,
+                    second_column,
+                } => (
+                    Arc::new(ScalarUDF::new_from_impl(
+                        ExternalBloomContainsSparkXxHash64I64Pair::new(
+                            loaded.bloom,
+                            params.metrics.clone(),
+                            &params.sha256,
+                        ),
+                    )),
+                    vec![
+                        Expr::Column(datafusion::common::Column::new_unqualified(first_column)),
+                        Expr::Column(datafusion::common::Column::new_unqualified(second_column)),
+                    ],
+                ),
+            };
+            Some(Expr::ScalarFunction(ScalarFunction::new_udf(udf, args)))
         } else {
             None
         };
@@ -5517,6 +5597,161 @@ mod test {
         scan.external_bloom(sidecar.path().to_str().unwrap(), "TripKey", &checksum)
             .unwrap();
         assert_eq!(scan.try_into_batch().await.unwrap().num_rows(), 0);
+    }
+
+    async fn external_bloom_vector_dataset() -> (TempStrDir, Dataset) {
+        let path = TempStrDir::default();
+        let schema = Arc::new(ArrowSchema::new(vec![
+            ArrowField::new("TripKey", DataType::Int64, false),
+            ArrowField::new("TripTs", DataType::Int64, false),
+            ArrowField::new(
+                "vec",
+                DataType::FixedSizeList(
+                    Arc::new(ArrowField::new("item", DataType::Float32, true)),
+                    2,
+                ),
+                false,
+            ),
+        ]));
+        let vectors = FixedSizeListArray::try_new_from_values(
+            Float32Array::from(vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0]),
+            2,
+        )
+        .unwrap();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from(vec![10, 20, 30, 40])),
+                Arc::new(Int64Array::from(vec![100, 200, 300, 400])),
+                Arc::new(vectors),
+            ],
+        )
+        .unwrap();
+        let dataset = Dataset::write(
+            RecordBatchIterator::new(std::iter::once(Ok(batch)), schema),
+            &path,
+            None,
+        )
+        .await
+        .unwrap();
+        (path, dataset)
+    }
+
+    fn write_full_external_bloom() -> (NamedTempFile, String) {
+        let mut sidecar = NamedTempFile::new().unwrap();
+        let bytes = [
+            1_i32.to_be_bytes().as_slice(),
+            1_i32.to_be_bytes().as_slice(),
+            1_i32.to_be_bytes().as_slice(),
+            u64::MAX.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        sidecar.write_all(&bytes).unwrap();
+        let checksum = format!("{:x}", Sha256::digest(&bytes));
+        (sidecar, checksum)
+    }
+
+    #[tokio::test]
+    async fn test_external_bloom_prefilters_flat_knn() {
+        let (_path, dataset) = external_bloom_vector_dataset().await;
+        let (sidecar, checksum) = write_full_external_bloom();
+        let query = Float32Array::from(vec![3.0, 3.0]);
+
+        let mut scan = dataset.scan();
+        scan.external_bloom(sidecar.path().to_str().unwrap(), "TripKey", &checksum)
+            .unwrap()
+            .filter("TripKey IN (20, 40)")
+            .unwrap()
+            .nearest("vec", &query, 1)
+            .unwrap()
+            .use_index(false)
+            .prefilter(true)
+            .project(&["TripKey"])
+            .unwrap();
+
+        let plan = scan.explain_plan(false).await.unwrap();
+        assert!(
+            plan.contains("KNNVectorDistance"),
+            "unexpected plan:\n{plan}"
+        );
+        assert!(!plan.contains("ANNSubIndex"), "unexpected plan:\n{plan}");
+
+        let batch = scan.try_into_batch().await.unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch["TripKey"].as_primitive::<Int64Type>().value(0), 40);
+    }
+
+    #[tokio::test]
+    async fn test_external_bloom_pair_prefilters_flat_knn() {
+        let (_path, dataset) = external_bloom_vector_dataset().await;
+        let (sidecar, checksum) = write_full_external_bloom();
+        let query = Float32Array::from(vec![3.0, 3.0]);
+
+        let mut scan = dataset.scan();
+        scan.external_bloom_spark_xxhash64_i64_pair(
+            sidecar.path().to_str().unwrap(),
+            "TripKey",
+            "TripTs",
+            &checksum,
+        )
+        .unwrap()
+        .filter("TripKey IN (20, 40)")
+        .unwrap()
+        .nearest("vec", &query, 1)
+        .unwrap()
+        .use_index(false)
+        .prefilter(true)
+        .project(&["TripKey", "TripTs"])
+        .unwrap();
+
+        let batch = scan.try_into_batch().await.unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch["TripKey"].as_primitive::<Int64Type>().value(0), 40);
+        assert_eq!(batch["TripTs"].as_primitive::<Int64Type>().value(0), 400);
+    }
+
+    #[tokio::test]
+    async fn test_external_bloom_pair_rejects_duplicate_columns() {
+        let (_path, dataset) = external_bloom_vector_dataset().await;
+        let (sidecar, checksum) = write_full_external_bloom();
+        let mut scanner = dataset.scan();
+        let error = scanner
+            .external_bloom_spark_xxhash64_i64_pair(
+                sidecar.path().to_str().unwrap(),
+                "TripKey",
+                "TripKey",
+                &checksum,
+            )
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("must be distinct"));
+    }
+
+    #[tokio::test]
+    async fn test_external_bloom_vector_search_requires_flat_prefilter() {
+        let (_path, dataset) = external_bloom_vector_dataset().await;
+        let (sidecar, checksum) = write_full_external_bloom();
+        let query = Float32Array::from(vec![3.0, 3.0]);
+
+        let mut indexed = dataset.scan();
+        indexed
+            .external_bloom(sidecar.path().to_str().unwrap(), "TripKey", &checksum)
+            .unwrap()
+            .nearest("vec", &query, 1)
+            .unwrap()
+            .prefilter(true);
+        let error = indexed.try_into_batch().await.unwrap_err().to_string();
+        assert!(error.contains("requires use_index=false"), "{error}");
+
+        let mut postfiltered = dataset.scan();
+        postfiltered
+            .external_bloom(sidecar.path().to_str().unwrap(), "TripKey", &checksum)
+            .unwrap()
+            .nearest("vec", &query, 1)
+            .unwrap()
+            .use_index(false);
+        let error = postfiltered.try_into_batch().await.unwrap_err().to_string();
+        assert!(error.contains("requires prefilter=true"), "{error}");
     }
 
     #[test]

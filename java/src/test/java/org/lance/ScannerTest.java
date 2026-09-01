@@ -135,6 +135,26 @@ public class ScannerTest {
     assertThrows(
         IllegalArgumentException.class,
         () -> new ScanOptions.Builder().externalBloom("relative", "filterer", checksum));
+
+    ScanOptions pairOptions =
+        new ScanOptions.Builder()
+            .externalBloomSparkXxHash64I64Pair(
+                bloomPath.toString(), "trip_id", "trip_ts_sec", checksum)
+            .build();
+    ScanOptions.ExternalBloomOptions pair = pairOptions.getExternalBloom().get();
+    assertEquals("trip_id", pair.getColumn());
+    assertEquals("trip_ts_sec", pair.getSecondColumn().get());
+    assertEquals(
+        ScanOptions.ExternalBloomOptions.SPARK_XXHASH64_I64_PAIR_V1, pair.getKeyEncoding());
+    assertEquals(
+        pair.toString(),
+        new ScanOptions.Builder(pairOptions).build().getExternalBloom().get().toString());
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new ScanOptions.Builder()
+                .externalBloomSparkXxHash64I64Pair(
+                    bloomPath.toString(), "trip_id", "trip_id", checksum));
   }
 
   @Test

@@ -433,13 +433,29 @@ public class ScanOptions {
 
   /** Options for filtering an Int64 column with a Spark Bloom V1 sidecar. */
   public static final class ExternalBloomOptions {
+    public static final String INT64_V1 = "int64_v1";
+    public static final String SPARK_XXHASH64_I64_PAIR_V1 = "spark_xxhash64_i64_pair_v1";
+
     private final String path;
     private final String column;
+    private final Optional<String> secondColumn;
+    private final String keyEncoding;
     private final String sha256;
 
     private ExternalBloomOptions(String path, String column, String sha256) {
+      this(path, column, Optional.empty(), INT64_V1, sha256);
+    }
+
+    private ExternalBloomOptions(
+        String path,
+        String column,
+        Optional<String> secondColumn,
+        String keyEncoding,
+        String sha256) {
       Preconditions.checkNotNull(path, "external bloom path must not be null");
       Preconditions.checkNotNull(column, "external bloom column must not be null");
+      Preconditions.checkNotNull(secondColumn, "external bloom second column must not be null");
+      Preconditions.checkNotNull(keyEncoding, "external bloom key encoding must not be null");
       Preconditions.checkNotNull(sha256, "external bloom sha256 must not be null");
       Preconditions.checkArgument(
           !path.isEmpty() && Paths.get(path).isAbsolute(),
@@ -449,12 +465,28 @@ public class ScanOptions {
           !column.isEmpty() && !column.contains("."),
           "external bloom column must be a non-empty top-level name, got %s",
           column);
+      secondColumn.ifPresent(
+          value -> {
+            Preconditions.checkArgument(
+                !value.isEmpty() && !value.contains("."),
+                "external bloom second column must be a non-empty top-level name, got %s",
+                value);
+            Preconditions.checkArgument(
+                !column.equals(value), "external bloom pair columns must be distinct");
+          });
+      Preconditions.checkArgument(
+          (INT64_V1.equals(keyEncoding) && secondColumn.isEmpty())
+              || (SPARK_XXHASH64_I64_PAIR_V1.equals(keyEncoding) && secondColumn.isPresent()),
+          "unsupported external bloom key encoding/column combination: %s",
+          keyEncoding);
       Preconditions.checkArgument(
           sha256.matches("[0-9a-fA-F]{64}"),
           "external bloom sha256 must contain exactly 64 hexadecimal characters, got %s",
           sha256);
       this.path = path;
       this.column = column;
+      this.secondColumn = secondColumn;
+      this.keyEncoding = keyEncoding;
       this.sha256 = sha256.toLowerCase(Locale.ROOT);
     }
 
@@ -473,6 +505,20 @@ public class ScanOptions {
     }
 
     /**
+     * @return second top-level Int64 column for pair encoding, or empty for single-column mode
+     */
+    public Optional<String> getSecondColumn() {
+      return secondColumn;
+    }
+
+    /**
+     * @return versioned key encoding contract
+     */
+    public String getKeyEncoding() {
+      return keyEncoding;
+    }
+
+    /**
      * @return lowercase SHA-256 of the sidecar
      */
     public String getSha256() {
@@ -484,6 +530,8 @@ public class ScanOptions {
       return MoreObjects.toStringHelper(this)
           .add("path", path)
           .add("column", column)
+          .add("secondColumn", secondColumn.orElse(null))
+          .add("keyEncoding", keyEncoding)
           .add("sha256", sha256)
           .toString();
     }
@@ -792,6 +840,28 @@ public class ScanOptions {
      */
     public Builder externalBloom(String path, String column, String sha256) {
       this.externalBloom = Optional.of(new ExternalBloomOptions(path, column, sha256));
+      return this;
+    }
+
+    /**
+     * Filter Spark SQL {@code xxhash64(firstColumn, secondColumn)} with a Spark Bloom V1 sidecar.
+     *
+     * @param path absolute local or NFS sidecar path
+     * @param firstColumn first top-level Int64 column
+     * @param secondColumn second top-level Int64 column
+     * @param sha256 SHA-256 of the sidecar
+     * @return Builder instance for method chaining
+     */
+    public Builder externalBloomSparkXxHash64I64Pair(
+        String path, String firstColumn, String secondColumn, String sha256) {
+      this.externalBloom =
+          Optional.of(
+              new ExternalBloomOptions(
+                  path,
+                  firstColumn,
+                  Optional.of(secondColumn),
+                  ExternalBloomOptions.SPARK_XXHASH64_I64_PAIR_V1,
+                  sha256));
       return this;
     }
 

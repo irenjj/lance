@@ -73,12 +73,22 @@ public class TestUtils {
   /** Write a valid Spark Bloom V1 sidecar with no set bits and return its SHA-256. */
   public static String writeEmptySparkBloom(Path path)
       throws IOException, NoSuchAlgorithmException {
+    return writeSparkBloom(path, 0L);
+  }
+
+  /** Write a valid Spark Bloom V1 sidecar whose single word has every bit set. */
+  public static String writeFullSparkBloom(Path path) throws IOException, NoSuchAlgorithmException {
+    return writeSparkBloom(path, -1L);
+  }
+
+  private static String writeSparkBloom(Path path, long word)
+      throws IOException, NoSuchAlgorithmException {
     ByteArrayOutputStream bytes = new ByteArrayOutputStream();
     try (DataOutputStream output = new DataOutputStream(bytes)) {
       output.writeInt(1);
       output.writeInt(1);
       output.writeInt(1);
-      output.writeLong(0);
+      output.writeLong(word);
     }
     byte[] encoded = bytes.toByteArray();
     Files.write(path, encoded);

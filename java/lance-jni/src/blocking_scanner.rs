@@ -295,8 +295,27 @@ pub(crate) fn build_scanner_with_options<'a>(
     env.get_optional(&options.external_bloom_obj, |env, bloom| {
         let path = env.get_string_from_method(&bloom, "getPath")?;
         let column = env.get_string_from_method(&bloom, "getColumn")?;
+        let second_column = env.get_optional_string_from_method(&bloom, "getSecondColumn")?;
+        let key_encoding = env.get_string_from_method(&bloom, "getKeyEncoding")?;
         let sha256 = env.get_string_from_method(&bloom, "getSha256")?;
-        scanner.external_bloom(&path, &column, &sha256)?;
+        match (key_encoding.as_str(), second_column) {
+            ("int64_v1", None) => {
+                scanner.external_bloom(&path, &column, &sha256)?;
+            }
+            ("spark_xxhash64_i64_pair_v1", Some(second_column)) => {
+                scanner.external_bloom_spark_xxhash64_i64_pair(
+                    &path,
+                    &column,
+                    &second_column,
+                    &sha256,
+                )?;
+            }
+            _ => {
+                return Err(Error::input_error(format!(
+                    "unsupported external bloom key encoding/column combination: {key_encoding}"
+                )));
+            }
+        }
         Ok(())
     })?;
 
