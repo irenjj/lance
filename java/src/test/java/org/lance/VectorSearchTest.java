@@ -17,10 +17,18 @@ import org.lance.ipc.Query;
 import org.lance.ipc.ScanOptions;
 
 import org.apache.arrow.dataset.scanner.Scanner;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.complex.FixedSizeListVector;
 import org.apache.arrow.vector.ipc.ArrowReader;
+import org.apache.arrow.vector.types.FloatingPointPrecision;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -29,6 +37,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -59,6 +68,79 @@ public class VectorSearchTest {
         List<String> indexes = dataset.listIndexes();
         assertEquals(1, indexes.size());
         assertEquals(TestVectorDataset.indexName, indexes.get(0));
+      }
+    }
+  }
+
+  @Test
+  void testExternalBloomPrefiltersFlatKnn() throws Exception {
+    Path datasetPath = tempDir.resolve("external_bloom_flat_knn");
+    Path bloomPath = tempDir.resolve("full.sparkbf");
+    String checksum = TestUtils.writeFullSparkBloom(bloomPath);
+    Schema schema =
+        new Schema(
+            List.of(
+                Field.notNullable("trip_key", new ArrowType.Int(64, true)),
+                new Field(
+                    "vec",
+                    FieldType.notNullable(new ArrowType.FixedSizeList(2)),
+                    Collections.singletonList(
+                        new Field(
+                            "item",
+                            FieldType.nullable(
+                                new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE)),
+                            null)))));
+
+    try (RootAllocator allocator = new RootAllocator()) {
+      Dataset.create(allocator, datasetPath.toString(), schema, new WriteParams.Builder().build())
+          .close();
+      FragmentMetadata fragment;
+      try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+        root.allocateNew();
+        BigIntVector keys = (BigIntVector) root.getVector("trip_key");
+        FixedSizeListVector vectors = (FixedSizeListVector) root.getVector("vec");
+        Float4Vector values = (Float4Vector) vectors.getDataVector();
+        for (int row = 0; row < 4; row++) {
+          keys.setSafe(row, (row + 1L) * 10L);
+          values.setSafe(row * 2, row);
+          values.setSafe(row * 2 + 1, row);
+          vectors.setNotNull(row);
+        }
+        root.setRowCount(4);
+        fragment =
+            Fragment.create(
+                    datasetPath.toString(), allocator, root, new WriteParams.Builder().build())
+                .get(0);
+      }
+
+      try (Dataset dataset =
+          Dataset.commit(
+              allocator,
+              datasetPath.toString(),
+              new FragmentOperation.Append(List.of(fragment)),
+              Optional.of(1L))) {
+        ScanOptions options =
+            new ScanOptions.Builder()
+                .columns(List.of("trip_key"))
+                .filter("trip_key IN (20, 40)")
+                .externalBloom(bloomPath.toString(), "trip_key", checksum)
+                .prefilter(true)
+                .nearest(
+                    new Query.Builder()
+                        .setColumn("vec")
+                        .setKey(new float[] {3.0f, 3.0f})
+                        .setK(1)
+                        .setUseIndex(false)
+                        .build())
+                .build();
+        try (Scanner scanner = dataset.newScan(options);
+            ArrowReader reader = scanner.scanBatches()) {
+          assertTrue(reader.loadNextBatch());
+          VectorSchemaRoot root = reader.getVectorSchemaRoot();
+          assertEquals(1, root.getRowCount());
+          assertEquals(40L, ((BigIntVector) root.getVector("trip_key")).get(0));
+          assertFalse(reader.loadNextBatch());
+        }
       }
     }
   }
