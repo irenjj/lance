@@ -204,22 +204,23 @@ enum BlobPreprocessFieldKind {
 impl BlobPreprocessField {
     fn new(field: &ArrowField) -> Result<Self> {
         if field.is_blob_v2() {
+            let metadata = HashMap::from(field.metadata());
             return match blob_v2_layout(field) {
                 Some(BlobV2Layout::Prepared | BlobV2Layout::Logical) => Ok(Self {
                     kind: BlobPreprocessFieldKind::BlobV2 {
                         inline_threshold: blob_inline_threshold_from_metadata(
-                            field.metadata(),
+                            &metadata,
                             field.name(),
                         )?,
                         dedicated_threshold: blob_dedicated_threshold_from_metadata(
-                            field.metadata(),
+                            &metadata,
                             field.name(),
                         )?,
                         pack_file_threshold: blob_pack_file_threshold_from_metadata(
-                            field.metadata(),
+                            &metadata,
                             field.name(),
                         )?,
-                        writer_metadata: field.metadata().clone(),
+                        writer_metadata: metadata,
                     },
                 }),
                 _ => Err(blob_v2_shape_error(
@@ -1204,14 +1205,8 @@ impl BlobPreprocessor {
             list_arr.clone()
         };
 
-        let first_offset = *list_arr
-            .offsets()
-            .first()
-            .ok_or_else(|| Error::invalid_input("List offsets cannot be empty"))?;
-        let last_offset = *list_arr
-            .offsets()
-            .last()
-            .ok_or_else(|| Error::invalid_input("List offsets cannot be empty"))?;
+        let first_offset = list_arr.offsets().first();
+        let last_offset = list_arr.offsets().last();
         let values_len = list_arr.values().len();
         let needs_trim = first_offset != O::zero()
             || last_offset.to_usize().ok_or_else(|| {

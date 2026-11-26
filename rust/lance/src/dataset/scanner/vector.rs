@@ -16,21 +16,21 @@ use std::sync::Arc;
 use arrow_array::{Array, ArrayRef};
 use arrow_schema::{DataType, SortOptions};
 use async_recursion::async_recursion;
-use datafusion::common::DFSchema;
-use datafusion::logical_expr::{Expr, col, lit};
-use datafusion::physical_expr::PhysicalSortExpr;
-use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::repartition::RepartitionExec;
-use datafusion::physical_plan::sorts::sort::SortExec;
-use datafusion::physical_plan::union::UnionExec;
-use datafusion::physical_plan::{ExecutionPlan, expressions};
-use datafusion::scalar::ScalarValue;
+use datafusion_common::DFSchema;
+use datafusion_common::ScalarValue;
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
+use datafusion_expr::{Expr, col, lit};
+use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::{Column, Literal};
 use datafusion_physical_expr::{Partitioning, PhysicalExpr, create_physical_expr};
+use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::projection::ProjectionExec;
+use datafusion_physical_plan::repartition::RepartitionExec;
+use datafusion_physical_plan::sorts::sort::SortExec;
+use datafusion_physical_plan::union::UnionExec;
+use datafusion_physical_plan::{ExecutionPlan, expressions};
 use lance_core::ROW_ID;
 use lance_core::datatypes::OnMissing;
 use lance_core::error::LanceOptionExt;
@@ -1021,7 +1021,7 @@ impl Scanner {
                         let expr = if field.name() == DIST_COL {
                             Arc::new(expressions::BinaryExpr::new(
                                 column,
-                                datafusion::logical_expr::Operator::Multiply,
+                                datafusion_expr::Operator::Multiply,
                                 Arc::new(Literal::new(ScalarValue::Float32(Some(
                                     flat_distance_scale,
                                 )))),
@@ -1041,7 +1041,7 @@ impl Scanner {
         let unioned = UnionExec::try_new(flat_inputs)?;
         let unioned: Arc<dyn ExecutionPlan> = Arc::new(RepartitionExec::try_new(
             unioned,
-            datafusion::physical_plan::Partitioning::RoundRobinBatch(1),
+            datafusion_physical_plan::Partitioning::RoundRobinBatch(1),
         )?);
         if keep_quantized_distances {
             let sort = SortExec::new(
@@ -1686,7 +1686,7 @@ impl Scanner {
                         lance_select::RowAddrMask::allow_nothing(),
                     )
                     .serialize(&coverage, self.index_expr_result_format())?;
-                    let plan = datafusion::datasource::memory::MemorySourceConfig::try_new_exec(
+                    let plan = datafusion_datasource::memory::MemorySourceConfig::try_new_exec(
                         &[vec![batch]],
                         self.index_expr_result_format().schema().clone(),
                         None,

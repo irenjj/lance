@@ -26,11 +26,9 @@ lance-core = { workspace = true }
 lance-datafusion = { workspace = true }
 lance-encoding = { workspace = true }
 lance-file = { workspace = true }
-lance-geo = { workspace = true, optional = true }
 lance-io = { workspace = true }
 lance-linalg = { workspace = true }
 lance-index = { workspace = true }
-lance-namespace = { workspace = true }
 lance-select = { workspace = true }
 lance-tokenizer = { workspace = true }
 lance-table = { workspace = true }
@@ -80,10 +78,19 @@ rayon.workspace = true
 futures.workspace = true
 uuid.workspace = true
 arrow.workspace = true
-# TODO: use datafusion sub-modules to reduce build size?
-datafusion.workspace = true
+datafusion-common.workspace = true
+datafusion-common-runtime.workspace = true
+datafusion-execution.workspace = true
+datafusion-session.workspace = true
+datafusion-catalog.workspace = true
+datafusion-datasource.workspace = true
+datafusion-functions-nested.workspace = true
+datafusion-optimizer.workspace = true
+datafusion-sql.workspace = true
 datafusion-functions.workspace = true
+datafusion-functions-aggregate.workspace = true
 datafusion-physical-expr.workspace = true
+datafusion-physical-optimizer.workspace = true
 datafusion-physical-plan.workspace = true
 datafusion-expr.workspace = true
 either.workspace = true
@@ -109,8 +116,6 @@ lzma-sys = { version = "0.1" }
 metrics.workspace = true
 metrics-util.workspace = true
 lance-test-macros = { workspace = true }
-lance-datagen = { workspace = true }
-lance-datafusion = { workspace = true, features = ["datagen"] }
 pretty_assertions = { workspace = true }
 libc = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
@@ -137,12 +142,8 @@ aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-s3 = { workspace = true, default-features = false, features = ["default-https-client", "http-1x", "rt-tokio"] }
 half.workspace = true
-geoarrow-array = { workspace = true }
-geoarrow-schema = { workspace = true }
 geo-types = { workspace = true }
-datafusion-substrait = { workspace = true }
 parquet = { workspace = true }
-parquet-variant-compute = "59.2.0"
 reqwest = { workspace = true, features = ["rustls"] }
 wiremock.workspace = true
 
@@ -160,16 +161,14 @@ name = "memory_components"
 required-features = ["metrics"]
 
 [features]
-default = ["aws", "azure", "gcp", "oss", "huggingface", "tencent", "tos", "goosefs", "geo"]
+default = ["aws", "azure", "gcp", "oss", "huggingface", "tencent", "tos", "goosefs"]
 backtrace = ["lance-core/backtrace"]
 fp16kernels = ["lance-linalg/fp16kernels"]
 # Prevent dynamic linking of lzma, which comes from datafusion
 cli = ["dep:clap", "lzma-sys/static"]
 dynamodb = ["lance-table-runtime/dynamodb", "dep:aws-sdk-dynamodb"]
 dynamodb_tests = ["dynamodb"]
-substrait = ["lance-datafusion/substrait"]
-# Retained for compatibility and forwarded to optional upstream protobuf code.
-protoc = ["lance-datafusion/protoc"]
+protoc = []
 aws = ["lance-io/aws", "lance-table-runtime/aws"]
 gcp = ["lance-io/gcp", "lance-table-runtime/gcp"]
 azure = ["lance-io/azure", "lance-table-runtime/azure"]
@@ -180,7 +179,6 @@ tos = ["lance-io/tos", "lance-table-runtime/tos"]
 huggingface = ["lance-io/huggingface", "lance-table-runtime/huggingface"]
 # Publish object store and memory metrics via the `metrics` crate.
 metrics = ["lance-core/metrics", "lance-io/metrics"]
-geo = ["dep:lance-geo", "lance-datafusion/geo"]
 # Enable slow integration tests (disabled by default in CI)
 slow_tests = []
 # Expose internal update-join controls to the dedicated benchmark target.

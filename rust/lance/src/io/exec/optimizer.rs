@@ -8,24 +8,22 @@ use std::sync::Arc;
 use super::TakeExec;
 use super::filtered_read::FilteredReadExec;
 use arrow_schema::Schema as ArrowSchema;
-#[allow(deprecated)]
-use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
-use datafusion::physical_plan::replace_children_if_necessary;
-use datafusion::{
-    common::tree_node::{Transformed, TransformedResult, TreeNode},
-    config::ConfigOptions,
-    error::Result as DFResult,
-    physical_optimizer::{
-        PhysicalOptimizerRule,
-        enforce_distribution::{
-            DistributionContext, PlanWithKeyRequirements, adjust_input_keys_ordering,
-            ensure_distribution, reorder_join_keys_to_inputs,
-        },
-        optimizer::PhysicalOptimizer,
-    },
-    physical_plan::{ExecutionPlan, projection::ProjectionExec},
-};
+use datafusion_common::Result as DFResult;
+use datafusion_common::config::ConfigOptions;
+use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_physical_expr::{PhysicalExpr, expressions::Column};
+use datafusion_physical_optimizer::{
+    PhysicalOptimizerRule,
+    enforce_distribution::{
+        DistributionContext, PlanWithKeyRequirements, adjust_input_keys_ordering,
+        ensure_distribution, reorder_join_keys_to_inputs,
+    },
+    optimizer::PhysicalOptimizer,
+};
+#[allow(deprecated)]
+use datafusion_physical_plan::coalesce_batches::CoalesceBatchesExec;
+use datafusion_physical_plan::replace_children_if_necessary;
+use datafusion_physical_plan::{ExecutionPlan, projection::ProjectionExec};
 
 /// Rule that eliminates take nodes that are immediately followed by another
 /// take node, fetching the union of the columns in a single node instead.
@@ -265,13 +263,16 @@ pub fn get_physical_optimizer() -> PhysicalOptimizer {
         Arc::new(crate::io::exec::optimizer::CoalesceTake),
         Arc::new(crate::io::exec::optimizer::SimplifyProjection),
         // Push down limit into FilteredReadExec and other Execs via with_fetch()
-        Arc::new(datafusion::physical_optimizer::limit_pushdown::LimitPushdown::new()),
+        Arc::new(datafusion_physical_optimizer::limit_pushdown::LimitPushdown::new()),
         // Insert exchange nodes (RepartitionExec, CoalescePartitionsExec) where needed
         // to satisfy distribution requirements as exec nodes migrate to multi-partition output.
         Arc::new(EnforceDistribution),
         // Strip the `OutputRequirementExec` a plan may state its ordering with;
         // it cannot execute
-        Arc::new(datafusion::physical_optimizer::output_requirements::OutputRequirements::new_remove_mode()),
+        Arc::new(
+            datafusion_physical_optimizer::output_requirements::OutputRequirements::new_remove_mode(
+            ),
+        ),
     ])
 }
 

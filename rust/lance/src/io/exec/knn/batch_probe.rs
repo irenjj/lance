@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{Float32Type, UInt64Type};
 use arrow_array::{Array, ArrayRef, Float32Array, RecordBatch, UInt32Array, cast::AsArray};
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
 use lance_core::ROW_ID;
 use lance_core::utils::tokio::{get_num_compute_intensive_cpus, spawn_cpu};
 use lance_index::metrics::MetricsCollector;

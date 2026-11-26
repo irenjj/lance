@@ -61,10 +61,7 @@ fn posting_schema(
         .map(|field| {
             if field.name() == COMPRESSED_POSITION_COL {
                 let mut metadata = field.metadata().clone();
-                metadata.insert(
-                    STRUCTURAL_ENCODING_META_KEY.into(),
-                    STRUCTURAL_ENCODING_MINIBLOCK.into(),
-                );
+                metadata.insert(STRUCTURAL_ENCODING_META_KEY, STRUCTURAL_ENCODING_MINIBLOCK);
                 Arc::new(field.as_ref().clone().with_metadata(metadata))
             } else {
                 field.clone()

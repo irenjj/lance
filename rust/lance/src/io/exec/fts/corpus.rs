@@ -6,18 +6,18 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, Weak};
 
-use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::execution_plan::reset_plan_states;
-use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_execution::SendableRecordBatchStream;
+use datafusion_physical_expr::{Distribution, PhysicalExpr};
+use datafusion_physical_plan::ExecutionPlanProperties;
+use datafusion_physical_plan::execution_plan::reset_plan_states;
+use datafusion_physical_plan::metrics::{MetricValue, MetricsSet};
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::{
     ChildrenPropertiesMode, DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
     ReplaceChildrenOptions,
 };
-use datafusion_physical_expr::{Distribution, PhysicalExpr};
-use datafusion_physical_plan::ExecutionPlanProperties;
 use lance_core::utils::futures::FinallyStreamExt;
 use lance_index::scalar::inverted::query::Operator;
 use lance_index::scalar::inverted::{CombinedFieldsBM25Scorer, MemBM25Scorer, PreparedBm25Query};
@@ -463,8 +463,8 @@ impl SharedFtsScorerExec {
     ///
     /// ```
     /// # use std::sync::Arc;
-    /// # use datafusion::physical_plan::ExecutionPlan;
-    /// # use datafusion::error::Result;
+    /// # use datafusion_physical_plan::ExecutionPlan;
+    /// # use datafusion_common::Result;
     /// # use lance::io::exec::fts::SharedFtsScorerExec;
     /// # fn rebuild(owner: &SharedFtsScorerExec, decoded_input: Arc<dyn ExecutionPlan>)
     /// #     -> Result<SharedFtsScorerExec> {
@@ -706,7 +706,7 @@ impl ExecutionPlan for SharedFtsScorerExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         if partition != 0 {
             return Err(DataFusionError::Internal(format!(

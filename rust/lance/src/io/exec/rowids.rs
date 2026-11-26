@@ -6,20 +6,20 @@ use std::sync::{Arc, OnceLock};
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array, cast::AsArray, types::UInt64Type};
 use arrow_schema::{Schema, SchemaRef};
-use datafusion::common::ColumnStatistics;
-use datafusion::common::stats::Precision;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result};
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::ChildStats;
-use datafusion::physical_plan::StatisticsArgs;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_common::ColumnStatistics;
+use datafusion_common::stats::Precision;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result};
+use datafusion_execution::SendableRecordBatchStream;
 use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_plan::ChildStats;
 use datafusion_physical_plan::Statistics;
+use datafusion_physical_plan::StatisticsArgs;
 use datafusion_physical_plan::execution_plan::CardinalityEffect;
+use datafusion_physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{StreamExt, TryStreamExt};
 use lance_core::{
     Error as LanceError, ROW_ADDR, ROW_ADDR_FIELD, ROW_ID, ROW_OFFSET, ROW_OFFSET_FIELD,
@@ -179,7 +179,7 @@ impl AddRowAddrExec {
     fn do_execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let index_prereq = self
             .row_id_index
@@ -288,7 +288,7 @@ impl ExecutionPlan for AddRowAddrExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let schema = self.schema();
         let this = self.clone();
@@ -517,7 +517,7 @@ impl ExecutionPlan for AddRowOffsetExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let input_stream = self.input.execute(partition, context)?;
         let schema = self.schema();
@@ -549,9 +549,10 @@ mod test {
 
     use arrow_array::{Int32Array, RecordBatchIterator, record_batch};
     use arrow_schema::{DataType, Field};
-    use datafusion::physical_plan::StatisticsArgs;
-    use datafusion::physical_plan::StatisticsContext;
-    use datafusion::{datasource::memory::MemorySourceConfig, prelude::SessionContext};
+    use datafusion_datasource::memory::MemorySourceConfig;
+    use datafusion_expr::SessionContext;
+    use datafusion_physical_plan::StatisticsArgs;
+    use datafusion_physical_plan::StatisticsContext;
     use futures::TryStreamExt;
     use lance_core::{ROW_ADDR, ROW_ID_FIELD};
     use lance_datafusion::exec::OneShotExec;

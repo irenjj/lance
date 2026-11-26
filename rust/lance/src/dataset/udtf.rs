@@ -4,8 +4,8 @@
 use crate::Dataset;
 use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
-use datafusion::catalog::{Session, TableFunctionImpl, TableProvider};
-use datafusion::common::{DataFusionError, ScalarValue};
+use datafusion_catalog::{Session, TableFunctionImpl, TableProvider};
+use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::{Expr, TableType};
 use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::expressions::Column;
@@ -40,7 +40,7 @@ impl FtsTableProvider {
         with_row_id: bool,
         with_row_addr: bool,
         ordered: bool,
-    ) -> datafusion::common::Result<Self> {
+    ) -> datafusion_common::Result<Self> {
         let dataset_schema = Schema::from(dataset.schema());
         if dataset_schema.column_with_name(SCORE_COL).is_some() {
             return Err(DataFusionError::Plan(format!(
@@ -77,10 +77,10 @@ impl TableProvider for FtsTableProvider {
     async fn scan(
         &self,
         _state: &dyn Session,
-        projection: Option<&Vec<usize>>,
+        projection: Option<&[usize]>,
         filters: &[Expr],
         limit: Option<usize>,
-    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         let mut scan = self.dataset.scan();
         scan.full_text_search(self.fts_query.clone())?;
         let columns: Vec<&str> = match projection {
@@ -134,7 +134,7 @@ impl TableProvider for FtsTableProvider {
                 let column = Column::new_with_schema(name, plan_schema.as_ref())?;
                 Ok((Arc::new(column) as Arc<dyn PhysicalExpr>, name.to_string()))
             })
-            .collect::<datafusion::common::Result<Vec<_>>>()?;
+            .collect::<datafusion_common::Result<Vec<_>>>()?;
         Ok(Arc::new(ProjectionExec::try_new(exprs, plan)?))
     }
 }
@@ -150,7 +150,7 @@ impl TableProvider for FtsTableProvider {
 /// use crate::datafusion::LanceTableProvider;
 /// use crate::dataset::udtf::FtsQueryUDTF;
 /// use crate::dataset::udtf::FtsQueryUDTFBuilder;
-/// use datafusion::prelude::SessionContext;
+/// use datafusion_expr::SessionContext;
 ///
 /// let ctx = SessionContext::new();
 /// let fts_query_udtf = FtsQueryUDTFBuilder::builder()
@@ -185,7 +185,7 @@ pub struct FtsQueryUDTF {
 }
 
 impl TableFunctionImpl for FtsQueryUDTF {
-    fn call(&self, expr: &[Expr]) -> datafusion::common::Result<Arc<dyn TableProvider>> {
+    fn call(&self, expr: &[Expr]) -> datafusion_common::Result<Arc<dyn TableProvider>> {
         // Parse params: table_name, fts_query, options
         if expr.len() < 2 || expr.len() > 3 {
             return Err(DataFusionError::Execution(
@@ -229,7 +229,7 @@ impl TableFunctionImpl for FtsQueryUDTF {
     }
 }
 
-fn parse_query_options(options: &str) -> datafusion::common::Result<(bool, bool, bool)> {
+fn parse_query_options(options: &str) -> datafusion_common::Result<(bool, bool, bool)> {
     let value: Value = serde_json::from_str(options)
         .map_err(|e| Error::invalid_input(format!("invalid json options: {}", e)))?;
     Ok((
@@ -240,7 +240,7 @@ fn parse_query_options(options: &str) -> datafusion::common::Result<(bool, bool,
 }
 
 /// Reads a boolean option. An absent or null value is false.
-fn parse_bool_option(options: &Value, key: &str) -> datafusion::common::Result<bool> {
+fn parse_bool_option(options: &Value, key: &str) -> datafusion_common::Result<bool> {
     match options.get(key) {
         None | Some(Value::Null) => Ok(false),
         Some(Value::Bool(value)) => Ok(*value),

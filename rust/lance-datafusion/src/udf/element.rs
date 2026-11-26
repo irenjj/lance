@@ -44,14 +44,14 @@ use arrow_array::{
     RecordBatchOptions, StructArray,
 };
 use arrow_schema::{DataType, Field, FieldRef, Schema, SchemaRef};
-use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion::logical_expr::{
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_common::{DataFusionError, Result as DFResult, ScalarValue, exec_err, plan_err};
+use datafusion_expr::Expr;
+use datafusion_expr::{
     ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
     Volatility,
 };
-use datafusion::physical_plan::PhysicalExpr;
-use datafusion::prelude::Expr;
-use datafusion_common::{DataFusionError, Result as DFResult, ScalarValue, exec_err, plan_err};
+use datafusion_physical_plan::PhysicalExpr;
 use lance_core::{Error, Result};
 
 use crate::planner::Planner;

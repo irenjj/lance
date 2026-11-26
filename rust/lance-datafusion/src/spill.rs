@@ -14,20 +14,18 @@ use std::{
 use arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, Schema, SchemaRef};
-use datafusion::{
-    catalog::{TableProvider, streaming::StreamingTable},
-    execution::{
-        SendableRecordBatchStream, SpillFile, TaskContext, disk_manager::DiskManager,
-        runtime_env::RuntimeEnv,
-    },
-    physical_plan::{
-        SpillManager,
-        metrics::{ExecutionPlanMetricsSet, SpillMetrics},
-        stream::RecordBatchStreamAdapter,
-        streaming::PartitionStream,
-    },
-};
+use datafusion_catalog::{TableProvider, streaming::StreamingTable};
 use datafusion_common::DataFusionError;
+use datafusion_execution::{
+    SendableRecordBatchStream, SpillFile, TaskContext, disk_manager::DiskManager,
+    runtime_env::RuntimeEnv,
+};
+use datafusion_physical_plan::{
+    SpillManager,
+    metrics::{ExecutionPlanMetricsSet, SpillMetrics},
+    stream::RecordBatchStreamAdapter,
+    streaming::PartitionStream,
+};
 use futures::StreamExt;
 use lance_arrow::memory::MemoryAccumulator;
 use lance_core::error::LanceOptionExt;
@@ -219,8 +217,8 @@ impl MaterializedStream {
 /// # use std::sync::Arc;
 /// # use arrow_array::RecordBatch;
 /// # use arrow_schema::Schema;
-/// # use datafusion::execution::{SendableRecordBatchStream, runtime_env::RuntimeEnvBuilder};
-/// # use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+/// # use datafusion_execution::{SendableRecordBatchStream, runtime_env::RuntimeEnvBuilder};
+/// # use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 /// # use datafusion_common::DataFusionError;
 /// # use lance_datafusion::spill::materialize_replayable_stream;
 /// # async fn example() -> Result<(), DataFusionError> {
@@ -324,11 +322,11 @@ pub async fn materialize_stream(
 /// # use std::sync::Arc;
 /// # use arrow_array::{Int32Array, RecordBatch};
 /// # use arrow_schema::{DataType, Field, Schema};
-/// # use datafusion::execution::SendableRecordBatchStream;
-/// # use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+/// # use datafusion_execution::SendableRecordBatchStream;
+/// # use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 /// # use futures::TryStreamExt;
 /// # use lance_datafusion::exec::provider_to_stream;
-/// # use datafusion::execution::disk_manager::DiskManager;
+/// # use datafusion_execution::disk_manager::DiskManager;
 /// # use lance_datafusion::spill::spilling_table_provider_with_job_disk_manager;
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1037,7 +1035,7 @@ impl AsyncStreamReader {
 mod tests {
     use arrow_array::{Int32Array, record_batch};
     use arrow_schema::{DataType, Field};
-    use datafusion::execution::{disk_manager::DiskManagerBuilder, runtime_env::RuntimeEnvBuilder};
+    use datafusion_execution::{disk_manager::DiskManagerBuilder, runtime_env::RuntimeEnvBuilder};
     use futures::{StreamExt, TryStreamExt, poll};
     use lance_core::utils::tempfile::{TempStdFile, TempStdPath};
     use rstest::rstest;
@@ -1092,7 +1090,7 @@ mod tests {
                 .clone_inner()
                 .iter()
                 .filter_map(|metric| match metric.value() {
-                    datafusion::physical_plan::metrics::MetricValue::SpillCount(value) => {
+                    datafusion_physical_plan::metrics::MetricValue::SpillCount(value) => {
                         Some(value.value())
                     }
                     _ => None,
@@ -1138,7 +1136,7 @@ mod tests {
                 .clone_inner()
                 .iter()
                 .filter_map(|metric| match metric.value() {
-                    datafusion::physical_plan::metrics::MetricValue::SpillCount(value) => {
+                    datafusion_physical_plan::metrics::MetricValue::SpillCount(value) => {
                         Some(value.value())
                     }
                     _ => None,

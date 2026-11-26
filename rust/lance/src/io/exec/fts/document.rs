@@ -6,13 +6,13 @@
 use std::sync::Arc;
 
 use arrow_schema::DataType;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_execution::SendableRecordBatchStream;
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion_physical_plan::ExecutionPlanProperties;
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use lance_core::{Error, ROW_ID, Result, datatypes::Schema as LanceSchema};
 use lance_index::scalar::inverted::DocumentGranularity;
 use lance_index::scalar::registry::VALUE_COLUMN_NAME;
@@ -45,7 +45,7 @@ impl FtsDocumentExec {
     /// ```
     /// # use lance::{io::exec::fts::FtsDocumentExec, Result};
     /// # use lance_core::datatypes::Schema;
-    /// # use datafusion::physical_plan::ExecutionPlan;
+    /// # use datafusion_physical_plan::ExecutionPlan;
     /// # fn rebuild(plan: &FtsDocumentExec, schema: &Schema) -> Result<FtsDocumentExec> {
     /// FtsDocumentExec::try_new(
     ///     plan.children()[0].clone(),
@@ -167,7 +167,7 @@ impl ExecutionPlan for FtsDocumentExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         transform_fts_document_stream(
             self.input.execute(partition, context)?,

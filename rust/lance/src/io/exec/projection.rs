@@ -4,16 +4,16 @@
 use std::sync::{Arc, OnceLock};
 
 use arrow_schema::{DataType, Field, FieldRef, Fields, Schema as ArrowSchema};
-use datafusion::config::ConfigOptions;
-use datafusion::error::{DataFusionError, Result};
-use datafusion::logical_expr::ScalarUDF;
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::scalar::ScalarValue;
+use datafusion_common::ScalarValue;
+use datafusion_common::config::ConfigOptions;
+use datafusion_common::{DataFusionError, Result};
+use datafusion_expr::ScalarUDF;
 use datafusion_functions::core::getfield::GetFieldFunc;
 use datafusion_functions::core::named_struct::NamedStructFunc;
 use datafusion_physical_expr::expressions::{Column, Literal};
 use datafusion_physical_expr::{PhysicalExpr, ScalarFunctionExpr};
+use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::projection::ProjectionExec;
 
 fn get_field_func() -> Arc<ScalarUDF> {
     static GET_FIELD_FUNC: OnceLock<Arc<ScalarUDF>> = OnceLock::new();

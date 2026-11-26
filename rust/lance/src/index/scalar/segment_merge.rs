@@ -12,8 +12,8 @@
 use std::sync::Arc;
 
 use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_execution::SendableRecordBatchStream;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use lance_core::ROW_ADDR;
 use lance_index::metrics::NoOpMetricsCollector;
 use lance_index::scalar::lance_format::LanceIndexStore;

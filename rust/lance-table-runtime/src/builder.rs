@@ -2,27 +2,23 @@
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use super::refs::{Branches, Ref, Refs, check_valid_branch, normalize_branch, standardize_branch};
+use super::refs::{Branches, Ref, Refs, check_valid_branch};
 use crate::branch_location::BranchLocation;
-use crate::namespace_manifest::LanceNamespaceExternalManifestStore;
 use crate::{Table, TableSession};
 use futures::{FutureExt, TryStreamExt};
 use lance_core::utils::tracing::{DATASET_LOADING_EVENT, TRACE_DATASET_EVENTS};
 use lance_core::{Error, Result};
 use lance_file::reader::FileReaderOptions;
 use lance_io::object_store::{
-    DEFAULT_CLOUD_IO_PARALLELISM, LanceNamespaceStorageOptionsProvider, ObjectStore,
-    ObjectStoreParams, StorageOptions, StorageOptionsAccessor,
+    DEFAULT_CLOUD_IO_PARALLELISM, ObjectStore, ObjectStoreParams, StorageOptions,
+    StorageOptionsAccessor,
 };
-use lance_namespace::LanceNamespace;
-use lance_namespace::models::DescribeTableRequest;
 use lance_table::{
     feature_flags::ensure_can_read_manifest,
     format::{
         Manifest, populate_manifest_schema_dictionaries,
         storage_contract::check_manifest_storage_version,
     },
-    io::commit::external_manifest::ExternalManifestCommitHandler,
     io::commit::{CommitHandler, ManifestLocation, commit_handler_from_url},
 };
 #[cfg(feature = "aws")]
@@ -47,12 +43,6 @@ pub struct TableBuilder {
     storage_options_override: Option<HashMap<String, String>>,
     /// Runtime-only exact object store bindings keyed by base path URI.
     base_store_params: HashMap<String, ObjectStoreParams>,
-    /// Namespace-managed table info `(client, table_id)`, set by `from_namespace`
-    /// when the table uses managed versioning. The commit handler is built in
-    /// `build_object_store`, rooted at the resolved table path; the branch a
-    /// namespace request targets is derived per call from the base path the
-    /// handler is handed.
-    namespace_managed: Option<(Arc<dyn LanceNamespace>, Vec<String>)>,
 }
 
 impl std::fmt::Debug for TableBuilder {
@@ -69,7 +59,6 @@ impl std::fmt::Debug for TableBuilder {
                 &self.storage_options_override.is_some(),
             )
             .field("base_store_params", &!self.base_store_params.is_empty())
-            .field("namespace_managed", &self.namespace_managed.is_some())
             .finish()
     }
 }
@@ -87,69 +76,7 @@ impl TableBuilder {
             file_reader_options: None,
             storage_options_override: None,
             base_store_params: HashMap::new(),
-            namespace_managed: None,
         }
-    }
-
-    /// Create a TableBuilder from a LanceNamespace client
-    ///
-    /// This will automatically fetch the table location and storage options from the namespace
-    /// client via `describe_table()`.
-    ///
-    /// Storage options from the namespace client will override any user-provided storage options
-    /// set via `.with_storage_options()`. This ensures the namespace client is always the source
-    /// of truth for storage options.
-    ///
-    /// # Arguments
-    /// * `namespace_client` - The namespace client implementation to fetch table info from
-    /// * `table_id` - The table identifier (e.g., vec!["my_table"])
-    ///
-    #[allow(deprecated)]
-    pub async fn from_namespace(
-        namespace_client: Arc<dyn LanceNamespace>,
-        table_id: Vec<String>,
-    ) -> Result<Self> {
-        let request = DescribeTableRequest {
-            id: Some(table_id.clone()),
-            vend_credentials: Some(true),
-            ..Default::default()
-        };
-
-        let response = namespace_client
-            .describe_table(request)
-            .await
-            .map_err(|e| Error::namespace_source(Box::new(e)))?;
-
-        let table_uri = response.location.ok_or_else(|| {
-            Error::namespace_source(Box::new(std::io::Error::other(
-                "Table location not found in namespace response",
-            )))
-        })?;
-
-        let mut builder = Self::from_uri(&table_uri);
-
-        // Defer building the commit handler to load(): the manifest store is
-        // rooted at the resolved table path, which is only known once the
-        // object store is built.
-        if response.managed_versioning == Some(true) {
-            builder.namespace_managed = Some((namespace_client.clone(), table_id.clone()));
-        }
-
-        // Use namespace storage options if available
-        let namespace_storage_options = response.storage_options;
-
-        builder.storage_options_override = namespace_storage_options.clone();
-
-        if let Some(initial_opts) = namespace_storage_options {
-            let provider: Arc<dyn lance_io::object_store::StorageOptionsProvider> = Arc::new(
-                LanceNamespaceStorageOptionsProvider::new(namespace_client, table_id),
-            );
-            builder.options.storage_options_accessor = Some(Arc::new(
-                StorageOptionsAccessor::with_initial_and_provider(initial_opts, provider),
-            ));
-        }
-
-        Ok(builder)
     }
 }
 
@@ -432,23 +359,9 @@ impl TableBuilder {
             }
         };
 
-        // Resolve the commit handler: an explicitly set one wins; otherwise a
-        // namespace-managed table builds a manifest store rooted at the resolved
-        // table path (the branch a request targets is derived per call from the
-        // base path the handler is handed); otherwise fall back to the default
-        // for the uri. Resolving here (not in load) keeps this pub method
-        // consistent for every caller.
         let commit_handler: Arc<dyn CommitHandler> =
             if let Some(commit_handler) = self.commit_handler.take() {
                 commit_handler
-            } else if let Some((namespace_client, table_id)) = self.namespace_managed.take() {
-                Arc::new(ExternalManifestCommitHandler {
-                    external_manifest_store: Arc::new(LanceNamespaceExternalManifestStore::new(
-                        namespace_client,
-                        table_id,
-                        base_path.clone(),
-                    )),
-                })
             } else {
                 commit_handler_from_url(&self.table_uri, &Some(self.options.clone())).await?
             };
@@ -470,7 +383,6 @@ impl TableBuilder {
             ));
         }
         let uses_external_or_custom_commit_handler = self.commit_handler.is_some()
-            || self.namespace_managed.is_some()
             || Url::parse(&self.table_uri).is_ok_and(|url| url.scheme() == "s3+ddb");
         if uses_external_or_custom_commit_handler {
             return Err(Error::not_supported(
@@ -563,13 +475,6 @@ impl TableBuilder {
         let base_store_params = (!self.base_store_params.is_empty())
             .then(|| Arc::new(std::mem::take(&mut self.base_store_params)));
 
-        // A namespace-managed table is always addressed at its root uri, so the
-        // effective branch is resolvable before loading: the base path is
-        // qualified up front and the manifest store derives the branch from it.
-        // An explicitly supplied commit handler opts out of the managed flow.
-        let managed_store_active =
-            self.namespace_managed.is_some() && self.commit_handler.is_none();
-
         let (object_store, base_path, commit_handler) = self.build_object_store().await?;
 
         // Two cases that need to check out after loading the manifest:
@@ -581,7 +486,7 @@ impl TableBuilder {
         let mut need_delay_checkout = false;
         let (mut branch, mut version_number) = match target_ref.clone() {
             Some(Ref::Version(branch, version_number)) => {
-                if branch.is_some() && !managed_store_active {
+                if branch.is_some() {
                     need_delay_checkout = true;
                 }
                 (branch, version_number)
@@ -603,7 +508,7 @@ impl TableBuilder {
                 );
                 match refs.tags().get(&tag_name).await {
                     Ok(tag_content) => {
-                        if tag_content.branch.is_some() && !managed_store_active {
+                        if tag_content.branch.is_some() {
                             // The tag's chain lives under a different base path
                             // and the unmanaged handler resolves versions by
                             // base path only, so load the root's latest first
@@ -614,12 +519,7 @@ impl TableBuilder {
                             (tag_content.branch.clone(), Some(tag_content.version))
                         }
                     }
-                    Err(e) => {
-                        // A managed table is always rooted at the namespace
-                        // location, so a tag missing here is missing.
-                        if managed_store_active {
-                            return Err(e);
-                        }
+                    Err(_) => {
                         need_delay_checkout = true;
                         (None, None)
                     }
@@ -635,22 +535,6 @@ impl TableBuilder {
         {
             check_valid_branch(branch_name)?;
         }
-
-        // For a managed table the branch is known before loading; point the base
-        // path and uri at the branch chain so the loaded dataset is rooted there
-        // (data placement, refs and the path-derived store branch all follow the
-        // base path).
-        let (base_path, table_uri) = if managed_store_active && branch.is_some() {
-            let branch_location = BranchLocation {
-                path: base_path,
-                uri: table_uri,
-                branch: None,
-            }
-            .find_branch(branch.as_deref())?;
-            (branch_location.path, branch_location.uri)
-        } else {
-            (base_path, table_uri)
-        };
 
         // A delayed checkout resolves (branch, version) against the right chain
         // afterwards, so the uri's chain only needs its latest version here: the
@@ -673,20 +557,6 @@ impl TableBuilder {
             base_store_params,
         )
         .await?;
-
-        if managed_store_active {
-            // The base path was qualified above, so the loaded manifest must
-            // already be on the requested branch; a mismatch means the namespace
-            // resolved another chain.
-            let requested_branch = branch.as_deref().and_then(standardize_branch);
-            if table.manifest.branch.as_deref() != requested_branch.as_deref() {
-                return Err(Error::internal(format!(
-                    "open of branch '{}' resolved a manifest belonging to branch '{}'",
-                    normalize_branch(branch.as_deref()),
-                    normalize_branch(table.manifest.branch.as_deref()),
-                )));
-            }
-        }
 
         if need_delay_checkout {
             if let Some(Ref::Tag(tag_name)) = target_ref {
@@ -820,8 +690,6 @@ mod tests {
     use lance_table::io::commit::UnsafeCommitHandler;
 
     use super::*;
-    use lance_namespace::models::DescribeTableResponse;
-    use std::sync::Mutex;
 
     #[tokio::test]
     async fn opens_and_checks_out_table_metadata() {
@@ -988,16 +856,6 @@ mod tests {
     #[derive(Debug)]
     struct TestStorageOptionsProvider;
 
-    #[derive(Debug)]
-    struct TestNamespace;
-
-    #[async_trait]
-    impl LanceNamespace for TestNamespace {
-        fn namespace_id(&self) -> String {
-            "test-namespace".to_string()
-        }
-    }
-
     #[async_trait]
     impl StorageOptionsProvider for TestStorageOptionsProvider {
         async fn fetch_storage_options(&self) -> Result<Option<HashMap<String, String>>> {
@@ -1049,15 +907,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_manifest_locations_rejects_external_and_custom_commit_handlers() {
-        let mut namespace_builder = TableBuilder::from_uri("memory://namespace-table");
-        namespace_builder.namespace_managed =
-            Some((Arc::new(TestNamespace), vec!["namespace-table".to_string()]));
-
         let builders = [
             TableBuilder::from_uri("memory://custom-handler-table")
                 .with_commit_handler(Arc::new(UnsafeCommitHandler)),
             TableBuilder::from_uri("s3+ddb://bucket/table.lance?ddbTableName=manifest-table"),
-            namespace_builder,
         ];
 
         for builder in builders {
@@ -1068,61 +921,5 @@ mod tests {
                     .contains("does not support external or custom commit handlers")
             );
         }
-    }
-
-    /// Mock namespace that records the describe request and vends storage
-    /// options only when explicitly asked -- the behavior of a fail-closed
-    /// server.
-    #[derive(Debug, Default)]
-    struct FailClosedNamespace {
-        seen: Mutex<Option<DescribeTableRequest>>,
-    }
-
-    #[async_trait]
-    impl LanceNamespace for FailClosedNamespace {
-        fn namespace_id(&self) -> String {
-            "fail-closed-mock".to_string()
-        }
-
-        async fn describe_table(
-            &self,
-            request: DescribeTableRequest,
-        ) -> lance_namespace::Result<DescribeTableResponse> {
-            let vend = request.vend_credentials == Some(true);
-            *self.seen.lock().unwrap() = Some(request);
-            Ok(DescribeTableResponse {
-                location: Some("memory://ns-table".to_string()),
-                storage_options: vend
-                    .then(|| HashMap::from([("vended".to_string(), "true".to_string())])),
-                ..Default::default()
-            })
-        }
-    }
-
-    /// The initial namespace describe must opt into credential vending
-    /// explicitly: a fail-closed server returns no storage options for an
-    /// unset flag, and the refresh provider is only installed when this first
-    /// response already carries them (ENT-2008).
-    #[tokio::test]
-    async fn test_from_namespace_requests_vended_credentials() {
-        let namespace = Arc::new(FailClosedNamespace::default());
-        let builder = TableBuilder::from_namespace(namespace.clone(), vec!["t".to_string()])
-            .await
-            .unwrap();
-
-        let seen = namespace.seen.lock().unwrap().take().unwrap();
-        assert_eq!(seen.vend_credentials, Some(true));
-        assert_eq!(seen.id, Some(vec!["t".to_string()]));
-        // The vended options made it onto the builder, so the refresh
-        // provider path (installed only when the first response carries
-        // options) is reachable.
-        assert_eq!(
-            builder
-                .storage_options_override
-                .as_ref()
-                .and_then(|o| o.get("vended"))
-                .map(String::as_str),
-            Some("true")
-        );
     }
 }

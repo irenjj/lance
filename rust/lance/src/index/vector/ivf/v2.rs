@@ -27,8 +27,8 @@ use arrow_array::{
 };
 use arrow_schema::DataType;
 use async_trait::async_trait;
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_execution::SendableRecordBatchStream;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::future::BoxFuture;

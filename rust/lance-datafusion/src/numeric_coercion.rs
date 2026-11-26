@@ -13,12 +13,12 @@ use std::collections::VecDeque;
 
 use arrow_buffer::i256;
 use arrow_schema::{DECIMAL128_MAX_PRECISION, DataType};
-use datafusion::common::DFSchema;
-use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::logical_expr::expr::InList;
-use datafusion::logical_expr::{Between, BinaryExpr, ExprSchemable, Operator};
-use datafusion::prelude::{Expr, lit};
-use datafusion::scalar::ScalarValue;
+use datafusion_common::DFSchema;
+use datafusion_common::ScalarValue;
+use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_expr::expr::InList;
+use datafusion_expr::{Between, BinaryExpr, ExprSchemable, Operator};
+use datafusion_expr::{Expr, lit};
 use lance_core::Result;
 use lance_core::datatypes::Schema;
 
@@ -701,8 +701,8 @@ mod tests {
         ArrayRef, BooleanArray, Decimal128Array, Decimal256Array, Float32Array, Int64Array,
         RecordBatch, UInt64Array, cast::AsArray, record_batch,
     };
-    use datafusion::prelude::col;
     use datafusion_common::tree_node::TreeNodeRecursion;
+    use datafusion_expr::col;
     use rstest::rstest;
     use std::sync::Arc;
 

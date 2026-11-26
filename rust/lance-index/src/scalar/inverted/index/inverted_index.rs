@@ -511,7 +511,9 @@ impl InvertedIndex {
     ) -> Result<ScalarIndexParams> {
         let (params, metadata_reader) = Self::load_params_with_metadata(store).await?;
         let format_version = match metadata_reader {
-            Some(reader) => parse_format_version_from_metadata(&reader.schema().metadata)?,
+            Some(reader) => parse_format_version_from_metadata(&arrow_schema::Metadata::from(
+                reader.schema().metadata.clone(),
+            ))?,
             None => InvertedListFormatVersion::V1,
         };
         Self::params_for_training(
@@ -603,7 +605,9 @@ impl InvertedIndex {
                     .map(|name| TokenSetFormat::from_str(name))
                     .transpose()?
                     .unwrap_or(TokenSetFormat::Arrow);
-                let format_version = parse_format_version_from_metadata(&reader.schema().metadata)?;
+                let format_version = parse_format_version_from_metadata(
+                    &arrow_schema::Metadata::from(reader.schema().metadata.clone()),
+                )?;
 
                 // Load deleted_fragments if present (optional for backward compatibility)
                 let deleted_fragments = if reader.num_rows() > 0 {
@@ -716,7 +720,9 @@ impl InvertedIndex {
                     .map(|name| TokenSetFormat::from_str(name))
                     .transpose()?
                     .unwrap_or(TokenSetFormat::Arrow);
-                let format_version = parse_format_version_from_metadata(&reader.schema().metadata)?;
+                let format_version = parse_format_version_from_metadata(
+                    &arrow_schema::Metadata::from(reader.schema().metadata.clone()),
+                )?;
 
                 // Load deleted_fragments if present (optional for backward compatibility)
                 let deleted_fragments = if reader.num_rows() > 0 {

@@ -15,29 +15,29 @@ use arrow_array::cast::AsArray;
 use arrow_array::types::UInt64Type;
 use arrow_array::{Array, BooleanArray, RecordBatch, RecordBatchOptions, UInt32Array};
 use arrow_schema::{Schema as ArrowSchema, SchemaRef};
-use datafusion::catalog::Session;
-use datafusion::common::runtime::SpawnedTask;
-use datafusion::common::stats::Precision;
-use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_plan::ChildStats;
-use datafusion::physical_plan::StatisticsArgs;
-use datafusion::physical_plan::StatisticsContext;
-use datafusion::physical_plan::apply_expression_roots;
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datafusion::physical_plan::stream::{RecordBatchReceiverStream, RecordBatchStreamAdapter};
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
-    execution_plan::{Boundedness, EmissionType},
-};
+use datafusion_catalog::Session;
+use datafusion_common::stats::Precision;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_common_runtime::SpawnedTask;
+use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use datafusion_expr::Expr;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::projection::project_ordering;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
+use datafusion_physical_plan::ChildStats;
 use datafusion_physical_plan::Statistics;
+use datafusion_physical_plan::StatisticsArgs;
+use datafusion_physical_plan::StatisticsContext;
+use datafusion_physical_plan::apply_expression_roots;
 use datafusion_physical_plan::filter::FilterExec;
+use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::metrics::{BaselineMetrics, Count, MetricsSet, Time};
+use datafusion_physical_plan::stream::{RecordBatchReceiverStream, RecordBatchStreamAdapter};
+use datafusion_physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
+    execution_plan::{Boundedness, EmissionType},
+};
 use futures::stream::BoxStream;
 use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt, future};
 use lance_arrow::RecordBatchExt;
@@ -3971,7 +3971,7 @@ impl ExecutionPlan for FilteredReadExec {
         &self,
         input_stats: &[Arc<Statistics>],
         args: &StatisticsArgs,
-    ) -> datafusion::error::Result<Arc<Statistics>> {
+    ) -> datafusion_common::Result<Arc<Statistics>> {
         let partition = args.partition();
         if let RowSelector::RowStream(_) = &self.input {
             // At most one output row per input row, since keys of deleted or
@@ -4060,7 +4060,7 @@ impl ExecutionPlan for FilteredReadExec {
             return Ok(Arc::new(Statistics {
                 num_rows,
                 total_byte_size: estimated_total_byte_size(num_rows, self.bytes_per_row),
-                ..datafusion::physical_plan::Statistics::new_unknown(self.schema().as_ref())
+                ..datafusion_physical_plan::Statistics::new_unknown(self.schema().as_ref())
             }));
         };
 

@@ -4,7 +4,6 @@
 //! Rewrites for signed-zero literals and NaN sign bits in comparisons.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
 
 use arrow_array::cast::AsArray;
@@ -12,19 +11,19 @@ use arrow_array::types::{Float16Type, Float32Type, Float64Type};
 use arrow_array::{ArrayRef, ArrowNativeTypeOp, ArrowPrimitiveType, BooleanArray};
 use arrow_buffer::{BooleanBuffer, NullBuffer};
 use arrow_schema::DataType;
-use datafusion::error::Result as DFResult;
-use datafusion::functions_nested::expr_fn::array_has_any;
-use datafusion::logical_expr::expr::{Between, InList, ScalarFunction};
-use datafusion::logical_expr::{
-    BinaryExpr, ColumnarValue, ExprSchemable, Operator, ScalarFunctionArgs, ScalarUDF,
-    ScalarUDFImpl, Signature, TypeSignature, Volatility,
-};
-use datafusion::prelude::{Expr, lit};
-use datafusion::scalar::ScalarValue::{self, Float16, Float32, Float64};
+use datafusion_common::Result as DFResult;
+use datafusion_common::ScalarValue::{self, Float16, Float32, Float64};
 use datafusion_common::metadata::FieldMetadata;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{DFSchema, exec_err};
+use datafusion_expr::expr::{Between, InList, ScalarFunction};
+use datafusion_expr::{
+    BinaryExpr, ColumnarValue, ExprSchemable, Operator, ScalarFunctionArgs, ScalarUDF,
+    ScalarUDFImpl, Signature, TypeSignature, Volatility,
+};
+use datafusion_expr::{Expr, lit};
+use datafusion_functions_nested::expr_fn::array_has_any;
 use half::f16;
 use lance_core::Result;
 
@@ -390,11 +389,11 @@ fn negative_infinity(value: &ScalarValue) -> Option<ScalarValue> {
 /// those implementation-level comparisons while remaining invisible to the
 /// physical literal value and index query.
 fn raw_float_literal(value: ScalarValue, metadata: Option<&FieldMetadata>) -> Expr {
-    let mut inner: BTreeMap<String, String> = metadata
+    let mut inner = metadata
         .map(|metadata| metadata.inner().clone())
         .unwrap_or_default();
     inner.insert(RAW_FLOAT_LITERAL_MARKER.to_string(), "1".to_string());
-    Expr::Literal(value, Some(FieldMetadata::new(inner)))
+    Expr::Literal(value, Some(FieldMetadata::new(inner.into())))
 }
 
 fn is_raw_float_literal(metadata: Option<&FieldMetadata>) -> bool {
@@ -823,8 +822,8 @@ mod tests {
 
     use arrow_array::{Array, Float64Array};
     use arrow_schema::{Field, Schema};
-    use datafusion::functions_nested::expr_fn::array_has;
-    use datafusion::prelude::{col, lit};
+    use datafusion_expr::{col, lit};
+    use datafusion_functions_nested::expr_fn::array_has;
     use rstest::rstest;
 
     use super::*;
@@ -920,7 +919,7 @@ mod tests {
     #[case::gt(Operator::Gt, -0.0)]
     #[case::gt_eq(Operator::GtEq, 1.0)]
     fn volatile_operand_is_compared_once(#[case] op: Operator, #[case] bound: f64) {
-        let volatile = datafusion::functions::math::expr_fn::random();
+        let volatile = datafusion_functions::math::expr_fn::random();
         let rewritten = rewrite(compare(volatile.clone(), op, lit(bound)));
         assert_eq!(rewritten, compare_floats_expr(volatile, op, lit(bound)));
         assert_eq!(rewrite(rewritten.clone()), rewritten);

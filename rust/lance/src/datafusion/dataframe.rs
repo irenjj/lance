@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
-use datafusion::{
-    catalog::{Session, streaming::StreamingTable},
-    dataframe::DataFrame,
-    datasource::TableProvider,
-    error::DataFusionError,
-    execution::{TaskContext, context::SessionContext},
-    logical_expr::{Expr, TableProviderFilterPushDown, TableType},
-    physical_plan::{ExecutionPlan, SendableRecordBatchStream, streaming::PartitionStream},
-};
+use datafusion_catalog::Session;
+use datafusion_catalog::TableProvider;
+use datafusion_common::DataFusionError;
+use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
+use datafusion_physical_plan::ExecutionPlan;
 use lance_arrow::SchemaExt;
 use lance_core::{ROW_ADDR_FIELD, ROW_CREATED_AT_VERSION_FIELD, ROW_ID_FIELD};
 
@@ -155,10 +151,10 @@ impl TableProvider for LanceTableProvider {
     async fn scan(
         &self,
         state: &dyn Session,
-        projection: Option<&Vec<usize>>,
+        projection: Option<&[usize]>,
         filters: &[Expr],
         limit: Option<usize>,
-    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         let mut scan = self.dataset.scan();
         if let Some(handling) = self.blob_handling.clone() {
             scan.blob_handling(handling);
@@ -229,90 +225,11 @@ impl TableProvider for LanceTableProvider {
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
-    ) -> datafusion::common::Result<Vec<TableProviderFilterPushDown>> {
+    ) -> datafusion_common::Result<Vec<TableProviderFilterPushDown>> {
         Ok(filters
             .iter()
             .map(|_| TableProviderFilterPushDown::Exact)
             .collect())
-    }
-}
-
-pub trait SessionContextExt {
-    /// Creates a DataFrame for reading a Lance dataset
-    fn read_lance(
-        &self,
-        dataset: Arc<Dataset>,
-        with_row_id: bool,
-        with_row_addr: bool,
-    ) -> datafusion::common::Result<DataFrame>;
-
-    /// Creates a DataFrame for reading a stream of data
-    ///
-    /// This dataframe may only be queried once, future queries will fail
-    fn read_one_shot(
-        &self,
-        data: SendableRecordBatchStream,
-    ) -> datafusion::common::Result<DataFrame>;
-}
-
-pub struct OneShotPartitionStream {
-    data: Arc<Mutex<Option<SendableRecordBatchStream>>>,
-    schema: Arc<Schema>,
-}
-
-impl OneShotPartitionStream {
-    pub fn new(data: SendableRecordBatchStream) -> Self {
-        let schema = data.schema();
-        Self {
-            data: Arc::new(Mutex::new(Some(data))),
-            schema,
-        }
-    }
-}
-
-impl std::fmt::Debug for OneShotPartitionStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OneShotPartitionStream")
-            .field("schema", &self.schema)
-            .finish()
-    }
-}
-
-impl PartitionStream for OneShotPartitionStream {
-    fn schema(&self) -> &SchemaRef {
-        &self.schema
-    }
-
-    fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
-        let mut stream = self.data.lock().unwrap();
-        stream
-            .take()
-            .expect("Attempt to consume a one shot dataframe multiple times")
-    }
-}
-
-impl SessionContextExt for SessionContext {
-    fn read_lance(
-        &self,
-        dataset: Arc<Dataset>,
-        with_row_id: bool,
-        with_row_addr: bool,
-    ) -> datafusion::common::Result<DataFrame> {
-        self.read_table(Arc::new(LanceTableProvider::new(
-            dataset,
-            with_row_id,
-            with_row_addr,
-        )))
-    }
-
-    fn read_one_shot(
-        &self,
-        data: SendableRecordBatchStream,
-    ) -> datafusion::common::Result<DataFrame> {
-        let schema = data.schema();
-        let part_stream = Arc::new(OneShotPartitionStream::new(data));
-        let provider = StreamingTable::try_new(schema, vec![part_stream])?;
-        self.read_table(Arc::new(provider))
     }
 }
 

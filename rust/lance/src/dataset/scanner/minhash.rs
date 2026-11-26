@@ -11,13 +11,13 @@
 use std::sync::Arc;
 
 use arrow_schema::SortOptions;
-use datafusion::physical_expr::PhysicalSortExpr;
-use datafusion::physical_plan::repartition::RepartitionExec;
-use datafusion::physical_plan::sorts::sort::SortExec;
-use datafusion::physical_plan::union::UnionExec;
-use datafusion::physical_plan::{ExecutionPlan, expressions};
 use datafusion_physical_expr::Partitioning;
+use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_plan::empty::EmptyExec;
+use datafusion_physical_plan::repartition::RepartitionExec;
+use datafusion_physical_plan::sorts::sort::SortExec;
+use datafusion_physical_plan::union::UnionExec;
+use datafusion_physical_plan::{ExecutionPlan, expressions};
 use lance_core::ROW_ID;
 use lance_core::datatypes::OnMissing;
 use lance_index::IndexCriteria;

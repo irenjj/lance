@@ -9,24 +9,22 @@ use arrow_array::types::{Int64Type, UInt64Type};
 use arrow_array::{Array, BooleanArray, Int64Array, PrimitiveArray, RecordBatch, UInt32Array};
 use arrow_schema::{DataType, Schema as ArrowSchema, SchemaRef};
 use arrow_select::filter::filter_record_batch;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result};
-use datafusion::logical_expr::col;
-use datafusion::logical_expr::interval_arithmetic::{Interval, NullableInterval};
-use datafusion::optimizer::simplify_expressions::{ExprSimplifier, SimplifyContext};
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::{ColumnarValue, PlanProperties};
-use datafusion::scalar::ScalarValue;
-use datafusion::{
-    physical_plan::{
-        DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream,
-    },
-    prelude::Expr,
-};
+use datafusion_common::ScalarValue;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result};
+use datafusion_expr::Expr;
+use datafusion_expr::col;
+use datafusion_expr::interval_arithmetic::{Interval, NullableInterval};
 use datafusion_functions::core::expr_ext::FieldAccessor;
+use datafusion_optimizer::simplify_expressions::{ExprSimplifier, SimplifyContext};
 use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion_physical_plan::{ColumnarValue, PlanProperties};
+use datafusion_physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream,
+};
 use futures::stream::BoxStream;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use lance_arrow::{RecordBatchExt, SchemaExt};
@@ -171,15 +169,15 @@ impl ExecutionPlan for LancePushdownScanExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::error::Result<TreeNodeRecursion>,
-    ) -> datafusion::error::Result<TreeNodeRecursion> {
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
         Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         if !children.is_empty() {
             Err(DataFusionError::Internal(
                 "LancePushdownScanExec does not accept children".to_string(),
@@ -196,7 +194,7 @@ impl ExecutionPlan for LancePushdownScanExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<datafusion::execution::context::TaskContext>,
+        _context: Arc<datafusion_execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         // To get a stream with a static lifetime, we clone self put it into
         // a stream.
@@ -743,7 +741,7 @@ mod test {
     use arrow_schema::{Field, TimeUnit};
     use arrow_select::concat::concat_batches;
     use async_trait::async_trait;
-    use datafusion::prelude::{Column, SessionContext, lit};
+    use datafusion_expr::{Column, SessionContext, lit};
     use futures::stream::BoxStream;
     use lance_arrow::{FixedSizeListArrayExt, SchemaExt};
     use lance_core::utils::tempfile::TempStrDir;

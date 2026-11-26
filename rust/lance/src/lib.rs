@@ -139,5 +139,4 @@ pub static DIST_FIELD: LazyLock<arrow_schema::Field> =
 pub mod deps {
     pub use arrow_array;
     pub use arrow_schema;
-    pub use datafusion;
 }

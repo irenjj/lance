@@ -18,9 +18,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arrow_array::{ArrayRef, Float32Array, RecordBatch, UInt32Array};
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_execution::SendableRecordBatchStream;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use futures::future::BoxFuture;
 use futures::{Stream, StreamExt, stream};
 use lance_core::utils::tokio::{get_num_compute_intensive_cpus, spawn_cpu};

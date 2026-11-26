@@ -5,7 +5,7 @@
 
 use std::any::TypeId;
 
-use datafusion::sql::sqlparser::{
+use datafusion_sql::sqlparser::{
     ast::{Expr, SelectItem, SetExpr, Statement},
     dialect::{Dialect, GenericDialect},
     parser::Parser,
@@ -128,7 +128,7 @@ fn parse_statement(statement: &str) -> Result<Statement> {
 mod tests {
     use super::*;
 
-    use datafusion::sql::sqlparser::{
+    use datafusion_sql::sqlparser::{
         ast::{
             BinaryOperator, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Value,
             ValueWithSpan,

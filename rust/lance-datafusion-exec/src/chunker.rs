@@ -241,13 +241,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::{Int32Type, Int64Type};
     use arrow_array::record_batch;
     use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
     use futures::TryStreamExt;
-    use lance_datagen::{BatchCount, RowCount, array};
-
-    use crate::datagen::DatafusionDatagenExt;
 
     #[tokio::test]
     async fn test_chunk_concat_stream() {
@@ -269,12 +265,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_strict_batch_size_stream() {
-        let batches = lance_datagen::gen_batch()
-            .anon_col(array::step::<Int32Type>())
-            .anon_col(array::step::<Int64Type>())
-            .into_df_stream(RowCount::from(7), BatchCount::from(10));
-
-        let stream = super::StrictBatchSizeStream::new(batches, 10);
+        let batches = (0..70).step_by(7).map(|start| {
+            record_batch!(
+                ("left", Int32, (start..start + 7).collect::<Vec<i32>>()),
+                (
+                    "right",
+                    Int64,
+                    (start..start + 7).map(i64::from).collect::<Vec<_>>()
+                )
+            )
+            .map_err(datafusion_common::DataFusionError::from)
+        });
+        let stream = super::StrictBatchSizeStream::new(futures::stream::iter(batches), 10);
 
         let batches = stream.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(batches.len(), 7);

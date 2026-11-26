@@ -3,17 +3,15 @@
 
 //! Wraps a Fragment of the dataset.
 
-mod aligned_update;
 pub mod session;
-pub mod write;
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use arrow_array::cast::as_primitive_array;
 use arrow_array::{RecordBatch, RecordBatchReader, UInt64Array};
-use datafusion::logical_expr::Expr;
-use datafusion::scalar::ScalarValue;
+use datafusion_common::ScalarValue;
+use datafusion_expr::Expr;
 use futures::future::try_join_all;
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
 use lance_core::datatypes::{BlobHandling, Schema, SchemaCompareOptions};

@@ -40,8 +40,8 @@ use crate::{
     },
 };
 use arrow_schema::DataType;
-use datafusion::physical_plan::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::SendableRecordBatchStream;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use futures::TryStreamExt;
 use itertools::Itertools;
 use lance_core::datatypes::Field;

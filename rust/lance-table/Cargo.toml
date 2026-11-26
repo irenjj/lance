@@ -49,7 +49,6 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-lance-datagen.workspace = true
 lance-testing.workspace = true
 arrow-schema.workspace = true
 criterion.workspace = true

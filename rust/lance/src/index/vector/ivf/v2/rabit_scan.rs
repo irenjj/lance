@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use arrow_array::{Float32Array, RecordBatch, UInt32Array};
 use async_trait::async_trait;
-use datafusion::physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
+use datafusion_physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
 use futures::{StreamExt, stream};
 use lance_core::cache::WeakLanceCache;
 use lance_core::utils::address::RowAddress;

@@ -27,12 +27,11 @@ use lance_file::reader::{FileReader, FileReaderOptions};
 use lance_file::versions as file_versions;
 use lance_index::{IndexType, progress::IndexBuildProgress};
 use lance_io::object_store::{
-    LanceNamespaceStorageOptionsProvider, ObjectStore, ObjectStoreParams, StorageOptions,
-    StorageOptionsAccessor, StorageOptionsProvider, WrappingObjectStore,
+    ObjectStore, ObjectStoreParams, StorageOptions, StorageOptionsAccessor, StorageOptionsProvider,
+    WrappingObjectStore,
 };
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 use lance_io::utils::CachedFileSize;
-use lance_namespace::LanceNamespace;
 use lance_table::format::{
     DataFile, Fragment, IndexMetadata, Manifest, ManifestBuildConfig, RowIdMeta,
 };
@@ -41,7 +40,6 @@ use lance_table::io::commit::{
     external_manifest::ExternalManifestCommitHandler, migrate_scheme_to_v2,
 };
 
-use crate::io::commit::namespace_manifest::LanceNamespaceExternalManifestStore;
 use lance_table::io::manifest::{read_manifest, read_manifest_indexes};
 use lance_table_runtime::base::has_any_entry;
 pub(crate) use lance_table_runtime::paths::{DATA_DIR, INDICES_DIR, TRANSACTIONS_DIR};
@@ -63,27 +61,17 @@ use tracing::{Instrument, debug_span, field::Empty, info, instrument, warn};
 pub(crate) mod blob;
 pub(crate) use lance_table_runtime::branch_location;
 pub mod builder;
-pub mod cleanup;
-pub mod compaction_stats;
 mod data_file;
 pub mod deletions;
-pub mod delta;
-pub mod expire;
 pub mod files;
 pub mod fragment;
 pub(crate) mod fragment_slice;
-mod hash_joiner;
 pub mod index;
-pub mod mem_wal;
 mod metadata;
-pub mod optimize;
-pub(crate) mod overlay;
 pub mod progress;
 pub use lance_table_runtime::refs;
 pub mod rowids;
 pub mod scanner;
-mod schema_evolution;
-pub mod sql;
 pub mod statistics;
 mod take;
 /// Transaction definitions for updating datasets
@@ -109,16 +97,8 @@ pub mod transaction {
     };
 }
 pub mod udtf;
-mod update_join;
-#[cfg(feature = "update-join-bench")]
-#[doc(hidden)]
-pub mod update_join_bench;
-mod update_join_options;
-pub mod updater;
 mod utils;
-pub mod version_retention;
 pub(crate) mod versions;
-pub mod write;
 
 pub use data_file::DataFileTarget;
 pub use lance_table_runtime::write::DataFilePart;
@@ -153,7 +133,6 @@ use hash_joiner::HashJoiner;
 pub use lance_core::ROW_ID;
 use lance_index::scalar::BuiltinIndexType;
 use lance_index::scalar::lance_format::LanceIndexStore;
-use lance_namespace::models::{DeclareTableRequest, DescribeTableRequest};
 use lance_table::feature_flags::ensure_can_write_manifest;
 use lance_table::io::deletion::relative_deletion_file_path;
 use lance_table::rowids::{RowIdSequence, write_row_ids};
@@ -781,253 +760,6 @@ impl Dataset {
         session: &Session,
     ) -> Result<Manifest> {
         Table::load_manifest(object_store, manifest_location, uri, &session.table_session).await
-    }
-
-    /// Write to or Create a [Dataset] with a stream of [RecordBatch]s.
-    ///
-    /// `dest` can be a `&str`, `object_store::path::Path` or `Arc<Dataset>`.
-    ///
-    /// Returns the newly created [`Dataset`].
-    /// Or Returns [Error] if the dataset already exists.
-    ///
-    pub async fn write(
-        batches: impl RecordBatchReader + Send + 'static,
-        dest: impl Into<WriteDestination<'_>>,
-        params: Option<WriteParams>,
-    ) -> Result<Self> {
-        let mut builder = InsertBuilder::new(dest);
-        if let Some(params) = &params {
-            builder = builder.with_params(params);
-        }
-        Box::pin(builder.execute_stream(Box::new(batches) as Box<dyn RecordBatchReader + Send>))
-            .await
-    }
-
-    /// Write into a namespace client-managed table with automatic credential vending.
-    ///
-    /// For CREATE mode, calls declare_table() to initialize the table.
-    /// For other modes, calls describe_table() and opens dataset with namespace client credentials.
-    ///
-    /// # Arguments
-    ///
-    /// * `batches` - The record batches to write
-    /// * `namespace_client` - The namespace client to use for table management
-    /// * `table_id` - The table identifier
-    /// * `params` - Write parameters
-    pub async fn write_into_namespace(
-        batches: impl RecordBatchReader + Send + 'static,
-        namespace_client: Arc<dyn LanceNamespace>,
-        table_id: Vec<String>,
-        params: Option<WriteParams>,
-    ) -> Result<Self> {
-        Self::write_into_namespace_impl(batches, namespace_client, table_id, None, params).await
-    }
-
-    /// Write into a branch of a namespace client-managed table.
-    ///
-    /// Behaves like [`write_into_namespace`](Self::write_into_namespace), but APPEND and
-    /// OVERWRITE open and commit against `branch` instead of main. CREATE is rejected,
-    /// since a branch forks from an existing version.
-    pub async fn write_into_namespace_on_branch(
-        batches: impl RecordBatchReader + Send + 'static,
-        namespace_client: Arc<dyn LanceNamespace>,
-        table_id: Vec<String>,
-        branch: &str,
-        params: Option<WriteParams>,
-    ) -> Result<Self> {
-        Self::write_into_namespace_impl(
-            batches,
-            namespace_client,
-            table_id,
-            Some(branch.to_string()),
-            params,
-        )
-        .await
-    }
-
-    async fn write_into_namespace_impl(
-        batches: impl RecordBatchReader + Send + 'static,
-        namespace_client: Arc<dyn LanceNamespace>,
-        table_id: Vec<String>,
-        branch: Option<String>,
-        mut params: Option<WriteParams>,
-    ) -> Result<Self> {
-        let mut write_params = params.take().unwrap_or_default();
-
-        match write_params.mode {
-            WriteMode::Create => {
-                if branch.is_some() {
-                    return Err(Error::not_supported_source(
-                        "cannot create a table on a branch; create on main first, then branch it"
-                            .into(),
-                    ));
-                }
-                let declare_request = DeclareTableRequest {
-                    id: Some(table_id.clone()),
-                    ..Default::default()
-                };
-                let response = namespace_client
-                    .declare_table(declare_request)
-                    .await
-                    .map_err(|e| Error::namespace_source(Box::new(e)))?;
-
-                let uri = response.location.ok_or_else(|| {
-                    Error::namespace_source(Box::new(std::io::Error::other(
-                        "Table location not found in declare_table response",
-                    )))
-                })?;
-
-                // Set up commit handler when managed_versioning is enabled
-                if response.managed_versioning == Some(true) {
-                    // The store derives the branch a request targets from the
-                    // base path it is handed, resolved against the table root.
-                    let external_store = LanceNamespaceExternalManifestStore::for_table_uri(
-                        namespace_client.clone(),
-                        table_id.clone(),
-                        &uri,
-                    )?;
-                    let commit_handler: Arc<dyn CommitHandler> =
-                        Arc::new(ExternalManifestCommitHandler {
-                            external_manifest_store: Arc::new(external_store),
-                        });
-                    write_params.commit_handler = Some(commit_handler);
-                }
-
-                // Set initial credentials and provider from namespace_client
-                if let Some(namespace_storage_options) = response.storage_options {
-                    let provider: Arc<dyn StorageOptionsProvider> = Arc::new(
-                        LanceNamespaceStorageOptionsProvider::new(namespace_client, table_id),
-                    );
-
-                    // Merge namespace client storage options with any existing options
-                    let mut merged_options = write_params
-                        .store_params
-                        .as_ref()
-                        .and_then(|p| p.storage_options().cloned())
-                        .unwrap_or_default();
-                    merged_options.extend(namespace_storage_options);
-
-                    let accessor = Arc::new(StorageOptionsAccessor::with_initial_and_provider(
-                        merged_options,
-                        provider,
-                    ));
-
-                    let existing_params = write_params.store_params.take().unwrap_or_default();
-                    write_params.store_params = Some(ObjectStoreParams {
-                        storage_options_accessor: Some(accessor),
-                        ..existing_params
-                    });
-                }
-
-                Self::write(batches, uri.as_str(), Some(write_params)).await
-            }
-            WriteMode::Append | WriteMode::Overwrite => {
-                let request = DescribeTableRequest {
-                    id: Some(table_id.clone()),
-                    ..Default::default()
-                };
-                let response = namespace_client
-                    .describe_table(request)
-                    .await
-                    .map_err(|e| Error::namespace_source(Box::new(e)))?;
-
-                let uri = response.location.ok_or_else(|| {
-                    Error::namespace_source(Box::new(std::io::Error::other(
-                        "Table location not found in describe_table response",
-                    )))
-                })?;
-
-                // Set up commit handler when managed_versioning is enabled.
-                // It must ride on the dataset opened below: InsertBuilder
-                // commits through the destination dataset's handler and does
-                // not consult write params for Dataset destinations.
-                let commit_handler: Option<Arc<dyn CommitHandler>> =
-                    if response.managed_versioning == Some(true) {
-                        // The store derives the branch a request targets from the
-                        // base path it is handed, resolved against the table root.
-                        let external_store = LanceNamespaceExternalManifestStore::for_table_uri(
-                            namespace_client.clone(),
-                            table_id.clone(),
-                            uri.as_str(),
-                        )?;
-                        Some(Arc::new(ExternalManifestCommitHandler {
-                            external_manifest_store: Arc::new(external_store),
-                        }))
-                    } else {
-                        None
-                    };
-
-                // Set initial credentials and provider from namespace_client
-                if let Some(namespace_storage_options) = response.storage_options {
-                    let provider: Arc<dyn StorageOptionsProvider> =
-                        Arc::new(LanceNamespaceStorageOptionsProvider::new(
-                            namespace_client.clone(),
-                            table_id.clone(),
-                        ));
-
-                    // Merge namespace client storage options with any existing options
-                    let mut merged_options = write_params
-                        .store_params
-                        .as_ref()
-                        .and_then(|p| p.storage_options().cloned())
-                        .unwrap_or_default();
-                    merged_options.extend(namespace_storage_options);
-
-                    let accessor = Arc::new(StorageOptionsAccessor::with_initial_and_provider(
-                        merged_options,
-                        provider,
-                    ));
-
-                    let existing_params = write_params.store_params.take().unwrap_or_default();
-                    write_params.store_params = Some(ObjectStoreParams {
-                        storage_options_accessor: Some(accessor),
-                        ..existing_params
-                    });
-                }
-
-                // For APPEND/OVERWRITE modes, we must open the existing dataset first
-                // and pass it to InsertBuilder. If we pass just the URI, InsertBuilder
-                // assumes no dataset exists and converts the mode to CREATE.
-                let mut builder = DatasetBuilder::from_uri(uri.as_str());
-                if let Some(ref store_params) = write_params.store_params
-                    && let Some(accessor) = &store_params.storage_options_accessor
-                {
-                    builder = builder.with_storage_options_accessor(accessor.clone());
-                }
-                if let Some(commit_handler) = commit_handler {
-                    builder = builder.with_commit_handler(commit_handler);
-                }
-                if let Some(branch) = &branch {
-                    builder = builder.with_branch(branch, None);
-                }
-                let dataset = Arc::new(builder.load().await?);
-
-                Self::write(batches, dataset, Some(write_params)).await
-            }
-        }
-    }
-
-    /// Append to existing [Dataset] with a stream of [RecordBatch]s
-    ///
-    /// Returns void result or Returns [Error]
-    pub async fn append(
-        &mut self,
-        batches: impl RecordBatchReader + Send + 'static,
-        params: Option<WriteParams>,
-    ) -> Result<()> {
-        let write_params = WriteParams {
-            mode: WriteMode::Append,
-            ..params.unwrap_or_default()
-        };
-
-        let new_dataset = InsertBuilder::new(WriteDestination::Dataset(Arc::new(self.clone())))
-            .with_params(&write_params)
-            .execute_stream(Box::new(batches) as Box<dyn RecordBatchReader + Send>)
-            .await?;
-
-        *self = new_dataset;
-
-        Ok(())
     }
 
     /// Get the fully qualified URI of this dataset.
@@ -1781,9 +1513,9 @@ impl Dataset {
                 let (plan, dataset) = (plan.clone(), dataset.clone());
                 async move { plan.transform_batch(&dataset, batch).await }
             })
-            .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)));
+            .map_err(|err| datafusion_common::DataFusionError::External(Box::new(err)));
         Ok(DatasetRecordBatchStream::new(Box::pin(
-            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(schema, batches),
+            datafusion_physical_plan::stream::RecordBatchStreamAdapter::new(schema, batches),
         )))
     }
 
@@ -4248,6 +3980,3 @@ fn is_manifest_location(meta: &object_store::ObjectMeta) -> bool {
         .and_then(ManifestNamingScheme::parse_detached_version)
         .is_some()
 }
-
-#[cfg(test)]
-mod tests;

@@ -12,21 +12,21 @@ use arrow::datatypes::UInt64Type;
 use arrow_array::{Array, BooleanArray, UInt32Array};
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{Schema as ArrowSchema, SchemaRef};
-use datafusion::common::Statistics;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result};
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::ChildStats;
-use datafusion::physical_plan::StatisticsArgs;
-use datafusion::physical_plan::metrics::{
+use datafusion_common::Statistics;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result};
+use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::projection::ProjectionMapping;
+use datafusion_physical_plan::ChildStats;
+use datafusion_physical_plan::StatisticsArgs;
+use datafusion_physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
 };
-use datafusion_physical_expr::EquivalenceProperties;
-use datafusion_physical_expr::projection::ProjectionMapping;
 use futures::FutureExt;
 use futures::stream::{FuturesOrdered, Stream, StreamExt, TryStreamExt};
 use lance_arrow::RecordBatchExt;
@@ -791,7 +791,7 @@ impl ExecutionPlan for TakeExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let input_stream = self.input.execute(partition, context)?;
         let dataset = self.dataset.clone();

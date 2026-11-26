@@ -9,9 +9,9 @@
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use arrow_schema::{DataType, Field as ArrowField};
-use datafusion::catalog::Session;
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_catalog::Session;
+use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use lance_arrow::DataTypeExt;
 use lance_core::{
     Error, Result,
@@ -46,7 +46,7 @@ pub fn create_scan_stream(
     config: LanceScanConfig,
     metrics: &ExecutionPlanMetricsSet,
     partition: usize,
-) -> datafusion::error::Result<LanceStream> {
+) -> datafusion_common::Result<LanceStream> {
     match version {
         ConcreteFileVersion::V1 => LanceStream::try_new_v1(
             dataset, fragments, offsets, projection, config, metrics, partition,

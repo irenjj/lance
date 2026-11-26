@@ -24,20 +24,20 @@ use std::task::{Context, Poll};
 use arrow_array::{Array, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, SchemaRef};
 use async_trait::async_trait;
-use datafusion::common::runtime::SpawnedTask;
-use datafusion::common::stats::Precision;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::metrics::{
+use datafusion_common::stats::Precision;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_common_runtime::SpawnedTask;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::{Distribution, EquivalenceProperties, Partitioning};
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, Gauge, MetricBuilder, MetricValue, Time,
 };
-use datafusion::physical_plan::{
+use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, coalesce_partitions::CoalescePartitionsExec,
 };
-use datafusion_physical_expr::{Distribution, EquivalenceProperties, Partitioning};
-use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
 use futures::future::{BoxFuture, Shared};
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
@@ -88,7 +88,7 @@ pub enum PreFilterSource {
 type SharedPreFilterFuture = Shared<BoxFuture<'static, CloneableResult<Arc<RowAddrMask>>>>;
 
 struct SharedPreFilterEntry {
-    context: std::sync::Weak<datafusion::execution::TaskContext>,
+    context: std::sync::Weak<datafusion_execution::TaskContext>,
     future: SharedPreFilterFuture,
     waiters: usize,
     is_complete: bool,
@@ -207,7 +207,7 @@ impl ExecutionPlan for SharedPreFilterExec {
     fn execute(
         &self,
         _partition: usize,
-        _context: Arc<datafusion::execution::TaskContext>,
+        _context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         Err(DataFusionError::Internal(
             "shared MultiMatch prefilter must be materialized by its FTS consumer".to_string(),
@@ -333,7 +333,7 @@ fn shared_prefilter_future(
     materialization: Arc<SharedPreFilterMaterialization>,
     source: Arc<dyn ExecutionPlan>,
     is_scalar_index_query: bool,
-    context: Arc<datafusion::execution::TaskContext>,
+    context: Arc<datafusion_execution::TaskContext>,
     partition: usize,
     dataset: Arc<Dataset>,
 ) -> BoxFuture<'static, Result<Arc<RowAddrMask>>> {
@@ -415,7 +415,7 @@ fn shared_prefilter_future(
 /// the ANN path). It is independent of `overlay_block`, which the prefilter
 /// applies separately to drop index entries staled by a data overlay.
 fn prefilter_mask_future(
-    context: Arc<datafusion::execution::TaskContext>,
+    context: Arc<datafusion_execution::TaskContext>,
     partition: usize,
     prefilter_source: &PreFilterSource,
     external_mask: Option<Arc<RowAddrMask>>,
@@ -485,7 +485,7 @@ fn prefilter_mask_future(
 }
 
 pub(crate) fn build_prefilter(
-    context: Arc<datafusion::execution::TaskContext>,
+    context: Arc<datafusion_execution::TaskContext>,
     partition: usize,
     prefilter_source: &PreFilterSource,
     ds: Arc<Dataset>,
@@ -512,7 +512,7 @@ pub(crate) fn build_prefilter(
 /// `index_meta`'s fragment bitmaps. See
 /// [`DatasetPreFilter::new_restricted_to_fragments`].
 pub(crate) fn build_prefilter_restricted_to_fragments(
-    context: Arc<datafusion::execution::TaskContext>,
+    context: Arc<datafusion_execution::TaskContext>,
     partition: usize,
     prefilter_source: &PreFilterSource,
     ds: Arc<Dataset>,
@@ -1032,15 +1032,15 @@ impl ExecutionPlan for ReplayExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::error::Result<TreeNodeRecursion>,
-    ) -> datafusion::error::Result<TreeNodeRecursion> {
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
         Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
         self: Arc<Self>,
         _: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         unimplemented!()
     }
 
@@ -1053,8 +1053,8 @@ impl ExecutionPlan for ReplayExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
-    ) -> datafusion::error::Result<SendableRecordBatchStream> {
+        context: Arc<datafusion_execution::TaskContext>,
+    ) -> datafusion_common::Result<SendableRecordBatchStream> {
         let mut inner_state = self.inner_state.lock().unwrap();
         if let Some(cached) = inner_state.cached.take() {
             if inner_state.taken {
@@ -1078,7 +1078,7 @@ impl ExecutionPlan for ReplayExec {
         }
     }
 
-    fn properties(&self) -> &Arc<datafusion::physical_plan::PlanProperties> {
+    fn properties(&self) -> &Arc<datafusion_physical_plan::PlanProperties> {
         self.input.properties()
     }
 }

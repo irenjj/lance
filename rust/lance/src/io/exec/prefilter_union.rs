@@ -5,19 +5,17 @@
 
 use std::sync::Arc;
 
-use datafusion::{
-    common::tree_node::TreeNodeRecursion,
-    error::{DataFusionError, Result},
-    execution::TaskContext,
-    physical_plan::{
-        DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
-        SendableRecordBatchStream,
-        coalesce_partitions::CoalescePartitionsExec,
-        execution_plan::{Boundedness, EmissionType},
-        metrics::{ExecutionPlanMetricsSet, MetricsSet},
-    },
-};
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result};
+use datafusion_execution::TaskContext;
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion_physical_plan::{
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
+    SendableRecordBatchStream,
+    coalesce_partitions::CoalescePartitionsExec,
+    execution_plan::{Boundedness, EmissionType},
+    metrics::{ExecutionPlanMetricsSet, MetricsSet},
+};
 use futures::{StreamExt, TryStreamExt};
 use lance_core::{Error, utils::address::RowAddress};
 use lance_index::prefilter::FilterLoader;
@@ -69,7 +67,7 @@ impl PrefilterUnionExec {
     ///
     /// ```
     /// # use std::sync::Arc;
-    /// # use datafusion::physical_plan::ExecutionPlan;
+    /// # use datafusion_physical_plan::ExecutionPlan;
     /// # use lance::{Dataset, io::exec::PrefilterUnionExec};
     /// # use lance_select::result::IndexExprResultWireFormat;
     /// # fn scoped(dataset: Arc<Dataset>, scalar: Arc<dyn ExecutionPlan>) {

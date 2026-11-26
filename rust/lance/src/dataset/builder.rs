@@ -8,7 +8,6 @@ use lance_file::reader::FileReaderOptions;
 use lance_io::object_store::{
     ObjectStore, ObjectStoreParams, StorageOptionsAccessor, StorageOptionsProvider,
 };
-use lance_namespace::LanceNamespace;
 use lance_table::{
     format::Manifest,
     io::commit::{CommitHandler, ManifestLocation},
@@ -57,47 +56,6 @@ impl DatasetBuilder {
             index_cache_backend: None,
             session: None,
         }
-    }
-
-    /// Create a DatasetBuilder from a LanceNamespace client
-    ///
-    /// This will automatically fetch the table location and storage options from the namespace
-    /// client via `describe_table()`.
-    ///
-    /// Storage options from the namespace client will override any user-provided storage options
-    /// set via `.with_storage_options()`. This ensures the namespace client is always the source
-    /// of truth for storage options.
-    ///
-    /// # Arguments
-    /// * `namespace_client` - The namespace client implementation to fetch table info from
-    /// * `table_id` - The table identifier (e.g., vec!["my_table"])
-    ///
-    /// # Example
-    /// ```ignore
-    /// use lance_namespace_impls::ConnectBuilder;
-    /// use lance::dataset::DatasetBuilder;
-    ///
-    /// // Connect to a REST namespace
-    /// let namespace_client = ConnectBuilder::new("rest")
-    ///     .property("uri", "http://localhost:8080")
-    ///     .connect()
-    ///     .await?;
-    ///
-    /// // Load a dataset using storage options from namespace client
-    /// let dataset = DatasetBuilder::from_namespace(
-    ///     namespace_client,
-    ///     vec!["my_table".to_string()],
-    /// )
-    /// .await?
-    /// .load()
-    /// .await?;
-    /// ```
-    pub async fn from_namespace(
-        namespace_client: Arc<dyn LanceNamespace>,
-        table_id: Vec<String>,
-    ) -> Result<Self> {
-        let builder = TableBuilder::from_namespace(namespace_client, table_id).await?;
-        Ok(Self::from_table_builder(builder))
     }
 
     /// Set the cache size for indices. Set to zero, to disable the cache.

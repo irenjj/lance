@@ -22,19 +22,17 @@ use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array, cast::AsArray, type
 use arrow_schema::{Schema, SchemaRef};
 use async_recursion::async_recursion;
 use async_trait::async_trait;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::{
-    execution::memory_pool::{MemoryConsumer, MemoryReservation},
-    physical_plan::{
-        DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-        execution_plan::{Boundedness, EmissionType},
-        metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet},
-        stream::RecordBatchStreamAdapter,
-    },
-    scalar::ScalarValue,
-};
+use datafusion_common::ScalarValue;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
+    execution_plan::{Boundedness, EmissionType},
+    metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet},
+    stream::RecordBatchStreamAdapter,
+};
 use futures::{StreamExt, TryFutureExt, TryStreamExt, stream::BoxStream};
 use lance_core::{Error, ROW_ID_FIELD, Result, deepsize::DeepSizeOf, utils::address::RowAddress};
 use lance_datafusion::{
@@ -451,17 +449,17 @@ impl ExecutionPlan for ScalarIndexExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::error::Result<TreeNodeRecursion>,
-    ) -> datafusion::error::Result<TreeNodeRecursion> {
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
         Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         if !children.is_empty() {
-            Err(datafusion::error::DataFusionError::Internal(
+            Err(datafusion_common::DataFusionError::Internal(
                 "ScalarIndexExec does not have children".to_string(),
             ))
         } else {
@@ -472,8 +470,8 @@ impl ExecutionPlan for ScalarIndexExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<datafusion::execution::context::TaskContext>,
-    ) -> datafusion::error::Result<datafusion::physical_plan::SendableRecordBatchStream> {
+        _context: Arc<datafusion_execution::TaskContext>,
+    ) -> datafusion_common::Result<datafusion_physical_plan::SendableRecordBatchStream> {
         let batch_fut = Self::do_execute(
             self.expr.clone(),
             self.dataset.clone(),
@@ -485,7 +483,7 @@ impl ExecutionPlan for ScalarIndexExec {
         let stream = futures::stream::iter(vec![batch_fut])
             .then(|batch_fut| batch_fut.map_err(|err| err.into()))
             .boxed()
-            as BoxStream<'static, datafusion::common::Result<RecordBatch>>;
+            as BoxStream<'static, datafusion_common::Result<RecordBatch>>;
         Ok(Box::pin(InstrumentedRecordBatchStreamAdapter::new(
             self.result_format.schema().clone(),
             stream,
@@ -497,10 +495,10 @@ impl ExecutionPlan for ScalarIndexExec {
     fn partition_statistics(
         &self,
         _partition: Option<usize>,
-    ) -> datafusion::error::Result<Arc<datafusion::physical_plan::Statistics>> {
-        Ok(Arc::new(datafusion::physical_plan::Statistics {
-            num_rows: datafusion::common::stats::Precision::Exact(2),
-            ..datafusion::physical_plan::Statistics::new_unknown(self.result_format.schema())
+    ) -> datafusion_common::Result<Arc<datafusion_physical_plan::Statistics>> {
+        Ok(Arc::new(datafusion_physical_plan::Statistics {
+            num_rows: datafusion_common::stats::Precision::Exact(2),
+            ..datafusion_physical_plan::Statistics::new_unknown(self.result_format.schema())
         }))
     }
 
@@ -572,7 +570,7 @@ impl DistinctRowAddrs {
         }
     }
 
-    fn retain_unseen(&mut self, row_addrs: &UInt64Array) -> datafusion::error::Result<UInt64Array> {
+    fn retain_unseen(&mut self, row_addrs: &UInt64Array) -> datafusion_common::Result<UInt64Array> {
         let initial_reservation_size = self.reservation.size();
         // The first batch also has to account for the empty map's inline size,
         // which is not part of the initially empty reservation.
@@ -586,7 +584,7 @@ impl DistinctRowAddrs {
             .checked_mul(ROW_ADDR_INSERT_RESERVATION_BYTES)
             .and_then(|additional| retained_size.checked_add(additional))
             .ok_or_else(|| {
-                datafusion::error::DataFusionError::ResourcesExhausted(format!(
+                datafusion_common::DataFusionError::ResourcesExhausted(format!(
                     "Candidate memory reservation overflowed for {MAP_INDEX_CANDIDATES_MEMORY_CONSUMER}"
                 ))
             })?;
@@ -604,7 +602,7 @@ impl DistinctRowAddrs {
         let measured_size = self.emitted.deep_size_of();
         if measured_size > provisional_size {
             self.rollback_batch(&unseen, initial_reservation_size);
-            return Err(datafusion::error::DataFusionError::ResourcesExhausted(
+            return Err(datafusion_common::DataFusionError::ResourcesExhausted(
                 format!(
                     "MapIndexExecCandidates batch exceeded its {ROW_ADDR_INSERT_RESERVATION_BYTES}-byte per-candidate reservation"
                 ),
@@ -723,14 +721,14 @@ impl MapIndexExec {
     }
 
     async fn build_stream(
-        input: datafusion::physical_plan::SendableRecordBatchStream,
+        input: datafusion_physical_plan::SendableRecordBatchStream,
         partition: usize,
         dataset: Arc<Dataset>,
         lookups: Vec<IndexLookup>,
         index_metrics: Arc<IndexMetrics>,
         metrics_set: ExecutionPlanMetricsSet,
         candidate_reservation: MemoryReservation,
-    ) -> datafusion::error::Result<datafusion::physical_plan::SendableRecordBatchStream> {
+    ) -> datafusion_common::Result<datafusion_physical_plan::SendableRecordBatchStream> {
         // A row can be found by the composite probe only if it lives in a
         // fragment covered by *every* index in `lookups`; restrict the
         // deletion mask to that intersection so we only filter deletes we
@@ -749,7 +747,7 @@ impl MapIndexExec {
             let bm = scalar_index_fragment_bitmap(&dataset, &lookup.column, &lookup.index_name)
                 .await?
                 .ok_or_else(|| {
-                    datafusion::error::DataFusionError::Internal(format!(
+                    datafusion_common::DataFusionError::Internal(format!(
                         "IndexedLookupExec: index '{}' on column '{}' disappeared after planning",
                         lookup.index_name, lookup.column,
                     ))
@@ -794,7 +792,7 @@ impl MapIndexExec {
                 .retain_unseen(row_addrs)
                 .and_then(|unseen| {
                     RecordBatch::try_new(INDEX_LOOKUP_SCHEMA.clone(), vec![Arc::new(unseen)])
-                        .map_err(datafusion::error::DataFusionError::from)
+                        .map_err(datafusion_common::DataFusionError::from)
                 });
             futures::future::ready(result)
         });
@@ -825,7 +823,7 @@ impl MapIndexExec {
     /// A float zero is looked up under both encodings. The index compares keys
     /// by encoding, but the hash join downstream matches `-0.0` and `+0.0` per
     /// IEEE 754, so probing one encoding would miss rows the join would match.
-    fn key_values(column: &ArrayRef, dedupe: bool) -> datafusion::error::Result<Vec<ScalarValue>> {
+    fn key_values(column: &ArrayRef, dedupe: bool) -> datafusion_common::Result<Vec<ScalarValue>> {
         let mut values = Vec::with_capacity(column.len());
         let mut seen = HashSet::with_capacity(if dedupe { column.len() } else { 0 });
         for row in 0..column.len() {
@@ -866,14 +864,14 @@ impl MapIndexExec {
         deletion_mask: Option<Arc<RowAddrMask>>,
         batch: RecordBatch,
         metrics: Arc<IndexMetrics>,
-    ) -> datafusion::error::Result<RecordBatch> {
+    ) -> datafusion_common::Result<RecordBatch> {
         // The operator's contract is one input column per lookup, in order (see
         // `new_multi`). Check it here rather than letting `batch.column` panic
         // deep inside a DataFusion stream, and check it before the probe loop:
         // the loop can skip the offending lookup, which would turn a broken
         // plan into a failure that depends on the data.
         if lookups.len() != batch.num_columns() {
-            return Err(datafusion::error::DataFusionError::Internal(format!(
+            return Err(datafusion_common::DataFusionError::Internal(format!(
                 "MapIndexExec has {} lookups but its input produced {} columns",
                 lookups.len(),
                 batch.num_columns()
@@ -971,7 +969,7 @@ impl MapIndexExec {
 
         let row_id_iter = row_addr_mask
             .iter_addrs()
-            .ok_or(datafusion::error::DataFusionError::Internal(
+            .ok_or(datafusion_common::DataFusionError::Internal(
                 "IndexedLookupExec: Cannot iterate over row addresses (BlockList or contains full fragments)".to_string(),
             ))?;
         let allow_list: UInt64Array = row_id_iter.map(u64::from).collect();
@@ -997,17 +995,17 @@ impl ExecutionPlan for MapIndexExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::error::Result<TreeNodeRecursion>,
-    ) -> datafusion::error::Result<TreeNodeRecursion> {
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
         Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         if children.len() != 1 {
-            Err(datafusion::error::DataFusionError::Internal(
+            Err(datafusion_common::DataFusionError::Internal(
                 "MapIndexExec requires exactly one child".to_string(),
             ))
         } else {
@@ -1022,8 +1020,8 @@ impl ExecutionPlan for MapIndexExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
-    ) -> datafusion::error::Result<datafusion::physical_plan::SendableRecordBatchStream> {
+        context: Arc<datafusion_execution::TaskContext>,
+    ) -> datafusion_common::Result<datafusion_physical_plan::SendableRecordBatchStream> {
         // Cross-batch deduplication retains every emitted candidate until the
         // stream ends, so this state is not covered by per-batch reservations.
         let candidate_reservation = MemoryConsumer::new(MAP_INDEX_CANDIDATES_MEMORY_CONSUMER)
@@ -1350,17 +1348,17 @@ impl ExecutionPlan for MaterializeIndexExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::error::Result<TreeNodeRecursion>,
-    ) -> datafusion::error::Result<TreeNodeRecursion> {
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
         Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         if !children.is_empty() {
-            Err(datafusion::error::DataFusionError::Internal(
+            Err(datafusion_common::DataFusionError::Internal(
                 "MaterializeIndexExec does not have children".to_string(),
             ))
         } else {
@@ -1371,8 +1369,8 @@ impl ExecutionPlan for MaterializeIndexExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
-    ) -> datafusion::error::Result<datafusion::physical_plan::SendableRecordBatchStream> {
+        context: Arc<datafusion_execution::TaskContext>,
+    ) -> datafusion_common::Result<datafusion_physical_plan::SendableRecordBatchStream> {
         let metrics = Arc::new(IndexMetrics::new(&self.metrics, partition));
         let batch_fut = Self::do_execute(
             self.expr.clone(),
@@ -1385,7 +1383,7 @@ impl ExecutionPlan for MaterializeIndexExec {
         let stream = futures::stream::iter(vec![batch_fut])
             .then(|batch_fut| batch_fut.map_err(|err| err.into()))
             .boxed()
-            as BoxStream<'static, datafusion::common::Result<RecordBatch>>;
+            as BoxStream<'static, datafusion_common::Result<RecordBatch>>;
         let stream = Box::pin(RecordBatchStreamAdapter::new(
             MATERIALIZE_INDEX_SCHEMA.clone(),
             stream,

@@ -19,17 +19,24 @@ arrow-schema.workspace = true
 arrow-select.workspace = true
 async-trait.workspace = true
 datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-execution.workspace = true
+datafusion-session.workspace = true
+datafusion-catalog.workspace = true
 datafusion-functions.workspace = true
+datafusion-functions-aggregate.workspace = true
+datafusion-functions-window.workspace = true
+datafusion-functions-nested.workspace = true
 datafusion-physical-expr.workspace = true
-datafusion-substrait = {workspace = true, optional = true}
-datafusion.workspace = true
+datafusion-physical-plan.workspace = true
+datafusion-optimizer.workspace = true
+datafusion-sql.workspace = true
 futures.workspace = true
 half.workspace = true
 lance-jsonb = { workspace = true }
 lance-arrow.workspace = true
 lance-core = {workspace = true, features = ["datafusion"]}
 lance-datafusion-exec.workspace = true
-geodatafusion = { workspace = true, optional = true }
 chrono.workspace = true
 log.workspace = true
 pin-project.workspace = true
@@ -39,16 +46,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 geo-types.workspace = true
-geoarrow-array.workspace = true
-geoarrow-schema.workspace = true
-lance-datagen.workspace = true
 rstest.workspace = true
-
-[features]
-datagen = ["lance-datafusion-exec/datagen"]
-geo = ["dep:geodatafusion"]
-substrait = ["dep:datafusion-substrait"]
-protoc = ["datafusion-substrait?/protoc"]
 
 [lints]
 workspace = true

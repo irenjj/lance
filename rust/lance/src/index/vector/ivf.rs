@@ -41,7 +41,7 @@ use arrow_array::{
 use arrow_buffer::MutableBuffer;
 use arrow_schema::{DataType, Schema};
 use async_trait::async_trait;
-use datafusion::execution::SendableRecordBatchStream;
+use datafusion_execution::SendableRecordBatchStream;
 use futures::TryFutureExt;
 use futures::{
     Stream, TryStreamExt,

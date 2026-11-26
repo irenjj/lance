@@ -11,16 +11,16 @@
 use std::sync::Arc;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef};
-use datafusion::common::DFSchema;
-use datafusion::functions_aggregate;
-use datafusion::logical_expr::{Expr, col, lit};
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
+use datafusion_common::DFSchema;
 use datafusion_expr::ExprSchemable;
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
+use datafusion_expr::{Expr, col, lit};
+use datafusion_functions_aggregate as functions_aggregate;
 use datafusion_physical_expr::aggregate::LoweredAggregateBuilder;
 use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
+use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use lance_datafusion::aggregate::Aggregate;
@@ -368,9 +368,9 @@ impl Scanner {
     }
 
     fn coerce_aggregate_expr_impl(expr: &Expr, schema: &DFSchema) -> Result<Expr> {
-        use datafusion::logical_expr::Expr;
-        use datafusion::logical_expr::expr::AggregateFunction;
-        use datafusion::logical_expr::type_coercion::functions::fields_with_udf;
+        use datafusion_expr::Expr;
+        use datafusion_expr::expr::AggregateFunction;
+        use datafusion_expr::type_coercion::functions::fields_with_udf;
 
         match expr {
             Expr::AggregateFunction(agg_func) => {
@@ -392,7 +392,7 @@ impl Scanner {
                             true,
                         )))
                     })
-                    .collect::<std::result::Result<_, datafusion::common::DataFusionError>>()?;
+                    .collect::<std::result::Result<_, datafusion_common::DataFusionError>>()?;
 
                 let coerced_fields = fields_with_udf(&current_fields, func.as_ref())?;
                 let coerced_args: Vec<Expr> = args

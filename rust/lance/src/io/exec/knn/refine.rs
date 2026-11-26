@@ -10,17 +10,17 @@ use arrow_array::cast::AsArray;
 use arrow_array::types::{Int32Type, UInt64Type};
 use arrow_array::{Array, Float32Array, Int32Array, RecordBatch, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, SchemaRef};
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::context::TaskContext;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::{
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_execution::TaskContext;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::{Distribution, EquivalenceProperties};
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::metrics::{Count, ExecutionPlanMetricsSet, MetricsSet};
+use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
-use datafusion_physical_expr::{Distribution, EquivalenceProperties};
 use futures::{StreamExt, stream};
 use lance_core::ROW_ID;
 use lance_core::utils::tokio::spawn_cpu;

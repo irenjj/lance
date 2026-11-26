@@ -24,16 +24,16 @@ use std::sync::Arc;
 
 use arrow_array::{Array, BinaryArray, Int64Array, RecordBatch};
 use arrow_schema::{Schema, SchemaRef};
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::apply_expression_roots;
-use datafusion::physical_plan::{
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
+use datafusion_physical_plan::apply_expression_roots;
+use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
     metrics::{ExecutionPlanMetricsSet, MetricsSet},
 };
-use datafusion_physical_expr::EquivalenceProperties;
-use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
 use futures::{StreamExt, TryStreamExt, stream};
 use lance_core::{Error, Result};
 use lance_select::{RowAddrMask, RowAddrSelection, RowAddrTreeMap};
@@ -121,7 +121,7 @@ impl CountFromMaskExec {
         let state_fields = aggregate_funcs
             .iter()
             .map(|agg| agg.state_fields())
-            .collect::<datafusion::error::Result<Vec<_>>>()
+            .collect::<datafusion_common::Result<Vec<_>>>()
             .map_err(|e| Error::invalid_input(e.to_string()))?
             .into_iter()
             .flatten()
@@ -152,7 +152,7 @@ impl CountFromMaskExec {
     /// to produce the row-address mask it serialized.
     async fn load_prefilter(
         prefilter_input: Arc<dyn ExecutionPlan>,
-        context: Arc<datafusion::execution::context::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> Result<RowAddrMask> {
         let mut stream = prefilter_input.execute(0, context).map_err(Error::from)?;
         let batch = stream
@@ -342,7 +342,7 @@ impl CountFromMaskExec {
         aggregate_funcs_len: usize,
         prefilter_input: Option<Arc<dyn ExecutionPlan>>,
         restrict_to_fragments: Option<RoaringBitmap>,
-        context: Arc<datafusion::execution::context::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
         schema: SchemaRef,
     ) -> Result<RecordBatch> {
         let prefilter = match prefilter_input {
@@ -429,8 +429,8 @@ impl ExecutionPlan for CountFromMaskExec {
 
     fn apply_expressions(
         &self,
-        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::error::Result<TreeNodeRecursion>,
-    ) -> datafusion::error::Result<TreeNodeRecursion> {
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
         apply_expression_roots(
             self.aggregate_funcs
                 .iter()
@@ -442,12 +442,12 @@ impl ExecutionPlan for CountFromMaskExec {
     fn with_new_children(
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         let prefilter_input = match children.len() {
             0 => None,
             1 => Some(children.into_iter().next().unwrap()),
             n => {
-                return Err(datafusion::error::DataFusionError::Internal(format!(
+                return Err(datafusion_common::DataFusionError::Internal(format!(
                     "CountFromMaskExec accepts 0 or 1 children, got {}",
                     n
                 )));
@@ -467,8 +467,8 @@ impl ExecutionPlan for CountFromMaskExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
-    ) -> datafusion::error::Result<datafusion::physical_plan::SendableRecordBatchStream> {
+        context: Arc<datafusion_execution::TaskContext>,
+    ) -> datafusion_common::Result<datafusion_physical_plan::SendableRecordBatchStream> {
         let schema = self.schema.clone();
         let batch_fut = Self::do_execute(
             self.dataset.clone(),
@@ -492,10 +492,10 @@ impl ExecutionPlan for CountFromMaskExec {
     fn partition_statistics(
         &self,
         _partition: Option<usize>,
-    ) -> datafusion::error::Result<Arc<datafusion::physical_plan::Statistics>> {
-        Ok(Arc::new(datafusion::physical_plan::Statistics {
-            num_rows: datafusion::common::stats::Precision::Exact(1),
-            ..datafusion::physical_plan::Statistics::new_unknown(&self.schema)
+    ) -> datafusion_common::Result<Arc<datafusion_physical_plan::Statistics>> {
+        Ok(Arc::new(datafusion_physical_plan::Statistics {
+            num_rows: datafusion_common::stats::Precision::Exact(1),
+            ..datafusion_physical_plan::Statistics::new_unknown(&self.schema)
         }))
     }
 

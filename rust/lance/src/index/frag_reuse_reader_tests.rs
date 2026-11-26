@@ -2870,8 +2870,8 @@ async fn fragment_scope_prunes_on_fri_effective_coverage() {
     let result = scoped
         .search(
             &SargableQuery::Range(
-                Bound::Included(datafusion::scalar::ScalarValue::Int32(Some(0))),
-                Bound::Included(datafusion::scalar::ScalarValue::Int32(Some(7))),
+                Bound::Included(datafusion_common::ScalarValue::Int32(Some(0))),
+                Bound::Included(datafusion_common::ScalarValue::Int32(Some(7))),
             ),
             &metrics,
         )

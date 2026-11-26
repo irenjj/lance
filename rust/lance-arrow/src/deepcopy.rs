@@ -97,21 +97,9 @@ pub fn deep_copy_array_data_sliced(data: &ArrayData) -> ArrayData {
     // Use MutableArrayData to efficiently copy just the slice
     let mut mutable = MutableArrayData::new(vec![data], false, data.len());
 
-    // Which index this takes depends on the layout, because arrow's extenders
-    // disagree about who applies `ArrayData::offset()`. The boolean and
-    // fixed-size-list ones add it themselves (the latter since arrow 59.3.2),
-    // so an offset-applied index there reads from twice the offset and runs
-    // off the end of the buffer. Every other layout either reads through an
-    // already-offset-applied view or, like struct, forwards the index to
-    // children that do not carry the parent's offset, and takes the absolute
-    // index.
-    let start = match data.data_type() {
-        DataType::Boolean | DataType::FixedSizeList(..) => 0,
-        _ => data.offset(),
-    };
     // The copy holds no more data than the valid source array, so offsets cannot overflow.
     mutable
-        .try_extend(0, start, start + data.len())
+        .try_extend(0, 0, data.len())
         .expect("copying a slice of a valid array cannot overflow its offsets");
 
     // Freeze into immutable ArrayData
@@ -210,10 +198,8 @@ mod tests {
 
     #[test]
     fn raw_parent_offset_struct_of_fixed_size_list_reaches_the_right_values() {
-        // A struct window held as the parent offset over whole children (the
-        // shape `StructArray::from` reads), with a fixed-size-list child: the
-        // struct extender forwards the absolute index, and the list scales it
-        // by its size into its own whole values.
+        // A raw struct can hold the window as a parent offset over whole children.
+        // The struct and fixed-size-list extenders must each apply their own offsets.
         let values = Int32Array::from(vec![10, 11, 20, 21, 30, 31]).to_data();
         let item = Arc::new(Field::new_list_field(DataType::Int32, false));
         let list = ArrayDataBuilder::new(DataType::FixedSizeList(item, 2))
@@ -236,9 +222,7 @@ mod tests {
 
     #[test]
     fn raw_parent_offset_struct_keeps_the_selected_child_row() {
-        // A struct whose children are whole and whose window is the parent
-        // offset: arrow's struct extender forwards the index to those children
-        // untouched, so it has to be the absolute one.
+        // The struct extender applies the parent offset before reading its children.
         let field = Arc::new(Field::new("a", DataType::Int32, false));
         let data = ArrayDataBuilder::new(DataType::Struct(vec![field].into()))
             .len(1)

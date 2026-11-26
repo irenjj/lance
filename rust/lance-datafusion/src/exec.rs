@@ -12,22 +12,19 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
-use arrow_schema::Schema as ArrowSchema;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::execution::memory_pool::PeakRecordingPool;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::{
-    catalog::{TableProvider, streaming::StreamingTable},
-    dataframe::DataFrame,
-    execution::{TaskContext, context::SessionContext},
-    logical_expr::LogicalPlan,
-    physical_plan::{
-        DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
-        analyze::AnalyzeExec, coalesce_partitions::CoalescePartitionsExec, metrics::MetricType,
-        metrics::MetricValue, stream::RecordBatchStreamAdapter, streaming::PartitionStream,
-    },
-};
+use datafusion_catalog::TableProvider;
 use datafusion_common::config::ConfigNonZeroUsize;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_execution::memory_pool::PeakRecordingPool;
+use datafusion_execution::{TaskContext, runtime_env::RuntimeEnv};
+use datafusion_expr::LogicalPlan;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+    analyze::AnalyzeExec, coalesce_partitions::CoalescePartitionsExec, metrics::MetricType,
+    metrics::MetricValue, stream::RecordBatchStreamAdapter,
+};
+use datafusion_session::Session;
 use futures::StreamExt;
 use lance_core::{Error, Result, utils::tracing::StreamTracingExt};
 use tracing::Span;
@@ -64,7 +61,7 @@ impl TracedExec {
 impl DisplayAs for TracedExec {
     fn fmt_as(
         &self,
-        t: datafusion::physical_plan::DisplayFormatType,
+        t: datafusion_physical_plan::DisplayFormatType,
         f: &mut std::fmt::Formatter,
     ) -> std::fmt::Result {
         match t {
@@ -126,27 +123,32 @@ impl ExecutionPlan for TracedExec {
     }
 }
 
-pub fn new_session_context(options: &LanceExecutionOptions) -> SessionContext {
-    let ctx =
-        SessionContext::new_with_config_rt(new_session_config(options), new_runtime_env(options));
-    register_functions(&ctx);
-    ctx
+fn new_execution_template(
+    options: &LanceExecutionOptions,
+    runtime: Arc<RuntimeEnv>,
+) -> Arc<TaskContext> {
+    let mut context = TaskContext::default()
+        .with_session_config(new_session_config(options))
+        .with_runtime(runtime);
+    datafusion_functions::register_all(&mut context).expect("register built-in scalar functions");
+    datafusion_functions_nested::register_all(&mut context)
+        .expect("register built-in nested functions");
+    datafusion_functions_aggregate::register_all(&mut context)
+        .expect("register built-in aggregate functions");
+    datafusion_functions_window::register_all(&mut context)
+        .expect("register built-in window functions");
+    register_functions(&mut context).expect("register Lance functions");
+    Arc::new(context)
 }
 
-/// Build a fresh operation-owned session that records DataFusion pool reservations.
-///
-/// This records accounted allocations only, not process RSS, cache occupancy, or
-/// all Arrow buffers. It starts no sampler and preserves the configured limits.
-pub fn new_session_context_with_memory_tracking(
+/// Build a fresh execution context that records DataFusion pool reservations.
+fn new_execution_template_with_memory_tracking(
     options: &LanceExecutionOptions,
-) -> Result<SessionContext> {
+) -> Result<Arc<TaskContext>> {
     let mut runtime = Arc::try_unwrap(new_runtime_env(options))
         .map_err(|_| Error::internal("new operation runtime unexpectedly shared"))?;
     runtime.memory_pool = Arc::new(PeakRecordingPool::new(runtime.memory_pool));
-    let context =
-        SessionContext::new_with_config_rt(new_session_config(options), Arc::new(runtime));
-    register_functions(&context);
-    Ok(context)
+    Ok(new_execution_template(options, Arc::new(runtime)))
 }
 
 /// Cache key for session contexts based on resolved configuration values.
@@ -168,7 +170,7 @@ impl SessionContextCacheKey {
 }
 
 struct CachedSessionContext {
-    context: SessionContext,
+    context: Arc<TaskContext>,
     last_access: std::time::Instant,
 }
 
@@ -191,9 +193,9 @@ fn get_max_cache_size() -> usize {
 
 /// Reuses unbounded sessions, while giving each spilling caller a fresh bounded
 /// memory pool so concurrent sorts cannot consume each other's headroom.
-pub fn get_session_context(options: &LanceExecutionOptions) -> SessionContext {
+pub(crate) fn get_execution_template(options: &LanceExecutionOptions) -> Arc<TaskContext> {
     if options.use_spilling() {
-        return new_session_context(options);
+        return new_execution_template(options, new_runtime_env(options));
     }
 
     let key = SessionContextCacheKey::from_options(options);
@@ -217,7 +219,7 @@ pub fn get_session_context(options: &LanceExecutionOptions) -> SessionContext {
         cache.remove(&lru_key);
     }
 
-    let context = new_session_context(options);
+    let context = new_execution_template(options, new_runtime_env(options));
     cache.insert(
         key,
         CachedSessionContext {
@@ -234,13 +236,27 @@ pub fn get_session_context(options: &LanceExecutionOptions) -> SessionContext {
 /// context's identity as the identity of one plan execution, for example to
 /// share a MultiMatch prefilter mask only between the fields of one query.
 fn get_task_context(
-    session_ctx: &SessionContext,
+    template: &TaskContext,
     options: &LanceExecutionOptions,
 ) -> Result<Arc<TaskContext>> {
-    // Build from the session state in place. `SessionContext::state` would clone
-    // the whole state (every function map, rule list and option) only to drop
-    // it, which is a measurable share of CPU for short queries.
-    let task_ctx = track_execution_memory(TaskContext::from(session_ctx), options);
+    let task = TaskContext::new(
+        None,
+        template.session_id(),
+        template.session_config().clone(),
+        template.scalar_functions().clone(),
+        template.higher_order_functions().clone(),
+        template.aggregate_functions().clone(),
+        template.window_functions().clone(),
+        template.runtime_env(),
+    );
+    configure_task_context(task, options)
+}
+
+fn configure_task_context(
+    task: TaskContext,
+    options: &LanceExecutionOptions,
+) -> Result<Arc<TaskContext>> {
+    let task_ctx = track_execution_memory(task, options);
     let Some(batch_size) = options.validated_batch_size()? else {
         return Ok(Arc::new(task_ctx));
     };
@@ -262,7 +278,7 @@ pub fn execute_plan(
     plan: Arc<dyn ExecutionPlan>,
     options: LanceExecutionOptions,
 ) -> Result<SendableRecordBatchStream> {
-    let task_context = get_task_context(&get_session_context(&options), &options)?;
+    let task_context = get_task_context(&get_execution_template(&options), &options)?;
     execute_plan_with_context(plan, options, task_context)
 }
 
@@ -274,9 +290,9 @@ pub fn execute_plan(
 pub fn execute_plan_with_session_context(
     plan: Arc<dyn ExecutionPlan>,
     options: LanceExecutionOptions,
-    session_ctx: &SessionContext,
+    session_ctx: &dyn Session,
 ) -> Result<SendableRecordBatchStream> {
-    let task_context = get_task_context(session_ctx, &options)?;
+    let task_context = configure_task_context(TaskContext::from(session_ctx), &options)?;
     execute_plan_with_context(plan, options, task_context)
 }
 
@@ -287,9 +303,10 @@ pub fn execute_plan_with_session_context(
 ///
 /// ```
 /// # use std::sync::Arc;
-/// # use datafusion::{execution::context::SessionContext, physical_plan::ExecutionPlan};
+/// # use datafusion_session::Session;
+/// # use datafusion_physical_plan::ExecutionPlan;
 /// # use lance_datafusion::exec::{execute_plan_with_session_diagnostics, LanceExecutionOptions};
-/// # fn example(plan: Arc<dyn ExecutionPlan>, session: &SessionContext) -> lance_core::Result<()> {
+/// # fn example(plan: Arc<dyn ExecutionPlan>, session: &dyn Session) -> lance_core::Result<()> {
 /// let stream = execute_plan_with_session_diagnostics(
 ///     plan, LanceExecutionOptions::default(), session,
 ///     Arc::new(|report| { let _outcome = report.outcome; }),
@@ -301,10 +318,10 @@ pub fn execute_plan_with_session_context(
 pub fn execute_plan_with_session_diagnostics(
     plan: Arc<dyn ExecutionPlan>,
     options: LanceExecutionOptions,
-    session: &SessionContext,
+    session: &dyn Session,
     callback: ExecutionDiagnosticsCallback,
 ) -> Result<SendableRecordBatchStream> {
-    let context = get_task_context(session, &options)?;
+    let context = configure_task_context(TaskContext::from(session), &options)?;
     execute_plan_with_diagnostics(plan, options, context, callback)
 }
 
@@ -346,7 +363,7 @@ pub struct ExecutionAnalysis {
 ///
 /// ```
 /// # use std::sync::Arc;
-/// # use datafusion::physical_plan::ExecutionPlan;
+/// # use datafusion_physical_plan::ExecutionPlan;
 /// # use lance_core::Result;
 /// # use lance_datafusion::exec::{analyze_plan_report, LanceExecutionOptions, ExecutionOutcome};
 /// # async fn example(plan: Arc<dyn ExecutionPlan>) -> Result<()> {
@@ -359,7 +376,7 @@ pub async fn analyze_plan_report(
     plan: Arc<dyn ExecutionPlan>,
     options: LanceExecutionOptions,
 ) -> Result<ExecutionAnalysis> {
-    let session = new_session_context_with_memory_tracking(&options)?;
+    let session = new_execution_template_with_memory_tracking(&options)?;
     let context = get_task_context(&session, &options)?;
     analyze_plan_report_with_context(plan, options, context).await
 }
@@ -422,7 +439,7 @@ pub async fn analyze_plan_with_context(
             .build(),
     );
 
-    let session_ctx = get_session_context(&options);
+    let session_ctx = get_execution_template(&options);
     let task_context = match task_context {
         Some(task_context) => task_context,
         None => get_task_context(&session_ctx, &options)?,
@@ -531,7 +548,7 @@ pub fn format_plan(plan: Arc<dyn ExecutionPlan>) -> String {
 
             // Format the plan description
             let displayable =
-                datafusion::physical_plan::display::DisplayableExecutionPlan::new(plan.as_ref());
+                datafusion_physical_plan::display::DisplayableExecutionPlan::new(plan.as_ref());
             let plan_str = displayable.one_line().to_string();
             let plan_str = plan_str.trim();
 
@@ -590,119 +607,33 @@ pub fn format_plan(plan: Arc<dyn ExecutionPlan>) -> String {
     format!("{}", wrapper)
 }
 
-pub trait SessionContextExt {
-    /// Creates a DataFrame for reading a stream of data
-    ///
-    /// This dataframe may only be queried once, future queries will fail
-    fn read_one_shot(
-        &self,
-        data: SendableRecordBatchStream,
-    ) -> datafusion::common::Result<DataFrame>;
-}
-
-pub struct OneShotPartitionStream {
-    data: Arc<Mutex<Option<SendableRecordBatchStream>>>,
-    schema: Arc<ArrowSchema>,
-}
-
-impl std::fmt::Debug for OneShotPartitionStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let data = self.data.lock().unwrap();
-        f.debug_struct("OneShotPartitionStream")
-            .field("exhausted", &data.is_none())
-            .field("schema", self.schema.as_ref())
-            .finish()
-    }
-}
-
-impl OneShotPartitionStream {
-    pub fn new(data: SendableRecordBatchStream) -> Self {
-        let schema = data.schema();
-        Self {
-            data: Arc::new(Mutex::new(Some(data))),
-            schema,
-        }
-    }
-}
-
-impl PartitionStream for OneShotPartitionStream {
-    fn schema(&self) -> &arrow_schema::SchemaRef {
-        &self.schema
-    }
-
-    fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
-        let mut stream = self.data.lock().unwrap();
-        stream
-            .take()
-            .expect("Attempt to consume a one shot dataframe multiple times")
-    }
-}
-
-impl SessionContextExt for SessionContext {
-    fn read_one_shot(
-        &self,
-        data: SendableRecordBatchStream,
-    ) -> datafusion::common::Result<DataFrame> {
-        let schema = data.schema();
-        let part_stream = Arc::new(OneShotPartitionStream::new(data));
-        let provider = StreamingTable::try_new(schema, vec![part_stream])?;
-        self.read_table(Arc::new(provider))
-    }
-}
-
 /// Scan a [`TableProvider`] into a single-partition [`SendableRecordBatchStream`].
 ///
-/// Multi-partition providers are coalesced into a single partition. This adapts a
-/// re-scannable provider back into the one stream the writer pipeline consumes;
-/// re-scanning the same provider (e.g. on a write retry) yields a fresh stream.
-///
-/// # Examples
-///
-/// ```
-/// # use std::sync::Arc;
-/// # use arrow_array::{Int32Array, RecordBatch};
-/// # use arrow_schema::{DataType, Field, Schema};
-/// # use datafusion::catalog::TableProvider;
-/// # use datafusion::datasource::MemTable;
-/// # use futures::TryStreamExt;
-/// # use lance_datafusion::exec::provider_to_stream;
-/// # #[tokio::main]
-/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
-/// let batch =
-///     RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1, 2, 3]))])?;
-/// let provider: Arc<dyn TableProvider> = Arc::new(MemTable::try_new(schema, vec![vec![batch]])?);
-///
-/// // A re-scannable provider yields a fresh stream on each call.
-/// let batches: Vec<RecordBatch> = provider_to_stream(provider).await?.try_collect().await?;
-/// assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 3);
-/// # Ok(())
-/// # }
-/// ```
+/// Multi-partition providers are coalesced into a single partition.
 pub async fn provider_to_stream(
     provider: Arc<dyn TableProvider>,
+    session: &dyn Session,
 ) -> Result<SendableRecordBatchStream> {
-    let ctx = SessionContext::new();
-    let plan = provider.scan(&ctx.state(), None, &[], None).await?;
+    let plan = provider.scan(session, None, &[], None).await?;
     let plan: Arc<dyn ExecutionPlan> =
         if plan.properties().output_partitioning().partition_count() > 1 {
             Arc::new(CoalescePartitionsExec::new(plan))
         } else {
             plan
         };
-    Ok(plan.execute(0, ctx.task_ctx())?)
+    Ok(plan.execute(0, session.task_ctx())?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow_array::record_batch;
-    use datafusion::execution::memory_pool::{MemoryConsumer, PeakRecordingPool};
     use datafusion_common::DataFusionError;
+    use datafusion_execution::memory_pool::{MemoryConsumer, PeakRecordingPool};
 
-    use datafusion::execution::memory_pool::MemoryLimit;
-    use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+    use datafusion_execution::memory_pool::MemoryLimit;
     use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
+    use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
     use futures::stream;
 
     // Serialize cache tests since they share global state
@@ -756,8 +687,8 @@ mod tests {
             target_partition: Some(1),
             ..Default::default()
         };
-        let first = new_session_context_with_memory_tracking(&options).unwrap();
-        let second = new_session_context_with_memory_tracking(&options).unwrap();
+        let first = new_execution_template_with_memory_tracking(&options).unwrap();
+        let second = new_execution_template_with_memory_tracking(&options).unwrap();
         let first_pool = &first.runtime_env().memory_pool;
         let second_pool = &second.runtime_env().memory_pool;
         let first_reservation = MemoryConsumer::new("first").register(first_pool);
@@ -794,7 +725,7 @@ mod tests {
 
         // Create first session with default options
         let opts1 = LanceExecutionOptions::default();
-        let _ctx1 = get_session_context(&opts1);
+        let _ctx1 = get_execution_template(&opts1);
 
         {
             let cache_guard = cache.lock().unwrap();
@@ -802,7 +733,7 @@ mod tests {
         }
 
         // Same options should reuse cached session (no new entry)
-        let _ctx1_again = get_session_context(&opts1);
+        let _ctx1_again = get_execution_template(&opts1);
         {
             let cache_guard = cache.lock().unwrap();
             assert_eq!(cache_guard.len(), 1);
@@ -813,7 +744,7 @@ mod tests {
             target_partition: Some(1),
             ..Default::default()
         };
-        let _ctx2 = get_session_context(&opts2);
+        let _ctx2 = get_execution_template(&opts2);
         {
             let cache_guard = cache.lock().unwrap();
             assert_eq!(cache_guard.len(), 2);
@@ -828,7 +759,7 @@ mod tests {
             target_partition: Some(1),
             ..Default::default()
         };
-        let contexts: Vec<_> = (0..3).map(|_| get_session_context(&options)).collect();
+        let contexts: Vec<_> = (0..3).map(|_| get_execution_template(&options)).collect();
         let mut reservations = Vec::with_capacity(contexts.len());
 
         // Each reservation fits its own pool, but any two exceed a shared pool.
@@ -861,7 +792,7 @@ mod tests {
             .collect();
 
         for config in &configs {
-            let _ctx = get_session_context(config);
+            let _ctx = get_execution_template(config);
         }
 
         {
@@ -872,14 +803,14 @@ mod tests {
         // Access config[0] to make it more recently used than config[1]
         // (config[0] was inserted first, so without this access it would be evicted)
         std::thread::sleep(std::time::Duration::from_millis(1));
-        let _ctx = get_session_context(&configs[0]);
+        let _ctx = get_execution_template(&configs[0]);
 
         // Add a 5th configuration - should evict config[1] (now least recently used)
         let opts5 = LanceExecutionOptions {
             mem_pool_size: Some(5 * 1024 * 1024),
             ..Default::default()
         };
-        let _ctx5 = get_session_context(&opts5);
+        let _ctx5 = get_execution_template(&opts5);
 
         {
             let cache_guard = cache.lock().unwrap();
@@ -913,7 +844,7 @@ mod tests {
         let _lock = CACHE_TEST_LOCK.lock().unwrap();
 
         let default_options = LanceExecutionOptions::default();
-        let session_ctx = get_session_context(&default_options);
+        let session_ctx = get_execution_template(&default_options);
         let task_ctx = get_task_context(&session_ctx, &default_options).unwrap();
         let other_task_ctx = get_task_context(&session_ctx, &default_options).unwrap();
         // Lance operators key per-execution state on the task context's identity.
@@ -946,7 +877,7 @@ mod tests {
             batch_size: Some(17),
             ..Default::default()
         };
-        let spill_session_ctx = get_session_context(&spill_options);
+        let spill_session_ctx = get_execution_template(&spill_options);
         let spill_task_ctx = get_task_context(&spill_session_ctx, &spill_options).unwrap();
         assert_eq!(spill_task_ctx.session_config().batch_size(), 17);
         assert_eq!(spill_task_ctx.session_config().target_partitions(), 3);
@@ -1109,7 +1040,7 @@ mod tests {
 
         // A context carrying the extension executes the node successfully.
         let options = LanceExecutionOptions::default();
-        let session_ctx = get_session_context(&options);
+        let session_ctx = get_execution_template(&options);
         let config = session_ctx
             .task_ctx()
             .session_config()

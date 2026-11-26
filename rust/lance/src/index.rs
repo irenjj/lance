@@ -13,23 +13,13 @@
 use lance_index::{IndexType, scalar::registry::ScalarIndexPlugin};
 
 mod api;
-pub(crate) mod append;
-mod create;
 pub(crate) mod field_dependencies;
-pub mod frag_reuse;
 pub mod frag_reuse_reader;
-mod frag_reuse_remapping;
-mod frag_reuse_v0_cache;
-pub(crate) mod frag_reuse_with_stable_row_ids;
-mod lifecycle;
 pub(crate) mod loading;
-pub mod mem_wal;
 pub(crate) mod memory_progress;
-pub mod optimize;
 pub mod prefilter;
 mod prewarm;
 pub(crate) mod provenance;
-pub(crate) mod remap;
 pub mod scalar;
 pub(crate) mod scalar_logical;
 pub(crate) mod segment;
@@ -44,7 +34,6 @@ pub use crate::index::api::{
 pub use crate::index::loading::DatasetIndexInternalExt;
 pub use crate::index::prefilter::{FilterLoader, PreFilter};
 pub use crate::index::vector::{LogicalIvfView, LogicalVectorIndex};
-pub use create::CreateIndexBuilder;
 pub use lance_index::IndexDescription;
 pub use lance_index::IndexParams;
 pub use lance_index::progress::{IndexBuildProgress, NoopIndexBuildProgress};

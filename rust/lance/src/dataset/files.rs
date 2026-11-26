@@ -12,8 +12,8 @@ use arrow_array::builder::{
     Int64Builder, StringBuilder, StringDictionaryBuilder, TimestampMicrosecondBuilder,
 };
 use arrow_array::types::Int32Type;
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_execution::SendableRecordBatchStream;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use either::Either;
 use futures::{StreamExt, TryStreamExt};
 use lance_table::format::IndexMetadata;
@@ -315,7 +315,7 @@ impl Dataset {
         let ManifestScan { stream, total, .. } = scan_manifests(self, options.min_version);
 
         // Output channel: Emitter and IndexLister both send batches here.
-        let (tx, rx) = tokio::sync::mpsc::channel::<datafusion::error::Result<RecordBatch>>(4);
+        let (tx, rx) = tokio::sync::mpsc::channel::<datafusion_common::Result<RecordBatch>>(4);
         // Index channel: Emitter -> IndexLister.
         let (tx_indexes, mut rx_indexes) =
             tokio::sync::mpsc::channel::<(u64, Vec<IndexMetadata>)>(8);
@@ -335,7 +335,7 @@ impl Dataset {
                     Ok(scanned) => scanned,
                     Err(e) => {
                         let _ = tx_emitter
-                            .send(Err(datafusion::error::DataFusionError::from(e)))
+                            .send(Err(datafusion_common::DataFusionError::from(e)))
                             .await;
                         return;
                     }
@@ -344,7 +344,7 @@ impl Dataset {
                 let batches =
                     manifest_file_batches(&scanned.manifest, &uri_emitter, &scanned.manifest_path);
                 for batch_result in batches {
-                    let df_result = batch_result.map_err(datafusion::error::DataFusionError::from);
+                    let df_result = batch_result.map_err(datafusion_common::DataFusionError::from);
                     if tx_emitter.send(df_result).await.is_err() {
                         return;
                     }
@@ -392,7 +392,7 @@ impl Dataset {
                             }
                             Err(e) => {
                                 let _ = tx_idx
-                                    .send(Err(datafusion::error::DataFusionError::from(e)))
+                                    .send(Err(datafusion_common::DataFusionError::from(e)))
                                     .await;
                                 return;
                             }
@@ -400,7 +400,7 @@ impl Dataset {
                     }
                     Err(e) => {
                         let _ = tx_idx
-                            .send(Err(datafusion::error::DataFusionError::from(e)))
+                            .send(Err(datafusion_common::DataFusionError::from(e)))
                             .await;
                         return;
                     }
@@ -446,7 +446,7 @@ impl Dataset {
                     Err(e) => futures::future::err(e),
                 },
             )
-            .map_err(datafusion::error::DataFusionError::from);
+            .map_err(datafusion_common::DataFusionError::from);
 
         Box::pin(RecordBatchStreamAdapter::new(
             arrow::ALL_FILES_SCHEMA.clone(),

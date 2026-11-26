@@ -70,7 +70,7 @@ mod test {
     use crate::index::DatasetIndexExt;
     use arrow_array::{Float32Array, RecordBatch, UInt32Array};
     use arrow_schema::Schema;
-    use datafusion::execution::SendableRecordBatchStream;
+    use datafusion_execution::SendableRecordBatchStream;
     use lance_core::deepsize::DeepSizeOf;
     use lance_file::version::LanceFileVersion;
     use lance_file::versions::v1::writer::{

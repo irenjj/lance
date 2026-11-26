@@ -3055,7 +3055,9 @@ async fn read_staged_metadata(
             token_set_format = Some(TokenSetFormat::from_str(name)?);
         }
         if format_version.is_none() {
-            format_version = Some(parse_format_version_from_metadata(metadata)?);
+            format_version = Some(parse_format_version_from_metadata(
+                &arrow_schema::Metadata::from(metadata.clone()),
+            )?);
         }
 
         if reader.num_rows() > 0 {
@@ -4288,7 +4290,7 @@ mod tests {
         let remapped_partitions = (0..expected_partitions.len() as u64).collect::<Vec<_>>();
         assert_eq!(written_partitions, remapped_partitions);
         assert_eq!(
-            parse_format_version_from_metadata(metadata)?,
+            parse_format_version_from_metadata(&arrow_schema::Metadata::from(metadata.clone()))?,
             InvertedListFormatVersion::V2
         );
 

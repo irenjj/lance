@@ -271,7 +271,7 @@ impl ScalarIndex for LogicalScalarIndex {
 
     async fn update(
         &self,
-        _new_data: datafusion::physical_plan::SendableRecordBatchStream,
+        _new_data: datafusion_physical_plan::SendableRecordBatchStream,
         _dest_store: &dyn lance_index::scalar::IndexStore,
         _old_data_filter: Option<lance_index::scalar::OldIndexDataFilter>,
     ) -> Result<CreatedIndex> {

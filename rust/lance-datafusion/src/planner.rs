@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::exec::{LanceExecutionOptions, get_session_context};
+use crate::exec::{LanceExecutionOptions, get_execution_template};
 use crate::expr::safe_coerce_scalar;
 use crate::logical_expr::{coerce_filter_type_to_boolean, get_as_string_scalar_opt, resolve_expr};
 use crate::membership::simplify_membership_regions;
@@ -24,37 +24,35 @@ use arrow_schema::{
     SchemaRef, TimeUnit,
 };
 use arrow_select::concat::concat;
-use datafusion::catalog::Session;
-use datafusion::common::DFSchema;
-use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::config::ConfigOptions;
-use datafusion::error::Result as DFResult;
-use datafusion::execution::context::{SessionContext, SessionState};
-use datafusion::logical_expr::expr::ScalarFunction;
-use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
-use datafusion::logical_expr::planner::{ExprPlanner, PlannerResult, RawFieldAccessExpr};
-use datafusion::logical_expr::{
+use datafusion_catalog::Session;
+use datafusion_common::Column;
+use datafusion_common::DFSchema;
+use datafusion_common::Result as DFResult;
+use datafusion_common::ScalarValue;
+use datafusion_common::config::ConfigOptions;
+use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_execution::TaskContext;
+use datafusion_expr::Expr;
+use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
+use datafusion_expr::planner::{ExprPlanner, PlannerResult, RawFieldAccessExpr};
+use datafusion_expr::{
     AggregateUDF, ColumnarValue, ExprSchemable, GetFieldAccess, ScalarFunctionArgs, ScalarUDF,
     ScalarUDFImpl, Signature, Volatility, WindowUDF,
 };
-use datafusion::optimizer::simplify_expressions::SimplifyContext;
-use datafusion::sql::planner::{
+use datafusion_expr::{Between, BinaryExpr, Like, Operator};
+use datafusion_functions::core::getfield::GetFieldFunc;
+use datafusion_optimizer::simplify_expressions::SimplifyContext;
+use datafusion_physical_plan::PhysicalExpr;
+use datafusion_sql::planner::{
     ContextProvider, NullOrdering, ParserOptions, PlannerContext, SqlToRel,
 };
-use datafusion::sql::sqlparser::ast::{
+use datafusion_sql::sqlparser::ast::{
     AccessExpr, Array as SQLArray, BinaryOperator, CeilFloorKind, DataType as SQLDataType,
     DateTimeField, ExactNumberInfo, Expr as SQLExpr, Function, FunctionArg, FunctionArgExpr,
     FunctionArguments, Ident, ObjectNamePart, Subscript, TimezoneInfo, TypedString, UnaryOperator,
     Value, ValueWithSpan,
 };
-use datafusion::{
-    common::Column,
-    logical_expr::{Between, BinaryExpr, Like, Operator},
-    physical_plan::PhysicalExpr,
-    prelude::Expr,
-    scalar::ScalarValue,
-};
-use datafusion_functions::core::getfield::GetFieldFunc;
 use lance_core::datatypes::{Schema, parse_field_path};
 use lance_core::error::LanceOptionExt;
 
@@ -116,14 +114,14 @@ fn parse_decimal(number: &str, negative: bool) -> Option<ScalarValue> {
 // The escape in `LIKE/ILIKE ... ESCAPE '<char>'` must be exactly one character.
 // Reject empty or multi-character escape strings rather than silently treating
 // them as "no escape" or truncating to the first character.
-fn parse_like_escape_char(escape_char: &Option<ValueWithSpan>) -> Result<Option<char>> {
+fn parse_like_escape_char(escape_char: &Option<Box<SQLExpr>>) -> Result<Option<char>> {
     let Some(value) = escape_char else {
         return Ok(None);
     };
-    let ValueWithSpan {
+    let SQLExpr::Value(ValueWithSpan {
         value: Value::SingleQuotedString(escape),
         ..
-    } = value
+    }) = value.as_ref()
     else {
         return Err(Error::invalid_input(format!(
             "Invalid escape character in LIKE expression. Expected a single character wrapped with single quotes, got {value}"
@@ -167,7 +165,7 @@ impl ScalarUDFImpl for CastListF16Udf {
                 if field.data_type() != &ArrowDataType::Float32
                     && field.data_type() != &ArrowDataType::Float16
                 {
-                    return Err(datafusion::error::DataFusionError::Execution(
+                    return Err(datafusion_common::DataFusionError::Execution(
                         "cast_list_f16 only supports list of float32 or float16".to_string(),
                     ));
                 }
@@ -184,7 +182,7 @@ impl ScalarUDFImpl for CastListF16Udf {
                 if field.data_type() != &ArrowDataType::Float32
                     && field.data_type() != &ArrowDataType::Float16
                 {
-                    return Err(datafusion::error::DataFusionError::Execution(
+                    return Err(datafusion_common::DataFusionError::Execution(
                         "cast_list_f16 only supports list of float32 or float16".to_string(),
                     ));
                 }
@@ -194,7 +192,7 @@ impl ScalarUDFImpl for CastListF16Udf {
                     field.is_nullable(),
                 ))))
             }
-            _ => Err(datafusion::error::DataFusionError::Execution(
+            _ => Err(datafusion_common::DataFusionError::Execution(
                 "cast_list_f16 only supports FixedSizeList/List arguments".to_string(),
             )),
         }
@@ -202,7 +200,7 @@ impl ScalarUDFImpl for CastListF16Udf {
 
     fn invoke_with_args(&self, func_args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
         let ColumnarValue::Array(arr) = &func_args.args[0] else {
-            return Err(datafusion::error::DataFusionError::Execution(
+            return Err(datafusion_common::DataFusionError::Execution(
                 "cast_list_f16 only supports array arguments".to_string(),
             ));
         };
@@ -222,7 +220,7 @@ impl ScalarUDFImpl for CastListF16Udf {
                 field.is_nullable(),
             ))),
             _ => {
-                return Err(datafusion::error::DataFusionError::Execution(
+                return Err(datafusion_common::DataFusionError::Execution(
                     "cast_list_f16 only supports array arguments".to_string(),
                 ));
             }
@@ -235,60 +233,56 @@ impl ScalarUDFImpl for CastListF16Udf {
 
 // Adapter that instructs datafusion how lance expects expressions to be interpreted
 struct LanceContextProvider {
-    options: datafusion::config::ConfigOptions,
-    // Functions are looked up in the session's shared state rather than in a
-    // clone of it: planners are created several times per query, and cloning
-    // every function map and rule list for each one is a measurable share of
-    // CPU for short queries.
-    session: SessionContext,
+    options: datafusion_common::config::ConfigOptions,
+    functions: Arc<TaskContext>,
     expr_planners: Vec<Arc<dyn ExprPlanner>>,
 }
 
 impl LanceContextProvider {
-    fn new(session: SessionContext) -> Self {
-        let expr_planners = session.state_ref().read().expr_planners().to_vec();
+    fn new(functions: Arc<TaskContext>) -> Self {
         Self {
             options: ConfigOptions::default(),
-            session,
-            expr_planners,
+            functions,
+            expr_planners: vec![
+                Arc::new(datafusion_functions::core::planner::CoreFunctionPlanner::default()),
+                Arc::new(datafusion_functions_nested::planner::NestedFunctionPlanner),
+                Arc::new(datafusion_functions_nested::planner::FieldAccessPlanner),
+                Arc::new(datafusion_functions::datetime::planner::DatetimeFunctionPlanner),
+                Arc::new(datafusion_functions::unicode::planner::UnicodeFunctionPlanner),
+                Arc::new(datafusion_functions_aggregate::planner::AggregateFunctionPlanner),
+                Arc::new(datafusion_functions_window::planner::WindowFunctionPlanner),
+            ],
         }
-    }
-
-    fn with_state<T>(&self, read: impl FnOnce(&SessionState) -> T) -> T {
-        read(&self.session.state_ref().read())
     }
 }
 
 impl Default for LanceContextProvider {
     fn default() -> Self {
-        Self::new(get_session_context(&LanceExecutionOptions::default()))
+        Self::new(get_execution_template(&LanceExecutionOptions::default()))
     }
 }
 
 impl ContextProvider for LanceContextProvider {
     fn get_table_source(
         &self,
-        name: datafusion::common::TableReference,
-    ) -> DFResult<Arc<dyn datafusion::logical_expr::TableSource>> {
-        Err(datafusion::error::DataFusionError::NotImplemented(format!(
+        name: datafusion_common::TableReference,
+    ) -> DFResult<Arc<dyn datafusion_expr::TableSource>> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
             "Attempt to reference inner table {} not supported",
             name
         )))
     }
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
-        self.with_state(|state| state.aggregate_functions().get(name).cloned())
+        self.functions.aggregate_functions().get(name).cloned()
     }
 
     fn get_window_meta(&self, name: &str) -> Option<Arc<WindowUDF>> {
-        self.with_state(|state| state.window_functions().get(name).cloned())
+        self.functions.window_functions().get(name).cloned()
     }
 
-    fn get_higher_order_meta(
-        &self,
-        name: &str,
-    ) -> Option<Arc<datafusion::logical_expr::HigherOrderUDF>> {
-        self.with_state(|state| state.higher_order_functions().get(name).cloned())
+    fn get_higher_order_meta(&self, name: &str) -> Option<Arc<datafusion_expr::HigherOrderUDF>> {
+        self.functions.higher_order_functions().get(name).cloned()
     }
 
     fn get_function_meta(&self, f: &str) -> Option<Arc<ScalarUDF>> {
@@ -296,7 +290,7 @@ impl ContextProvider for LanceContextProvider {
             // TODO: cast should go thru CAST syntax instead of UDF
             // Going thru UDF makes it hard for the optimizer to find no-ops
             "_cast_list_f16" => Some(Arc::new(ScalarUDF::new_from_impl(CastListF16Udf::new()))),
-            _ => self.with_state(|state| state.scalar_functions().get(f).cloned()),
+            _ => self.functions.scalar_functions().get(f).cloned(),
         }
     }
 
@@ -305,24 +299,32 @@ impl ContextProvider for LanceContextProvider {
         None
     }
 
-    fn options(&self) -> &datafusion::config::ConfigOptions {
+    fn options(&self) -> &datafusion_common::config::ConfigOptions {
         &self.options
     }
 
     fn udf_names(&self) -> Vec<String> {
-        self.with_state(|state| state.scalar_functions().keys().cloned().collect())
+        self.functions.scalar_functions().keys().cloned().collect()
     }
 
     fn udaf_names(&self) -> Vec<String> {
-        self.with_state(|state| state.aggregate_functions().keys().cloned().collect())
+        self.functions
+            .aggregate_functions()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn udwf_names(&self) -> Vec<String> {
-        self.with_state(|state| state.window_functions().keys().cloned().collect())
+        self.functions.window_functions().keys().cloned().collect()
     }
 
     fn higher_order_function_names(&self) -> Vec<String> {
-        self.with_state(|state| state.higher_order_functions().keys().cloned().collect())
+        self.functions
+            .higher_order_functions()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn get_expr_planners(&self) -> &[Arc<dyn ExprPlanner>] {
@@ -372,12 +374,12 @@ impl Planner {
         }
     }
 
-    /// Like [`Self::new`], but resolves functions against `session` instead of
-    /// Lance's default session, so functions registered on it can be planned.
-    pub fn new_with_session(schema: SchemaRef, session: SessionContext) -> Self {
+    /// Resolve functions from the supplied task context, for example one
+    /// obtained from [`Session::task_ctx`] with application functions registered.
+    pub fn new_with_functions(schema: SchemaRef, functions: Arc<TaskContext>) -> Self {
         Self {
             schema,
-            context_provider: LanceContextProvider::new(session),
+            context_provider: LanceContextProvider::new(functions),
             enable_relations: false,
         }
     }
@@ -636,7 +638,7 @@ impl Planner {
             }
 
             UnaryOperator::Minus => {
-                use datafusion::logical_expr::lit;
+                use datafusion_expr::lit;
                 match expr {
                     SQLExpr::Value(ValueWithSpan { value: Value::Number(n, _), ..}) => match n.parse::<i64>() {
                         Ok(n) => lit(-n),
@@ -663,7 +665,7 @@ impl Planner {
 
     // See datafusion `sqlToRel::parse_sql_number()`
     fn number(&self, value: &str, negative: bool) -> Result<Expr> {
-        use datafusion::logical_expr::lit;
+        use datafusion_expr::lit;
         let value: Cow<str> = if negative {
             Cow::Owned(format!("-{}", value))
         } else {
@@ -991,7 +993,7 @@ impl Planner {
             }) => {
                 let value = value.clone().into_string().expect_ok()?;
                 let data_type = with_utc_zone_if_offset(&value, self.parse_type(data_type)?);
-                Ok(Expr::Cast(datafusion::logical_expr::Cast::new(
+                Ok(Expr::Cast(datafusion_expr::Cast::new(
                     Box::new(Expr::Literal(ScalarValue::Utf8(Some(value)), None)),
                     data_type,
                 )))
@@ -1126,14 +1128,14 @@ impl Planner {
                 kind,
                 ..
             } => match kind {
-                datafusion::sql::sqlparser::ast::CastKind::TryCast
-                | datafusion::sql::sqlparser::ast::CastKind::SafeCast => {
-                    Ok(Expr::TryCast(datafusion::logical_expr::TryCast::new(
+                datafusion_sql::sqlparser::ast::CastKind::TryCast
+                | datafusion_sql::sqlparser::ast::CastKind::SafeCast => {
+                    Ok(Expr::TryCast(datafusion_expr::TryCast::new(
                         Box::new(self.parse_sql_expr(expr)?),
                         self.parse_type(data_type)?,
                     )))
                 }
-                _ => Ok(Expr::Cast(datafusion::logical_expr::Cast::new(
+                _ => Ok(Expr::Cast(datafusion_expr::Cast::new(
                     Box::new(self.parse_sql_expr(expr)?),
                     self.parse_type(data_type)?,
                 ))),
@@ -1368,7 +1370,7 @@ impl Planner {
             .with_query_execution_start_time(Some(Utc::now()))
             .build();
         let simplifier =
-            datafusion::optimizer::simplify_expressions::ExprSimplifier::new(simplify_context);
+            datafusion_optimizer::simplify_expressions::ExprSimplifier::new(simplify_context);
 
         // Coerce before simplify to match DataFusion's analyzer-before-optimizer pipeline.
         let expr = simplifier.coerce(expr, &df_schema)?;
@@ -1407,7 +1409,7 @@ impl Planner {
     /// Create the [`PhysicalExpr`] from a logical [`Expr`]
     pub fn create_physical_expr(&self, expr: &Expr) -> Result<Arc<dyn PhysicalExpr>> {
         let df_schema = Arc::new(DFSchema::try_from(self.schema.as_ref().clone())?);
-        Ok(datafusion::physical_expr::create_physical_expr(
+        Ok(datafusion_physical_expr::create_physical_expr(
             expr,
             df_schema.as_ref(),
             &Default::default(),
@@ -1468,11 +1470,10 @@ mod tests {
         TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
     };
     use arrow_schema::{DataType, Fields, Schema};
-    use datafusion::{
-        logical_expr::{Cast, col, lit},
-        prelude::{array_element, get_field},
-    };
+    use datafusion_expr::{Cast, col, lit};
     use datafusion_functions::core::expr_ext::FieldAccessor;
+    use datafusion_functions::core::expr_fn::get_field;
+    use datafusion_functions_nested::expr_fn::array_element;
     use rstest::rstest;
 
     /// Literal spellings the planner has no mapping for, such as placeholders
@@ -3634,7 +3635,7 @@ mod tests {
 
         // The provider reads the session's functions instead of a copy, so a
         // function registered on the session afterwards resolves as well.
-        session.register_udf(datafusion::logical_expr::create_udf(
+        session.register_udf(datafusion_expr::create_udf(
             "registered_later",
             vec![DataType::Utf8],
             DataType::Utf8,
@@ -3652,7 +3653,7 @@ mod tests {
     #[test]
     fn test_planner_with_session_plans_session_functions() {
         let session = crate::exec::new_session_context(&LanceExecutionOptions::default());
-        session.register_udf(datafusion::logical_expr::create_udf(
+        session.register_udf(datafusion_expr::create_udf(
             "echo",
             vec![DataType::Utf8],
             DataType::Utf8,

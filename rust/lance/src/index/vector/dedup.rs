@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use arrow_array::{Float32Array, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use datafusion::physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
+use datafusion_physical_plan::{SendableRecordBatchStream, stream::RecordBatchStreamAdapter};
 use futures::{StreamExt, TryStreamExt, stream};
 use lance_core::utils::tokio::{get_num_compute_intensive_cpus, spawn_cpu};
 use lance_core::{Error, Result};
@@ -367,7 +367,7 @@ async fn plan(
     let session = dataset.session();
     let stream = stream::iter(partitions)
         .then(move |partition| partition_stream(partition, session.clone(), threshold, options))
-        .map_err(datafusion::error::DataFusionError::from)
+        .map_err(datafusion_common::DataFusionError::from)
         .try_flatten();
     Ok(Box::pin(RecordBatchStreamAdapter::new(
         pair_schema(),
@@ -439,7 +439,7 @@ async fn partition_stream(
         .map_ok(|job| job.score())
         .try_buffered(options.max_concurrency)
         .try_filter(|batch| std::future::ready(batch.num_rows() != 0))
-        .map_err(datafusion::error::DataFusionError::from);
+        .map_err(datafusion_common::DataFusionError::from);
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema, batches)))
 }
 

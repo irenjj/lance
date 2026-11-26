@@ -17,7 +17,7 @@ mod test {
     use arrow_array::{Array, FixedSizeListArray, Float32Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use async_trait::async_trait;
-    use datafusion::execution::SendableRecordBatchStream;
+    use datafusion_execution::SendableRecordBatchStream;
     use lance_arrow::FixedSizeListArrayExt;
     use lance_core::deepsize::{Context, DeepSizeOf};
     use lance_core::{cache::LanceCache, utils::tempfile::TempStdFile};

@@ -9,18 +9,18 @@ use std::sync::{Arc, OnceLock};
 use arrow::array::{AsArray, BooleanBuilder};
 use arrow_array::{Array, BooleanArray, OffsetSizeTrait};
 use arrow_schema::{DataType, SchemaRef};
-use datafusion::common::Statistics;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::ChildStats;
-use datafusion::physical_plan::StatisticsArgs;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_common::Statistics;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_execution::SendableRecordBatchStream;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, Partitioning, PhysicalExpr};
+use datafusion_physical_plan::ChildStats;
+use datafusion_physical_plan::StatisticsArgs;
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion_physical_plan::metrics::BaselineMetrics;
+use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::stream::{self};
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use lance_core::{Error, Result, utils::tracing::StreamTracingExt};
@@ -85,7 +85,7 @@ pub enum FtsFilterDocumentBinding {
 ///
 /// ```
 /// # use std::sync::Arc;
-/// # use datafusion::physical_plan::ExecutionPlan;
+/// # use datafusion_physical_plan::ExecutionPlan;
 /// # use lance::{io::exec::fts::FlatMatchFilterExec, Result};
 /// # fn rebuild(exec: &FlatMatchFilterExec, decoded_input: Arc<dyn ExecutionPlan>)
 /// #     -> Result<FlatMatchFilterExec> {
@@ -585,7 +585,7 @@ impl ExecutionPlan for FlatMatchFilterExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let input = self.input.execute(partition, context)?;
         let schema = self.schema();
@@ -646,7 +646,7 @@ impl ExecutionPlan for FlatMatchFilterExec {
 ///
 /// ```
 /// use std::sync::Arc;
-/// use datafusion::physical_plan::ExecutionPlan;
+/// use datafusion_physical_plan::ExecutionPlan;
 /// use lance::io::exec::fts::FlatMatchQueryExec;
 ///
 /// fn rebuild_independent(
@@ -1050,7 +1050,7 @@ impl ExecutionPlan for FlatMatchQueryExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let query = self.query.clone();
         let tokenized_query = self.tokenized_query.clone();
