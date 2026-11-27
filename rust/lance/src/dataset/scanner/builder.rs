@@ -16,15 +16,15 @@ use arrow_array::{Array, types::Float32Type};
 use arrow_schema::{DataType, Schema as ArrowSchema};
 use arrow_select::concat::concat;
 use chrono::Utc;
-use datafusion::common::DFSchema;
-use datafusion::logical_expr::{Expr, ScalarUDF, lit};
-use datafusion::physical_plan::{ExecutionPlan, expressions};
+use datafusion_common::DFSchema;
 use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
+use datafusion_expr::{Expr, ScalarUDF, lit};
 use datafusion_functions::core::getfield::GetFieldFunc;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datafusion_physical_plan::projection::ProjectionExec;
+use datafusion_physical_plan::{ExecutionPlan, expressions};
 use lance_arrow::floats::{FloatType, coerce_float_vector};
 use lance_core::datatypes::{BlobHandling, escape_field_path_for_project};
 use lance_core::utils::tokio::get_num_compute_intensive_cpus;
@@ -950,7 +950,7 @@ impl Scanner {
         Ok(self)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub(super) fn nearest_mut(&mut self) -> Option<&mut Query> {
         self.nearest.as_mut()
     }
@@ -1537,7 +1537,7 @@ impl Scanner {
 
             // Use Expr::Column with Column::new_unqualified to preserve exact case
             // (col() normalizes identifiers to lowercase)
-            let mut expr = Expr::Column(datafusion::common::Column::new_unqualified(
+            let mut expr = Expr::Column(datafusion_common::Column::new_unqualified(
                 &field_path[0].name,
             ));
             for nested_field in &field_path[1..] {
@@ -1603,7 +1603,7 @@ impl Scanner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

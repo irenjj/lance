@@ -4,14 +4,21 @@
 //! Vector Index for Fast Approximate Nearest Neighbor (ANN) Search
 //!
 
+#[cfg(feature = "write")]
 use lance_core::utils::{address::RowAddress, row_addr_remap::RowAddrRemap};
+#[cfg(feature = "write")]
 use lance_index::scalar::RowAddrTranslator;
+#[cfg(feature = "write")]
 use roaring::RoaringBitmap;
 use std::sync::Arc;
 use std::{any::Any, collections::HashMap};
 
+#[cfg(feature = "write")]
 mod bounded_partition_stream;
+
+#[cfg(feature = "write")]
 pub mod builder;
+
 pub mod dedup;
 pub(crate) mod details;
 pub mod hamming;
@@ -19,35 +26,50 @@ pub mod ivf;
 pub mod pq;
 pub mod utils;
 
-#[cfg(test)]
-mod fixture_test;
-
 use self::{ivf::*, pq::PQIndex};
+#[cfg(feature = "write")]
 use arrow_array::Array;
+#[cfg(feature = "write")]
 use arrow_array::cast::AsArray;
-use arrow_schema::{DataType, Schema};
+#[cfg(feature = "write")]
+use arrow_schema::DataType;
+use arrow_schema::Schema;
+#[cfg(feature = "write")]
 use builder::{IvfIndexBuilder, VectorIndexBuildSummary};
-use datafusion::physical_plan::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::SendableRecordBatchStream;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+#[cfg(feature = "write")]
 use futures::TryStreamExt;
 use futures::stream;
 use lance_file::versions::v1::reader::FileReader as V1FileReader;
 use lance_index::frag_reuse::CompactFragReuseIndex;
 use lance_index::metrics::NoOpMetricsCollector;
+#[cfg(feature = "write")]
 use lance_index::optimize::OptimizeOptions;
+#[cfg(feature = "write")]
 use lance_index::progress::{IndexBuildProgress, noop_progress};
+#[cfg(feature = "write")]
 use lance_index::vector::bq::builder::RabitQuantizer;
-use lance_index::vector::bq::{RQBuildParams, RQRotationType, validate_supported_rq_num_bits};
+#[cfg(feature = "write")]
+use lance_index::vector::bq::validate_supported_rq_num_bits;
+use lance_index::vector::bq::{RQBuildParams, RQRotationType};
+#[cfg(feature = "write")]
 use lance_index::vector::flat::index::{FlatBinQuantizer, FlatIndex, FlatQuantizer};
+#[cfg(feature = "write")]
 use lance_index::vector::hnsw::HNSW;
+#[cfg(feature = "write")]
 use lance_index::vector::ivf::builder::recommended_num_partitions;
 use lance_index::vector::ivf::storage::IvfModel;
 use object_store::path::Path;
 
+#[cfg(feature = "write")]
 use lance_arrow::FixedSizeListArrayExt;
 use lance_index::vector::pq::ProductQuantizer;
+#[cfg(feature = "write")]
 use lance_index::vector::quantizer::QuantizationType;
+#[cfg(feature = "write")]
 use lance_index::vector::v3::shuffler::{Shuffler, create_owned_ivf_shuffler};
+#[cfg(feature = "write")]
 use lance_index::vector::v3::subindex::SubIndexType;
 use lance_index::vector::{
     VectorIndex,
@@ -64,21 +86,32 @@ use lance_io::object_reader::LazyReader;
 use lance_io::object_store::ObjectStore;
 use lance_io::traits::Reader;
 use lance_linalg::distance::*;
-use lance_table::format::{IndexFile, IndexMetadata};
+#[cfg(feature = "write")]
+use lance_table::format::IndexFile;
+use lance_table::format::IndexMetadata;
 use serde::Serialize;
 use tracing::instrument;
+#[cfg(feature = "write")]
 use utils::get_vector_type;
 use uuid::Uuid;
 
-use super::{IndexParams, loading::DatasetIndexInternalExt};
+use super::IndexParams;
+#[cfg(feature = "write")]
+use super::loading::DatasetIndexInternalExt;
+#[cfg(feature = "write")]
 use crate::dataset::index::dataset_format_version;
+#[cfg(feature = "write")]
 use crate::dataset::transaction::{Operation, Transaction};
 use crate::{Error, Result, dataset::Dataset};
 
 use lance_index::pb::vector_index_stage::Stage;
 
+#[cfg(all(test, feature = "write"))]
+mod fixture_test;
+
 pub const LANCE_VECTOR_INDEX: &str = "__lance_vector_index";
 
+#[cfg(feature = "write")]
 /// Restrict a row-address remap to the fragments owned by one physical segment.
 ///
 /// A segment may still contain rows from fragments it no longer owns. Those
@@ -99,6 +132,7 @@ fn remap_for_owned_fragments(
     RowAddrRemap::with_removed_fragments(mapping, removed_fragments)
 }
 
+#[cfg(feature = "write")]
 async fn resolve_shared_remap(
     translator: &RowAddrTranslator,
     row_addrs: impl IntoIterator<Item = u64>,
@@ -109,6 +143,7 @@ async fn resolve_shared_remap(
     }
 }
 
+#[cfg(feature = "write")]
 fn has_unowned_fragment_rows(
     row_addrs: impl IntoIterator<Item = u64>,
     owned_fragments: &RoaringBitmap,
@@ -209,6 +244,7 @@ impl<'a> LogicalIvfView<'a> {
         self.logical_index.iter().map(|(_, index)| index)
     }
 
+    #[cfg(feature = "write")]
     pub(crate) fn segments(
         &self,
     ) -> impl ExactSizeIterator<Item = (&IndexMetadata, &Arc<dyn VectorIndex>)> + '_ {
@@ -573,6 +609,7 @@ impl IndexParams for VectorIndexParams {
     }
 }
 
+#[cfg(feature = "write")]
 /// Whether `column` holds at least `minimum` vectors to train a quantizer from.
 ///
 /// The metadata-only row total settles anything already short of the floor, so
@@ -585,6 +622,7 @@ pub async fn has_vectors_to_train(dataset: &Dataset, column: &str, minimum: usiz
     Ok(count_trainable_vectors(dataset, column, total, minimum).await? >= minimum)
 }
 
+#[cfg(feature = "write")]
 /// Vectors in `column` available to train from.
 ///
 /// A multivector row holds a list, so its rows bound the vectors from neither
@@ -644,11 +682,13 @@ pub(crate) async fn count_trainable_vectors(
     Ok(vectors)
 }
 
+#[cfg(feature = "write")]
 fn is_multivector(dataset: &Dataset, column: &str) -> Result<bool> {
     let (vector_type, _) = get_vector_type(dataset.schema(), column)?;
     Ok(matches!(vector_type, DataType::List(_)))
 }
 
+#[cfg(feature = "write")]
 /// The partition count a whole-table build can train.
 ///
 /// A partition's centroid is what search ranks to choose partitions, so one
@@ -682,6 +722,7 @@ async fn supported_num_partitions(
     Ok(supported)
 }
 
+#[cfg(feature = "write")]
 /// Vectors needed before `partitions` can each train a quantizer of their own.
 ///
 /// The upper edge of the reduced-partition band: below this a build trains
@@ -690,6 +731,7 @@ fn vectors_for_partitions(stages: &[StageParams], partitions: usize) -> usize {
     partitions.saturating_mul(vectors_per_partition(stages).unwrap_or(1))
 }
 
+#[cfg(feature = "write")]
 /// The vectors one partition's centroid should be fitted on, or `None` when the
 /// index stores vectors uncompressed.
 ///
@@ -724,6 +766,7 @@ pub fn pq_quantizer_minimum_rows(num_bits: usize) -> Option<usize> {
     1_usize.checked_shl(num_bits as u32)
 }
 
+#[cfg(feature = "write")]
 /// Rows a vector index's quantizer needs before it can be trained.
 ///
 /// `None` for an index type whose stages name no quantizer with a row floor.
@@ -736,6 +779,7 @@ pub(crate) fn vector_quantizer_minimum_rows(stages: &[StageParams]) -> Option<us
     })
 }
 
+#[cfg(feature = "write")]
 /// Prepare the shared build inputs used by both direct local builds and
 /// staged shard builds.
 ///
@@ -846,6 +890,7 @@ async fn prepare_vector_segment_build(
     Ok((element_type, index_type, ivf_params, shuffler))
 }
 
+#[cfg(feature = "write")]
 /// Build a Distributed Vector Index for specific fragments
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "debug", skip(dataset))]
@@ -1241,6 +1286,7 @@ pub(crate) async fn build_distributed_vector_index(
     }
 }
 
+#[cfg(feature = "write")]
 /// The files of a built vector index segment, and the vectors per partition
 /// its IVF model was built for. That size goes into the index details, where
 /// optimize reads it back to decide splits and joins.
@@ -1252,6 +1298,7 @@ pub(crate) struct BuiltVectorSegment {
     pub(crate) target_partition_size: Option<usize>,
 }
 
+#[cfg(feature = "write")]
 /// Build a Vector Index
 #[instrument(level = "debug", skip(dataset))]
 pub(crate) async fn build_vector_index(
@@ -1277,6 +1324,7 @@ pub(crate) async fn build_vector_index(
     .await
 }
 
+#[cfg(feature = "write")]
 /// Train a vector index's IVF model and quantizer from the whole table, or
 /// from `fragment_ids` alone, and write a segment that carries that model and
 /// no rows.
@@ -1308,6 +1356,7 @@ pub(crate) async fn build_vector_model_segment(
     .await
 }
 
+#[cfg(feature = "write")]
 /// Build a standalone vector index segment over a subset of fragments.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_filtered_vector_index(
@@ -1334,6 +1383,7 @@ pub(crate) async fn build_filtered_vector_index(
     .await
 }
 
+#[cfg(feature = "write")]
 #[allow(clippy::too_many_arguments)]
 async fn build_vector_index_impl(
     dataset: &Dataset,
@@ -1712,6 +1762,7 @@ async fn build_vector_index_impl(
     })
 }
 
+#[cfg(feature = "write")]
 /// Build a Vector Index incrementally using an existing index's IVF model and quantizer
 /// This creates a delta index that shares centroids with the source index
 #[instrument(level = "debug", skip(dataset, existing_index, frag_reuse_index))]
@@ -1981,6 +2032,7 @@ pub(crate) async fn build_vector_index_incremental(
     }
 }
 
+#[cfg(feature = "write")]
 /// Create a vector index that carries its definition and no data.
 ///
 /// The parameters live in the index's `index_details` and the fragment bitmap
@@ -1997,6 +2049,7 @@ pub(crate) async fn build_empty_vector_index(
     Ok(Vec::new())
 }
 
+#[cfg(feature = "write")]
 #[instrument(level = "debug", skip_all, fields(old_uuid = old_uuid.to_string(), new_uuid = new_uuid.to_string()))]
 pub(crate) async fn remap_vector_index(
     dataset: Arc<Dataset>,
@@ -2301,6 +2354,7 @@ pub(crate) async fn open_vector_index_v2(
     Ok(index)
 }
 
+#[cfg(feature = "write")]
 /// Initialize a vector index from a source dataset
 /// This will reuse the centroids from the source dataset,
 /// making the new indices basically a "delta index" of the source dataset,
@@ -2448,6 +2502,7 @@ pub async fn initialize_vector_index(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 /// Create IVF build parameters for delta index creation from an existing IVF model
 /// TODO: support deriving all the original parameters
 fn derive_ivf_params(ivf_model: &IvfModel) -> IvfBuildParams {
@@ -2470,6 +2525,7 @@ fn derive_ivf_params(ivf_model: &IvfModel) -> IvfBuildParams {
     }
 }
 
+#[cfg(feature = "write")]
 /// Create PQ build parameters from a ProductQuantizer
 /// TODO: support consistently deriving all the original parameters
 fn derive_pq_params(pq_quantizer: &ProductQuantizer) -> PQBuildParams {
@@ -2483,6 +2539,7 @@ fn derive_pq_params(pq_quantizer: &ProductQuantizer) -> PQBuildParams {
     }
 }
 
+#[cfg(feature = "write")]
 /// Create SQ build parameters from a ScalarQuantizer
 /// TODO: support consistently deriving all the original parameters
 fn derive_sq_params(sq_quantizer: &ScalarQuantizer) -> SQBuildParams {
@@ -2492,6 +2549,7 @@ fn derive_sq_params(sq_quantizer: &ScalarQuantizer) -> SQBuildParams {
     }
 }
 
+#[cfg(feature = "write")]
 /// Create Rabit build parameters from a RabitQuantizer
 /// TODO: support consistently deriving all the original parameters
 fn derive_rabit_params(rabit_quantizer: &RabitQuantizer) -> RQBuildParams {
@@ -2502,6 +2560,7 @@ fn derive_rabit_params(rabit_quantizer: &RabitQuantizer) -> RQBuildParams {
     }
 }
 
+#[cfg(feature = "write")]
 /// Extract HNSW build parameters from the source vector index statistics.
 /// Returns default parameters if extraction fails.
 /// TODO: support consistently deriving all the original parameters
@@ -2554,6 +2613,7 @@ pub(crate) fn derive_hnsw_params(source_index: &dyn VectorIndex) -> HnswBuildPar
     default_params
 }
 
+#[cfg(feature = "write")]
 fn vector_index_type(index: &dyn VectorIndex) -> IndexType {
     match index.sub_index_type() {
         (SubIndexType::Flat, QuantizationType::Flat | QuantizationType::FlatBin) => {
@@ -2571,6 +2631,7 @@ fn vector_index_type(index: &dyn VectorIndex) -> IndexType {
     }
 }
 
+#[cfg(feature = "write")]
 /// Derive structural build parameters for a new, independently trained segment.
 ///
 /// Learned IVF centroids, quantizer codebooks, and rotations are deliberately
@@ -2659,7 +2720,7 @@ pub(crate) fn fresh_vector_segment_params(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use crate::dataset::{Dataset, WriteParams};

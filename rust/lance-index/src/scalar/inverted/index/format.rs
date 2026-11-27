@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
 use super::*;
+use arrow_schema::Metadata;
 
 // Version 0: Arrow TokenSetFormat (legacy)
 // Version 1: Fst TokenSetFormat with per-doc compressed positions
@@ -299,9 +300,7 @@ impl PostingTailCodec {
     }
 }
 
-pub(in super::super) fn parse_posting_tail_codec(
-    metadata: &HashMap<String, String>,
-) -> Result<PostingTailCodec> {
+pub(in super::super) fn parse_posting_tail_codec(metadata: &Metadata) -> Result<PostingTailCodec> {
     Ok(metadata
         .get(POSTING_TAIL_CODEC_KEY)
         .map(|codec| PostingTailCodec::from_metadata_value(codec))
@@ -309,9 +308,7 @@ pub(in super::super) fn parse_posting_tail_codec(
         .unwrap_or(PostingTailCodec::Fixed32))
 }
 
-pub(in super::super) fn parse_posting_block_size(
-    metadata: &HashMap<String, String>,
-) -> Result<usize> {
+pub(in super::super) fn parse_posting_block_size(metadata: &Metadata) -> Result<usize> {
     metadata
         .get(POSTING_BLOCK_SIZE_KEY)
         .map(|value| {
@@ -346,9 +343,7 @@ impl PositionStreamCodec {
     }
 }
 
-pub(super) fn parse_shared_position_codec(
-    metadata: &HashMap<String, String>,
-) -> Result<PositionStreamCodec> {
+pub(super) fn parse_shared_position_codec(metadata: &Metadata) -> Result<PositionStreamCodec> {
     if let Some(codec) = metadata.get(POSITIONS_CODEC_KEY) {
         return PositionStreamCodec::from_metadata_value(codec);
     }
@@ -363,7 +358,7 @@ pub(super) fn parse_shared_position_codec(
 }
 
 pub(in super::super) fn parse_format_version_from_metadata(
-    metadata: &HashMap<String, String>,
+    metadata: &Metadata,
 ) -> Result<InvertedListFormatVersion> {
     if let Some(value) = metadata.get(FTS_FORMAT_VERSION_KEY) {
         let format_version = InvertedListFormatVersion::from_str(value)?;

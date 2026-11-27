@@ -1,21 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "write")]
+use std::sync::Mutex;
 
 use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
-use datafusion::{
-    catalog::{Session, streaming::StreamingTable},
-    dataframe::DataFrame,
-    datasource::TableProvider,
-    error::DataFusionError,
-    execution::{TaskContext, context::SessionContext},
-    logical_expr::{Expr, TableProviderFilterPushDown, TableType},
-    physical_plan::{ExecutionPlan, SendableRecordBatchStream, streaming::PartitionStream},
-};
+#[cfg(feature = "write")]
+use datafusion::{dataframe::DataFrame, execution::context::SessionContext};
+use datafusion_catalog::Session;
+use datafusion_catalog::TableProvider;
+#[cfg(feature = "write")]
+use datafusion_catalog::streaming::StreamingTable;
+use datafusion_common::DataFusionError;
+#[cfg(feature = "write")]
+use datafusion_execution::{SendableRecordBatchStream, TaskContext};
+use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
+use datafusion_physical_plan::ExecutionPlan;
+#[cfg(feature = "write")]
+use datafusion_physical_plan::streaming::PartitionStream;
 use lance_arrow::SchemaExt;
-use lance_core::{ROW_ADDR_FIELD, ROW_CREATED_AT_VERSION_FIELD, ROW_ID_FIELD};
+#[cfg(any(test, feature = "write"))]
+use lance_core::ROW_CREATED_AT_VERSION_FIELD;
+use lance_core::{ROW_ADDR_FIELD, ROW_ID_FIELD};
 
 use crate::Dataset;
 
@@ -109,6 +117,7 @@ impl LanceTableProvider {
         self
     }
 
+    #[cfg(any(test, feature = "write"))]
     /// Exposes the target rows' creation versions for rewrite operations that
     /// carry their lineage into new fragments.
     pub(crate) fn with_row_created_at_version(mut self) -> crate::Result<Self> {
@@ -155,10 +164,10 @@ impl TableProvider for LanceTableProvider {
     async fn scan(
         &self,
         state: &dyn Session,
-        projection: Option<&Vec<usize>>,
+        projection: Option<&[usize]>,
         filters: &[Expr],
         limit: Option<usize>,
-    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
         let mut scan = self.dataset.scan();
         if let Some(handling) = self.blob_handling.clone() {
             scan.blob_handling(handling);
@@ -170,36 +179,16 @@ impl TableProvider for LanceTableProvider {
             scan.batch_size_bytes(batch_size_bytes);
         }
 
-        if self.row_created_at_idx.is_some() {
-            // Project all system columns by name to preserve DataFusion's
-            // requested order. The legacy row-id/address setters move those
-            // columns to the end, past the creation versions appended here.
-            let columns = match projection {
-                Some(indices) => indices
-                    .iter()
-                    .map(|i| self.full_schema.field(*i).name())
-                    .collect::<Vec<_>>(),
-                None => self
-                    .full_schema
-                    .fields
-                    .iter()
-                    .map(|field| field.name())
-                    .collect(),
-            };
-            scan.project(&columns)?;
-        } else if let Some(projection) = projection {
-            let mut columns = Vec::with_capacity(projection.len());
-            for field_idx in projection {
-                if Some(*field_idx) == self.row_id_idx {
-                    scan.with_row_id();
-                } else if Some(*field_idx) == self.row_addr_idx {
-                    scan.with_row_address();
-                } else {
-                    columns.push(self.full_schema.field(*field_idx).name());
-                }
-            }
-            scan.project(&columns)?;
-        }
+        let projected = match projection {
+            Some(indices) => Arc::new(self.full_schema.project(indices)?),
+            None => self.full_schema.clone(),
+        };
+        let columns = projected
+            .fields()
+            .iter()
+            .map(|field| field.name())
+            .collect::<Vec<_>>();
+        scan.project(&columns)?;
 
         let combined_filter = match filters.len() {
             0 => None,
@@ -229,7 +218,7 @@ impl TableProvider for LanceTableProvider {
     fn supports_filters_pushdown(
         &self,
         filters: &[&Expr],
-    ) -> datafusion::common::Result<Vec<TableProviderFilterPushDown>> {
+    ) -> datafusion_common::Result<Vec<TableProviderFilterPushDown>> {
         Ok(filters
             .iter()
             .map(|_| TableProviderFilterPushDown::Exact)
@@ -237,6 +226,7 @@ impl TableProvider for LanceTableProvider {
     }
 }
 
+#[cfg(feature = "write")]
 pub trait SessionContextExt {
     /// Creates a DataFrame for reading a Lance dataset
     fn read_lance(
@@ -255,11 +245,13 @@ pub trait SessionContextExt {
     ) -> datafusion::common::Result<DataFrame>;
 }
 
+#[cfg(feature = "write")]
 pub struct OneShotPartitionStream {
     data: Arc<Mutex<Option<SendableRecordBatchStream>>>,
     schema: Arc<Schema>,
 }
 
+#[cfg(feature = "write")]
 impl OneShotPartitionStream {
     pub fn new(data: SendableRecordBatchStream) -> Self {
         let schema = data.schema();
@@ -270,6 +262,7 @@ impl OneShotPartitionStream {
     }
 }
 
+#[cfg(feature = "write")]
 impl std::fmt::Debug for OneShotPartitionStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OneShotPartitionStream")
@@ -278,6 +271,7 @@ impl std::fmt::Debug for OneShotPartitionStream {
     }
 }
 
+#[cfg(feature = "write")]
 impl PartitionStream for OneShotPartitionStream {
     fn schema(&self) -> &SchemaRef {
         &self.schema
@@ -291,6 +285,7 @@ impl PartitionStream for OneShotPartitionStream {
     }
 }
 
+#[cfg(feature = "write")]
 impl SessionContextExt for SessionContext {
     fn read_lance(
         &self,
@@ -320,25 +315,28 @@ impl SessionContextExt for SessionContext {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::{
-        array::AsArray,
-        datatypes::{Int32Type, Int64Type, UInt64Type},
-    };
+    #[cfg(feature = "write")]
+    use crate::utils::test::{DatagenExt, FragmentCount, FragmentRowCount};
+    use crate::{Dataset, datafusion::LanceTableProvider};
+    #[cfg(feature = "write")]
+    use arrow::datatypes::{Int32Type, Int64Type};
+    use arrow::{array::AsArray, datatypes::UInt64Type};
     use arrow_array::record_batch;
-    use datafusion::datasource::TableProvider;
-    use datafusion::physical_plan::collect;
+    #[cfg(feature = "write")]
     use datafusion::prelude::SessionContext;
+    use datafusion_catalog::TableProvider;
+    use datafusion_physical_plan::collect;
+    use datafusion_session::Session;
     use lance_core::datatypes::BlobHandling;
+    use lance_table_runtime::write::{InsertBuilder, WriteParams};
+    use lance_testing::datafusion::TestSession;
+
+    #[cfg(feature = "write")]
     use lance_core::utils::tempfile::TempStrDir;
     use lance_core::{ROW_ADDR, ROW_CREATED_AT_VERSION, ROW_ID};
+    #[cfg(feature = "write")]
     use lance_datagen::array;
     use rstest::rstest;
-
-    use crate::{
-        datafusion::LanceTableProvider,
-        dataset::write::{InsertBuilder, WriteParams},
-        utils::test::{DatagenExt, FragmentCount, FragmentRowCount},
-    };
 
     #[rstest]
     #[case::all(None)]
@@ -350,7 +348,7 @@ mod tests {
         #[case] projection: Option<Vec<usize>>,
     ) {
         let batch = record_batch!(("key", UInt32, [10, 11])).unwrap();
-        let dataset = InsertBuilder::new("memory://")
+        let table = InsertBuilder::new("memory://")
             .with_params(&WriteParams {
                 enable_stable_row_ids: true,
                 max_rows_per_file: 1,
@@ -359,13 +357,14 @@ mod tests {
             .execute(vec![batch])
             .await
             .unwrap();
+        let dataset = Dataset::from_table(table, Arc::new(crate::session::Session::default()));
         let provider = LanceTableProvider::new(Arc::new(dataset), true, true)
             .with_row_created_at_version()
             .unwrap()
             .with_blob_handling(BlobHandling::default());
-        let context = SessionContext::new();
+        let context = TestSession::default();
         let plan = provider
-            .scan(&context.state(), projection.as_ref(), &[], None)
+            .scan(&context, projection.as_deref(), &[], None)
             .await
             .unwrap();
         let expected_schema = match &projection {
@@ -391,6 +390,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "write")]
     #[tokio::test]
     pub async fn test_table_provider() {
         let test_uri = TempStrDir::default();
@@ -429,29 +429,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_table_provider_rejects_invalid_batch_size() {
-        let data = Arc::new(
-            lance_datagen::gen_batch()
-                .col("x", array::step::<Int32Type>())
-                .into_dataset(
-                    "memory://test_table_provider_rejects_invalid_batch_size",
-                    FragmentCount::from(1),
-                    FragmentRowCount::from(3),
-                )
-                .await
-                .unwrap(),
-        );
+        let batch = record_batch!(("x", Int32, [1, 2, 3])).unwrap();
+        let table = InsertBuilder::new("memory://")
+            .execute(vec![batch])
+            .await
+            .unwrap();
+        let data = Arc::new(Dataset::from_table(
+            table,
+            Arc::new(crate::session::Session::default()),
+        ));
+        let session = TestSession::default();
 
         for batch_size in [0, u32::MAX as usize + 1] {
             let provider =
                 LanceTableProvider::new(data.clone(), false, false).with_batch_size(batch_size);
-            let ctx = SessionContext::new();
-            ctx.register_table("dataset", Arc::new(provider)).unwrap();
-
-            let error = ctx
-                .sql("SELECT x FROM dataset")
-                .await
-                .unwrap()
-                .collect()
+            let error = provider
+                .scan(&session, None, &[], None)
                 .await
                 .expect_err("invalid batch size should be rejected");
             assert!(

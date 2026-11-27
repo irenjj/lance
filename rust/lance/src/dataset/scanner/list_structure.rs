@@ -6,11 +6,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use arrow_schema::DataType;
-use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion::functions_nested::length::ArrayLength;
-use datafusion::logical_expr::{Expr, Operator};
-use datafusion::scalar::ScalarValue;
+use datafusion_common::ScalarValue;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_expr::{Expr, Operator};
 use datafusion_functions::core::getfield::GetFieldFunc;
+use datafusion_functions_nested::length::ArrayLength;
 use lance_core::datatypes::Field;
 use lance_encoding::decoder::ListReadMode;
 
@@ -90,7 +90,7 @@ impl Demands {
                 if let Expr::ScalarFunction(function) = expr
                     && let Some(dimension) = function.args.get(1)
                 {
-                    self.visit(dimension).map_err(|error| datafusion::error::DataFusionError::External(Box::new(error)))?;
+                    self.visit(dimension).map_err(|error| datafusion_common::DataFusionError::External(Box::new(error)))?;
                 }
                 return Ok(TreeNodeRecursion::Jump);
             }

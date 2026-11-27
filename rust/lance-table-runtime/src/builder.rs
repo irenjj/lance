@@ -2,27 +2,35 @@
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use super::refs::{Branches, Ref, Refs, check_valid_branch, normalize_branch, standardize_branch};
+use super::refs::{Branches, Ref, Refs, check_valid_branch};
+#[cfg(feature = "write")]
+use super::refs::{normalize_branch, standardize_branch};
 use crate::branch_location::BranchLocation;
+#[cfg(feature = "write")]
 use crate::namespace_manifest::LanceNamespaceExternalManifestStore;
 use crate::{Table, TableSession};
 use futures::{FutureExt, TryStreamExt};
 use lance_core::utils::tracing::{DATASET_LOADING_EVENT, TRACE_DATASET_EVENTS};
 use lance_core::{Error, Result};
 use lance_file::reader::FileReaderOptions;
+#[cfg(feature = "write")]
+use lance_io::object_store::LanceNamespaceStorageOptionsProvider;
 use lance_io::object_store::{
-    DEFAULT_CLOUD_IO_PARALLELISM, LanceNamespaceStorageOptionsProvider, ObjectStore,
-    ObjectStoreParams, StorageOptions, StorageOptionsAccessor,
+    DEFAULT_CLOUD_IO_PARALLELISM, ObjectStore, ObjectStoreParams, StorageOptions,
+    StorageOptionsAccessor,
 };
+#[cfg(feature = "write")]
 use lance_namespace::LanceNamespace;
+#[cfg(feature = "write")]
 use lance_namespace::models::DescribeTableRequest;
+#[cfg(feature = "write")]
+use lance_table::io::commit::external_manifest::ExternalManifestCommitHandler;
 use lance_table::{
     feature_flags::ensure_can_read_manifest,
     format::{
         Manifest, populate_manifest_schema_dictionaries,
         storage_contract::check_manifest_storage_version,
     },
-    io::commit::external_manifest::ExternalManifestCommitHandler,
     io::commit::{CommitHandler, ManifestLocation, commit_handler_from_url},
 };
 #[cfg(feature = "aws")]
@@ -47,6 +55,7 @@ pub struct TableBuilder {
     storage_options_override: Option<HashMap<String, String>>,
     /// Runtime-only exact object store bindings keyed by base path URI.
     base_store_params: HashMap<String, ObjectStoreParams>,
+    #[cfg(feature = "write")]
     /// Namespace-managed table info `(client, table_id)`, set by `from_namespace`
     /// when the table uses managed versioning. The commit handler is built in
     /// `build_object_store`, rooted at the resolved table path; the branch a
@@ -57,7 +66,8 @@ pub struct TableBuilder {
 
 impl std::fmt::Debug for TableBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TableBuilder")
+        let mut debug = f.debug_struct("TableBuilder");
+        debug
             .field("manifest", &self.manifest.is_some())
             .field("session", &self.session.is_some())
             .field("commit_handler", &self.commit_handler.is_some())
@@ -68,9 +78,10 @@ impl std::fmt::Debug for TableBuilder {
                 "storage_options_override",
                 &self.storage_options_override.is_some(),
             )
-            .field("base_store_params", &!self.base_store_params.is_empty())
-            .field("namespace_managed", &self.namespace_managed.is_some())
-            .finish()
+            .field("base_store_params", &!self.base_store_params.is_empty());
+        #[cfg(feature = "write")]
+        debug.field("namespace_managed", &self.namespace_managed.is_some());
+        debug.finish()
     }
 }
 
@@ -87,10 +98,12 @@ impl TableBuilder {
             file_reader_options: None,
             storage_options_override: None,
             base_store_params: HashMap::new(),
+            #[cfg(feature = "write")]
             namespace_managed: None,
         }
     }
 
+    #[cfg(feature = "write")]
     /// Create a TableBuilder from a LanceNamespace client
     ///
     /// This will automatically fetch the table location and storage options from the namespace
@@ -432,26 +445,23 @@ impl TableBuilder {
             }
         };
 
-        // Resolve the commit handler: an explicitly set one wins; otherwise a
-        // namespace-managed table builds a manifest store rooted at the resolved
-        // table path (the branch a request targets is derived per call from the
-        // base path the handler is handed); otherwise fall back to the default
-        // for the uri. Resolving here (not in load) keeps this pub method
-        // consistent for every caller.
-        let commit_handler: Arc<dyn CommitHandler> =
-            if let Some(commit_handler) = self.commit_handler.take() {
-                commit_handler
-            } else if let Some((namespace_client, table_id)) = self.namespace_managed.take() {
-                Arc::new(ExternalManifestCommitHandler {
-                    external_manifest_store: Arc::new(LanceNamespaceExternalManifestStore::new(
-                        namespace_client,
-                        table_id,
-                        base_path.clone(),
-                    )),
-                })
-            } else {
-                commit_handler_from_url(&self.table_uri, &Some(self.options.clone())).await?
-            };
+        // An explicitly set handler takes priority over managed versioning.
+        let commit_handler = self.commit_handler.take();
+        #[cfg(feature = "write")]
+        let commit_handler = commit_handler.or_else(|| {
+            let (namespace_client, table_id) = self.namespace_managed.take()?;
+            Some(Arc::new(ExternalManifestCommitHandler {
+                external_manifest_store: Arc::new(LanceNamespaceExternalManifestStore::new(
+                    namespace_client,
+                    table_id,
+                    base_path.clone(),
+                )),
+            }))
+        });
+        let commit_handler = match commit_handler {
+            Some(commit_handler) => commit_handler,
+            None => commit_handler_from_url(&self.table_uri, &Some(self.options.clone())).await?,
+        };
 
         Ok((object_store, base_path, commit_handler))
     }
@@ -470,8 +480,10 @@ impl TableBuilder {
             ));
         }
         let uses_external_or_custom_commit_handler = self.commit_handler.is_some()
-            || self.namespace_managed.is_some()
             || Url::parse(&self.table_uri).is_ok_and(|url| url.scheme() == "s3+ddb");
+        #[cfg(feature = "write")]
+        let uses_external_or_custom_commit_handler =
+            uses_external_or_custom_commit_handler || self.namespace_managed.is_some();
         if uses_external_or_custom_commit_handler {
             return Err(Error::not_supported(
                 "list_manifest_locations does not support external or custom commit handlers; \
@@ -567,8 +579,12 @@ impl TableBuilder {
         // effective branch is resolvable before loading: the base path is
         // qualified up front and the manifest store derives the branch from it.
         // An explicitly supplied commit handler opts out of the managed flow.
+        #[cfg(feature = "write")]
         let managed_store_active =
             self.namespace_managed.is_some() && self.commit_handler.is_none();
+
+        #[cfg(not(feature = "write"))]
+        let managed_store_active = false;
 
         let (object_store, base_path, commit_handler) = self.build_object_store().await?;
 
@@ -614,12 +630,10 @@ impl TableBuilder {
                             (tag_content.branch.clone(), Some(tag_content.version))
                         }
                     }
-                    Err(e) => {
-                        // A managed table is always rooted at the namespace
-                        // location, so a tag missing here is missing.
-                        if managed_store_active {
-                            return Err(e);
-                        }
+                    // Managed tables are always rooted at their namespace location.
+                    #[cfg(feature = "write")]
+                    Err(err) if managed_store_active => return Err(err),
+                    Err(_) => {
                         need_delay_checkout = true;
                         (None, None)
                     }
@@ -640,6 +654,7 @@ impl TableBuilder {
         // path and uri at the branch chain so the loaded dataset is rooted there
         // (data placement, refs and the path-derived store branch all follow the
         // base path).
+        #[cfg(feature = "write")]
         let (base_path, table_uri) = if managed_store_active && branch.is_some() {
             let branch_location = BranchLocation {
                 path: base_path,
@@ -674,6 +689,7 @@ impl TableBuilder {
         )
         .await?;
 
+        #[cfg(feature = "write")]
         if managed_store_active {
             // The base path was qualified above, so the loaded manifest must
             // already be on the requested branch; a mismatch means the namespace
@@ -820,7 +836,9 @@ mod tests {
     use lance_table::io::commit::UnsafeCommitHandler;
 
     use super::*;
+    #[cfg(feature = "write")]
     use lance_namespace::models::DescribeTableResponse;
+    #[cfg(feature = "write")]
     use std::sync::Mutex;
 
     #[tokio::test]
@@ -988,9 +1006,11 @@ mod tests {
     #[derive(Debug)]
     struct TestStorageOptionsProvider;
 
+    #[cfg(feature = "write")]
     #[derive(Debug)]
     struct TestNamespace;
 
+    #[cfg(feature = "write")]
     #[async_trait]
     impl LanceNamespace for TestNamespace {
         fn namespace_id(&self) -> String {
@@ -1049,14 +1069,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_manifest_locations_rejects_external_and_custom_commit_handlers() {
-        let mut namespace_builder = TableBuilder::from_uri("memory://namespace-table");
-        namespace_builder.namespace_managed =
-            Some((Arc::new(TestNamespace), vec!["namespace-table".to_string()]));
-
+        #[cfg(feature = "write")]
+        let namespace_builder = {
+            let mut builder = TableBuilder::from_uri("memory://namespace-table");
+            builder.namespace_managed =
+                Some((Arc::new(TestNamespace), vec!["namespace-table".to_string()]));
+            builder
+        };
         let builders = [
             TableBuilder::from_uri("memory://custom-handler-table")
                 .with_commit_handler(Arc::new(UnsafeCommitHandler)),
             TableBuilder::from_uri("s3+ddb://bucket/table.lance?ddbTableName=manifest-table"),
+            #[cfg(feature = "write")]
             namespace_builder,
         ];
 
@@ -1070,6 +1094,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "write")]
     /// Mock namespace that records the describe request and vends storage
     /// options only when explicitly asked -- the behavior of a fail-closed
     /// server.
@@ -1078,6 +1103,7 @@ mod tests {
         seen: Mutex<Option<DescribeTableRequest>>,
     }
 
+    #[cfg(feature = "write")]
     #[async_trait]
     impl LanceNamespace for FailClosedNamespace {
         fn namespace_id(&self) -> String {
@@ -1099,6 +1125,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "write")]
     /// The initial namespace describe must opt into credential vending
     /// explicitly: a fail-closed server returns no storage options for an
     /// unset flag, and the refresh provider is only installed when this first

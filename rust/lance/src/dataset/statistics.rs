@@ -7,7 +7,7 @@ use std::{collections::HashMap, future::Future, sync::Arc};
 
 use arrow_array::RecordBatch;
 use arrow_select::concat::concat_batches;
-use datafusion::scalar::ScalarValue;
+use datafusion_common::ScalarValue;
 use futures::{StreamExt, TryStreamExt};
 use lance_core::{Error, Result};
 use lance_index::metrics::NoOpMetricsCollector;
@@ -307,7 +307,7 @@ impl<'a> DatasetStatistics<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;

@@ -212,15 +212,17 @@ impl PostingListReader {
         reader: Arc<dyn IndexReader>,
         index_cache: &LanceCache,
     ) -> Result<Self> {
-        let positions_layout = if reader.schema().field(COMPRESSED_POSITION_COL).is_some() {
-            PositionsLayout::SharedStream(parse_shared_position_codec(&reader.schema().metadata)?)
+        let schema = reader.schema();
+        let schema_metadata = arrow_schema::Metadata::from(schema.metadata.clone());
+        let positions_layout = if schema.field(COMPRESSED_POSITION_COL).is_some() {
+            PositionsLayout::SharedStream(parse_shared_position_codec(&schema_metadata)?)
         } else if reader.schema().field(POSITION_COL).is_some() {
             PositionsLayout::LegacyPerDoc
         } else {
             PositionsLayout::None
         };
-        let posting_tail_codec = parse_posting_tail_codec(&reader.schema().metadata)?;
-        let block_size = parse_posting_block_size(&reader.schema().metadata)?;
+        let posting_tail_codec = parse_posting_tail_codec(&schema_metadata)?;
+        let block_size = parse_posting_block_size(&schema_metadata)?;
         let has_position = positions_layout != PositionsLayout::None;
         let has_impacts = reader.schema().field(IMPACT_COL).is_some();
         let metadata = if reader.schema().field(POSTING_COL).is_none() {

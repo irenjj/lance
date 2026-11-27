@@ -17,18 +17,20 @@ use std::sync::Arc;
 use arrow_array::{Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema, SchemaRef, SortOptions};
 use arrow_select::concat::concat_batches;
-use datafusion::catalog::Session;
-use datafusion::common::exec_datafusion_err;
-use datafusion::config::ConfigOptions;
-use datafusion::logical_expr::Expr;
-use datafusion::physical_expr::PhysicalSortExpr;
-use datafusion::physical_optimizer::output_requirements::OutputRequirementExec;
-use datafusion::physical_plan::display::DisplayableExecutionPlan;
-use datafusion::physical_plan::projection::ProjectionExec as DFProjectionExec;
-use datafusion::physical_plan::sorts::sort::SortExec;
-use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream, expressions};
+#[cfg(feature = "write")]
+use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion_catalog::Session;
+use datafusion_common::config::ConfigOptions;
+use datafusion_common::exec_datafusion_err;
+use datafusion_expr::Expr;
+use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, LexOrdering, PhysicalExpr};
+use datafusion_physical_optimizer::output_requirements::OutputRequirementExec;
+use datafusion_physical_plan::display::DisplayableExecutionPlan;
+use datafusion_physical_plan::projection::ProjectionExec as DFProjectionExec;
+use datafusion_physical_plan::sorts::sort::SortExec;
+use datafusion_physical_plan::{ExecutionPlan, expressions};
 use futures::future::BoxFuture;
 use futures::stream::StreamExt;
 use futures::{FutureExt, TryStreamExt};
@@ -287,6 +289,7 @@ impl Scanner {
         .boxed()
     }
 
+    #[cfg(feature = "write")]
     pub(crate) async fn try_into_dfstream(
         &self,
         mut options: LanceExecutionOptions,
@@ -301,6 +304,7 @@ impl Scanner {
         execute_plan(plan, options)
     }
 
+    #[cfg(feature = "write")]
     pub(crate) fn execution_options(&self) -> LanceExecutionOptions {
         LanceExecutionOptions {
             batch_size: self.batch_size,
@@ -1093,7 +1097,7 @@ impl Scanner {
         &self,
         plan: Arc<dyn ExecutionPlan>,
     ) -> Arc<dyn ExecutionPlan> {
-        use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+        use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 
         use crate::io::exec::column_width;
 
@@ -1206,7 +1210,7 @@ impl Scanner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

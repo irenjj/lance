@@ -7,20 +7,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_schema::SchemaRef;
-use datafusion::common::NullEquality;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::empty::EmptyExec;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::repartition::RepartitionExec;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::union::UnionExec;
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_common::NullEquality;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_execution::SendableRecordBatchStream;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, Partitioning, PhysicalExpr};
+use datafusion_physical_plan::empty::EmptyExec;
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion_physical_plan::joins::{HashJoinExec, PartitionMode};
+use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion_physical_plan::repartition::RepartitionExec;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::union::UnionExec;
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::stream::{self};
 use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
@@ -166,7 +166,7 @@ impl ExecutionPlan for BoostQueryExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let query = self.query.clone();
         let params = self.params.clone();
@@ -478,7 +478,7 @@ impl ExecutionPlan for BooleanQueryExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let params = self.params.clone();
         let should_plan = self.should.clone();

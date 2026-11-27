@@ -528,7 +528,7 @@ pub async fn assert_plan_node_equals(
 ) -> lance_core::Result<()> {
     let raw_plan_desc = format!(
         "{}",
-        datafusion::physical_plan::displayable(plan_node.as_ref()).indent(true)
+        datafusion_physical_plan::displayable(plan_node.as_ref()).indent(true)
     );
 
     // Use the extracted string matching logic

@@ -4,11 +4,13 @@
 use std::sync::Arc;
 
 use arrow_schema::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
-use datafusion::physical_plan::SendableRecordBatchStream as DataFusionRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DataFusionStreamAdapter;
+use datafusion_physical_plan::SendableRecordBatchStream as DataFusionRecordBatchStream;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter as DataFusionStreamAdapter;
 use futures::StreamExt;
 use lance_arrow::json::{convert_lance_json_to_arrow, has_json_fields, lance_json_to_arrow_json};
+#[cfg(feature = "write")]
 pub use lance_table_runtime::rowids::{CapturedRowIds, make_rowid_capture_stream};
+#[cfg(feature = "write")]
 pub use lance_table_runtime::write::SchemaAdapter;
 
 fn requires_logical_conversion(schema: &ArrowSchemaRef) -> bool {
@@ -38,7 +40,7 @@ pub fn to_logical_stream(stream: DataFusionRecordBatchStream) -> DataFusionRecor
     let converted_stream = stream.map(move |batch_result| {
         batch_result.and_then(|batch| {
             convert_lance_json_to_arrow(&batch).map_err(|e| {
-                datafusion::error::DataFusionError::ArrowError(
+                datafusion_common::DataFusionError::ArrowError(
                     Box::new(arrow_schema::ArrowError::InvalidArgumentError(
                         e.to_string(),
                     )),

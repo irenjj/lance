@@ -228,7 +228,7 @@ impl IndexVisibility {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use std::task::Poll;
 

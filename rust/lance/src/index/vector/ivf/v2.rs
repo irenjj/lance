@@ -18,7 +18,7 @@ use std::{
 };
 
 use crate::index::frag_reuse::ResolvedRemapping;
-use crate::index::vector::{IndexFileVersion, builder::index_type_string};
+use crate::index::vector::IndexFileVersion;
 use crate::index::{PreFilter, vector::VectorIndex};
 use arrow::compute::concat_batches;
 use arrow_arith::numeric::sub;
@@ -27,8 +27,8 @@ use arrow_array::{
 };
 use arrow_schema::DataType;
 use async_trait::async_trait;
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_execution::SendableRecordBatchStream;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -102,10 +102,10 @@ use uuid::Uuid;
 use super::{IvfIndexPartitionStatistics, IvfIndexStatistics, maybe_centroids_for_stats};
 
 mod partition_search;
-#[cfg(test)]
-use partition_search::balanced_query_ranges;
 pub mod rabit_scan;
 
+#[cfg(all(test, feature = "write"))]
+use partition_search::balanced_query_ranges;
 use partition_search::{
     BatchPartition, NativeRabitScan, PartitionSearchRequest, PartitionSearchSource,
     PreparedPartition,
@@ -863,13 +863,13 @@ impl PreparedPartitionTracker {
     }
 
     /// Prepared partitions currently alive.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub(crate) fn in_flight(&self) -> usize {
         self.in_flight.load(Ordering::Relaxed)
     }
 
     /// Most prepared partitions alive at once over the index's lifetime.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub(crate) fn peak(&self) -> usize {
         self.peak.load(Ordering::Relaxed)
     }
@@ -1080,7 +1080,7 @@ pub(crate) trait IvfStateEntry: DeepSizeOf + Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<Arc<dyn VectorIndex>>>;
 
     /// Whether the state carries a prebuilt quantizer for its reconstructions.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     fn has_quantizer(&self) -> bool;
 }
 
@@ -1226,7 +1226,7 @@ impl CacheCodecImpl for IvfStateEntryBox {
 }
 
 impl<Q: Quantization + 'static> IvfStateEntry for IvfIndexState<Q> {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     fn has_quantizer(&self) -> bool {
         self.quantizer.is_some()
     }
@@ -2277,7 +2277,7 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
 
     /// Replace the origin latency class so tests can exercise both classes
     /// over one store in one process.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub(crate) fn with_origin_latency_for_test(
         mut self,
         origin_latency: OriginLatencyClass,
@@ -2385,7 +2385,7 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
     /// resident does: a store of the index's own when the open kept none.
     /// Disabling also gives the index a store handle of its own, so that it
     /// never shares the store the open bound.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub(crate) async fn with_resident_columns_for_test(mut self, enabled: bool) -> Result<Self> {
         if !enabled {
             self.storage = self
@@ -2418,7 +2418,7 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
 
     /// Replace how reads attach the resident rows, so tests can run both
     /// modes in one process.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub(crate) fn with_resident_attach_for_test(mut self, resident_attach: ResidentAttach) -> Self {
         self.storage = self.storage.with_resident_attach(resident_attach);
         self
@@ -2449,7 +2449,7 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
 
     /// Replace the entry columns the index asks for, so tests can open both
     /// in one process; the storage still resolves them against residency.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub(crate) fn with_entry_columns_for_test(mut self, entry_columns: EntryColumns) -> Self {
         self.storage = self.storage.with_entry_columns(entry_columns);
         self
@@ -2457,7 +2457,7 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
 
     /// Prepared-partition accounting for this index instance; see
     /// [`PreparedPartitionTracker`].
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub(crate) fn prepared_partitions(&self) -> &PreparedPartitionTracker {
         &self.prepared_partitions
     }
@@ -2973,6 +2973,30 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
             // would widen the codebook and prepare its targets a second time.
             quantizer: self.storage.retained_quantizer().cloned(),
         }))
+    }
+}
+
+fn index_type_string(sub_index: SubIndexType, quantizer: QuantizationType) -> String {
+    // FlatBin is a QuantizationType variant used internally for reconstruction,
+    // but the persisted index type string uses "FLAT" (differentiated by DataType).
+    let quantizer = match quantizer {
+        QuantizationType::FlatBin => QuantizationType::Flat,
+        other => other,
+    };
+    match (sub_index, quantizer) {
+        // ignore FLAT sub index,
+        // IVF_FLAT_FLAT => IVF_FLAT
+        // IVF_FLAT_PQ => IVF_PQ
+        (SubIndexType::Flat, quantization_type) => format!("IVF_{}", quantization_type),
+        (sub_index_type, quantization_type) => {
+            if sub_index_type.to_string() == quantization_type.to_string() {
+                // ignore redundant quantization type
+                // e.g. IVF_PQ_PQ should be IVF_PQ
+                format!("IVF_{}", sub_index_type)
+            } else {
+                format!("IVF_{}_{}", sub_index_type, quantization_type)
+            }
+        }
     }
 }
 
@@ -4104,5 +4128,5 @@ async fn reconstruct_typed<S: IvfSubIndex + 'static, Q: Quantization + 'static>(
     Ok(Arc::new(index))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 pub(crate) mod tests;

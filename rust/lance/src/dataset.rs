@@ -4,86 +4,149 @@
 //! Lance Dataset
 //!
 
-use arrow_array::{RecordBatch, RecordBatchReader};
+use arrow_array::RecordBatch;
+#[cfg(feature = "write")]
+use arrow_array::RecordBatchReader;
+#[cfg(feature = "write")]
 use chrono::Duration;
+#[cfg(feature = "write")]
+use futures::FutureExt;
+use futures::Stream;
+#[cfg(feature = "write")]
 use futures::future::BoxFuture;
 use futures::stream::{self, StreamExt, TryStreamExt};
-use futures::{FutureExt, Stream};
 use lance_core::deepsize::DeepSizeOf;
 
+#[cfg(feature = "write")]
 use crate::dataset::metadata::UpdateFieldMetadataBuilder;
+#[cfg(feature = "write")]
 use crate::dataset::transaction::translate_schema_metadata_updates;
 use crate::session::index_caches::DSIndexCache;
+#[cfg(feature = "write")]
 use itertools::Itertools;
+#[cfg(feature = "write")]
 use lance_core::ROW_ADDR;
 use lance_core::datatypes::{OnMissing, OnTypeMismatch, Projectable, Projection};
 use lance_core::traits::DatasetTakeRows;
+#[cfg(feature = "write")]
 use lance_core::utils::address::RowAddress;
+#[cfg(feature = "write")]
 use lance_core::utils::tracing::{
     DATASET_DELETING_EVENT, DATASET_DROPPING_COLUMN_EVENT, TRACE_DATASET_EVENTS,
 };
 use lance_datafusion::projection::ProjectionPlan;
-use lance_file::reader::{FileReader, FileReaderOptions};
+#[cfg(feature = "write")]
+use lance_file::reader::FileReader;
+use lance_file::reader::FileReaderOptions;
+#[cfg(feature = "write")]
 use lance_file::versions as file_versions;
+#[cfg(feature = "write")]
 use lance_index::{IndexType, progress::IndexBuildProgress};
+#[cfg(feature = "write")]
+use lance_io::object_store::{LanceNamespaceStorageOptionsProvider, StorageOptionsProvider};
 use lance_io::object_store::{
-    LanceNamespaceStorageOptionsProvider, ObjectStore, ObjectStoreParams, StorageOptions,
-    StorageOptionsAccessor, StorageOptionsProvider, WrappingObjectStore,
+    ObjectStore, ObjectStoreParams, StorageOptions, StorageOptionsAccessor, WrappingObjectStore,
 };
+#[cfg(feature = "write")]
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
+#[cfg(feature = "write")]
 use lance_io::utils::CachedFileSize;
+#[cfg(feature = "write")]
 use lance_namespace::LanceNamespace;
-use lance_table::format::{
-    DataFile, Fragment, IndexMetadata, Manifest, ManifestBuildConfig, RowIdMeta,
-};
+use lance_table::format::{DataFile, Fragment, IndexMetadata, Manifest};
+#[cfg(feature = "write")]
+use lance_table::format::{ManifestBuildConfig, RowIdMeta};
+#[cfg(feature = "write")]
 use lance_table::io::commit::{
-    CommitConfig, CommitHandler, CommitLock, ManifestLocation, ManifestNamingScheme, VERSIONS_DIR,
+    CommitConfig, ManifestNamingScheme, VERSIONS_DIR,
     external_manifest::ExternalManifestCommitHandler, migrate_scheme_to_v2,
 };
+use lance_table::io::commit::{CommitHandler, CommitLock, ManifestLocation};
 
+#[cfg(feature = "write")]
 use crate::io::commit::namespace_manifest::LanceNamespaceExternalManifestStore;
+#[cfg(feature = "write")]
+use crate::io::commit::{CommitTransactionOptions, commit_transaction, fix_schema};
+#[cfg(feature = "write")]
 use lance_table::io::manifest::{read_manifest, read_manifest_indexes};
+#[cfg(feature = "write")]
 use lance_table_runtime::base::has_any_entry;
+use lance_table_runtime::commit::detect_overlapping_fragments;
 pub(crate) use lance_table_runtime::paths::{DATA_DIR, INDICES_DIR, TRANSACTIONS_DIR};
 use lance_table_runtime::{Table, TableState, TableView};
 pub use lance_table_runtime::{Version, VersionRef, VersionTransaction};
 use object_store::path::Path;
 use rand::{Rng, seq::index::sample as sample_indices};
 use roaring::RoaringBitmap;
+#[cfg(feature = "write")]
 use rowids::get_row_id_index;
+#[cfg(feature = "write")]
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+#[cfg(feature = "write")]
 use std::num::NonZero;
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
-use tracing::{Instrument, debug_span, field::Empty, info, instrument, warn};
+use tracing::{Instrument, debug_span, field::Empty, instrument};
+#[cfg(feature = "write")]
+use tracing::{info, warn};
 
 pub(crate) mod blob;
 pub(crate) use lance_table_runtime::branch_location;
 pub mod builder;
+
+#[cfg(feature = "write")]
 pub mod cleanup;
+
+#[cfg(feature = "write")]
 pub mod compaction_stats;
+
+#[cfg(feature = "write")]
 mod data_file;
+
 pub mod deletions;
+
+#[cfg(feature = "write")]
 pub mod delta;
+
+#[cfg(feature = "write")]
 pub mod expire;
+
 pub mod files;
 pub mod fragment;
 pub(crate) mod fragment_slice;
+
+#[cfg(feature = "write")]
 mod hash_joiner;
+
 pub mod index;
+
+#[cfg(feature = "write")]
 pub mod mem_wal;
+
+#[cfg(feature = "write")]
 mod metadata;
+
+#[cfg(feature = "write")]
 pub mod optimize;
+
 pub(crate) mod overlay;
+#[cfg(feature = "write")]
 pub mod progress;
+
 pub use lance_table_runtime::refs;
+
 pub mod rowids;
 pub mod scanner;
+
+#[cfg(feature = "write")]
 mod schema_evolution;
+
+#[cfg(feature = "write")]
 pub mod sql;
+
 pub mod statistics;
 mod take;
 /// Transaction definitions for updating datasets
@@ -109,61 +172,95 @@ pub mod transaction {
     };
 }
 pub mod udtf;
+
+#[cfg(feature = "write")]
 mod update_join;
+
+#[cfg(feature = "write")]
 #[cfg(feature = "update-join-bench")]
 #[doc(hidden)]
 pub mod update_join_bench;
+
+#[cfg(feature = "write")]
 mod update_join_options;
+
+#[cfg(feature = "write")]
 pub mod updater;
+
 mod utils;
+
+#[cfg(feature = "write")]
 pub mod version_retention;
+
 pub(crate) mod versions;
+
+#[cfg(feature = "write")]
 pub mod write;
 
+#[cfg(feature = "write")]
 pub use data_file::DataFileTarget;
+#[cfg(feature = "write")]
 pub use lance_table_runtime::write::DataFilePart;
-
 pub(crate) use take::row_offsets_to_row_addresses;
 
 use self::builder::DatasetBuilder;
+#[cfg(feature = "write")]
 use self::cleanup::RemovalStats;
 use self::fragment::FileFragment;
 use self::refs::Refs;
 use self::scanner::{DatasetRecordBatchStream, Scanner};
 use self::statistics::DatasetStatistics;
-use self::transaction::{Operation, Transaction, TransactionBuilder, UpdateMapEntry};
+use self::transaction::Transaction;
+#[cfg(feature = "write")]
+use self::transaction::{Operation, TransactionBuilder, UpdateMapEntry};
 use crate::dataset::branch_location::BranchLocation;
+#[cfg(feature = "write")]
 use crate::dataset::cleanup::{CleanupOperation, CleanupPolicy, CleanupPolicyBuilder};
-use crate::dataset::refs::{BranchContents, BranchIdentifier, BranchReservation, Branches, Tags};
+#[cfg(feature = "write")]
+use crate::dataset::refs::BranchReservation;
+use crate::dataset::refs::{BranchContents, BranchIdentifier, Branches, Tags};
+#[cfg(feature = "write")]
 use crate::dataset::sql::SqlQueryBuilder;
 use crate::datatypes::Schema;
+#[cfg(feature = "write")]
 use crate::index::memory_progress::{ObservedBuild, ObservedOperation};
-use crate::io::commit::{
-    CommitTransactionOptions, commit_transaction, detect_overlapping_fragments, fix_schema,
-};
 use crate::session::Session;
+#[cfg(feature = "write")]
 use crate::utils::temporal::utc_now;
 use crate::{Error, Result};
 pub use blob::{
-    BlobFile, BlobRangeRequest, BlobReadRange, BlobV2BatchRewritePlan, ReadBlob, ReadBlobRange,
-    ReadBlobRangesBuilder, ReadBlobRangesStream, ReadBlobsBuilder, ReadBlobsStream,
-    preserve_managed_descriptors,
+    BlobFile, BlobRangeRequest, BlobReadRange, ReadBlob, ReadBlobRange, ReadBlobRangesBuilder,
+    ReadBlobRangesStream, ReadBlobsBuilder, ReadBlobsStream,
 };
+#[cfg(feature = "write")]
+pub use blob::{BlobV2BatchRewritePlan, preserve_managed_descriptors};
+#[cfg(feature = "write")]
 use hash_joiner::HashJoiner;
 pub use lance_core::ROW_ID;
+#[cfg(feature = "write")]
 use lance_index::scalar::BuiltinIndexType;
+#[cfg(feature = "write")]
 use lance_index::scalar::lance_format::LanceIndexStore;
+#[cfg(feature = "write")]
 use lance_namespace::models::{DeclareTableRequest, DescribeTableRequest};
+#[cfg(feature = "write")]
 use lance_table::feature_flags::ensure_can_write_manifest;
+#[cfg(feature = "write")]
 use lance_table::io::deletion::relative_deletion_file_path;
+#[cfg(feature = "write")]
 use lance_table::rowids::{RowIdSequence, write_row_ids};
+#[cfg(feature = "write")]
 pub use overlay::writer::{OverlayWriter, WriteOverlayError};
+#[cfg(feature = "write")]
 pub use schema_evolution::{
     BatchInfo, BatchUDF, ColumnAlteration, NewColumnTransform, UDFCheckpointStore,
 };
 pub use take::TakeBuilder;
+#[cfg(feature = "write")]
 pub use update_join_options::{UpdateJoinOptions, UpdateJoinStrategy};
+#[cfg(feature = "write")]
 use uuid::Uuid;
+#[cfg(feature = "write")]
 pub use write::merge_insert::{
     MergeInsertAnalysis, MergeInsertBuilder, MergeInsertJob, MergeInsertJoin,
     MergeInsertJoinStrategy, MergeInsertWriteMode, MergeInsertWriteStrategy, MergeOperatorSpills,
@@ -171,8 +268,11 @@ pub use write::merge_insert::{
     WhenNotMatched, WhenNotMatchedBySource,
 };
 
+#[cfg(feature = "write")]
 use crate::dataset::index::LanceIndexStoreExt;
+#[cfg(feature = "write")]
 pub use write::update::{UpdateBuilder, UpdateJob};
+#[cfg(feature = "write")]
 #[allow(deprecated)]
 pub use write::{
     AutoCleanupParams, CommitBuilder, DEFAULT_COMMIT_TIMEOUT, DeleteBuilder, DeleteResult,
@@ -180,6 +280,7 @@ pub use write::{
     WriteProgressFn, WriteStats, write_fragments,
 };
 
+#[cfg(feature = "write")]
 const DEFAULT_MAX_STREAM_COPY_PARALLELISM: usize = 4;
 
 // Full samples already have their final ordering and need no randomness.
@@ -199,6 +300,7 @@ fn sample_row_offsets(rng: &mut impl Rng, num_rows: usize, n: usize) -> Vec<u64>
     offsets
 }
 
+#[cfg(feature = "write")]
 fn parse_deep_clone_stream_concurrency(value: &str) -> Result<usize> {
     value
         .parse::<NonZero<usize>>()
@@ -210,6 +312,7 @@ fn parse_deep_clone_stream_concurrency(value: &str) -> Result<usize> {
         })
 }
 
+#[cfg(feature = "write")]
 fn deep_clone_copy_parallelism(
     configured_io_parallelism: usize,
     uses_streaming_copy: bool,
@@ -593,6 +696,7 @@ impl Dataset {
         self.checkout_version((branch, None)).await
     }
 
+    #[cfg(feature = "write")]
     /// Create a branch from an existing version with a shallow clone.
     ///
     /// This is a two-phase operation:
@@ -642,6 +746,7 @@ impl Dataset {
         self.clone_reserved_branch(reservation, store_params).await
     }
 
+    #[cfg(feature = "write")]
     /// Reserve a branch name at an exact source version without creating the branch dataset.
     ///
     /// This is the first phase of [`Self::create_branch`]. It applies the same name and
@@ -676,6 +781,7 @@ impl Dataset {
         self.table_view().reserve_branch(branch, version).await
     }
 
+    #[cfg(feature = "write")]
     /// Clone the source version of a reservation from [`Self::reserve_branch`] into its
     /// branch.
     ///
@@ -713,6 +819,7 @@ impl Dataset {
         self.clone_reserved_branch(reservation, store_params).await
     }
 
+    #[cfg(feature = "write")]
     async fn clone_reserved_branch(
         &self,
         reservation: BranchReservation,
@@ -750,6 +857,7 @@ impl Dataset {
             .await
     }
 
+    #[cfg(feature = "write")]
     /// Deletes a branch and removes its directory when safe.
     ///
     /// The ref is removed before directory cleanup. If cleanup fails, this
@@ -763,6 +871,7 @@ impl Dataset {
         self.branches().delete(branch, false).await
     }
 
+    #[cfg(feature = "write")]
     /// Delete the branch even if the BranchContents is not found.
     /// This could be useful when we have zombie branches and want to clean them up immediately.
     pub async fn force_delete_branch(&mut self, branch: &str) -> Result<()> {
@@ -773,7 +882,7 @@ impl Dataset {
         self.branches().list().await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub(crate) async fn load_manifest(
         object_store: &ObjectStore,
         manifest_location: &ManifestLocation,
@@ -783,6 +892,7 @@ impl Dataset {
         Table::load_manifest(object_store, manifest_location, uri, &session.table_session).await
     }
 
+    #[cfg(feature = "write")]
     /// Write to or Create a [Dataset] with a stream of [RecordBatch]s.
     ///
     /// `dest` can be a `&str`, `object_store::path::Path` or `Arc<Dataset>`.
@@ -803,6 +913,7 @@ impl Dataset {
             .await
     }
 
+    #[cfg(feature = "write")]
     /// Write into a namespace client-managed table with automatic credential vending.
     ///
     /// For CREATE mode, calls declare_table() to initialize the table.
@@ -823,6 +934,7 @@ impl Dataset {
         Self::write_into_namespace_impl(batches, namespace_client, table_id, None, params).await
     }
 
+    #[cfg(feature = "write")]
     /// Write into a branch of a namespace client-managed table.
     ///
     /// Behaves like [`write_into_namespace`](Self::write_into_namespace), but APPEND and
@@ -845,6 +957,7 @@ impl Dataset {
         .await
     }
 
+    #[cfg(feature = "write")]
     async fn write_into_namespace_impl(
         batches: impl RecordBatchReader + Send + 'static,
         namespace_client: Arc<dyn LanceNamespace>,
@@ -1007,6 +1120,7 @@ impl Dataset {
         }
     }
 
+    #[cfg(feature = "write")]
     /// Append to existing [Dataset] with a stream of [RecordBatch]s
     ///
     /// Returns void result or Returns [Error]
@@ -1036,7 +1150,7 @@ impl Dataset {
     }
 
     /// The commit handler this dataset commits through. Lets a caller wrap it
-    /// for one commit via [`CommitBuilder::with_commit_handler`], for example
+    /// for a snapshot via [`DatasetBuilder::with_commit_handler`], for example
     /// to fence that commit to an exact version, without reopening the
     /// dataset or knowing how the handler was chosen.
     pub fn commit_handler(&self) -> Arc<dyn CommitHandler> {
@@ -1060,6 +1174,7 @@ impl Dataset {
         self.table_view().manifest_location()
     }
 
+    #[cfg(feature = "write")]
     /// Create a [`delta::DatasetDeltaBuilder`] to explore changes between dataset versions.
     ///
     /// # Example
@@ -1170,6 +1285,7 @@ impl Dataset {
             .await
     }
 
+    #[cfg(feature = "write")]
     /// Restore the currently checked out version of the dataset as the latest version.
     pub async fn restore(&mut self) -> Result<()> {
         let (latest_manifest, _) = self.latest_manifest().await?;
@@ -1189,6 +1305,7 @@ impl Dataset {
         Ok(())
     }
 
+    #[cfg(feature = "write")]
     /// Restore the currently checked out version if `expected_latest_version`
     /// is still the dataset's latest version.
     ///
@@ -1236,6 +1353,7 @@ impl Dataset {
         .await
     }
 
+    #[cfg(feature = "write")]
     /// Removes old versions of the dataset from disk
     ///
     /// This function will remove all versions of the dataset that are older than the provided
@@ -1278,6 +1396,7 @@ impl Dataset {
         self.cleanup_with_policy(builder.build())
     }
 
+    #[cfg(feature = "write")]
     /// Removes old versions of the dataset from storage
     ///
     /// This function will remove all versions of the dataset that satisfies the given policy.
@@ -1303,6 +1422,7 @@ impl Dataset {
         async move { self.cleanup(policy).execute().await }.boxed()
     }
 
+    #[cfg(feature = "write")]
     /// Creates a cleanup operation for this dataset.
     ///
     /// The returned operation can be explained without deleting files, or
@@ -1313,6 +1433,7 @@ impl Dataset {
         CleanupOperation::new(self, policy)
     }
 
+    #[cfg(feature = "write")]
     #[allow(clippy::too_many_arguments)]
     async fn do_commit(
         base_uri: WriteDestination<'_>,
@@ -1352,6 +1473,7 @@ impl Dataset {
         builder.execute(transaction).await
     }
 
+    #[cfg(feature = "write")]
     /// Commit changes to the dataset
     ///
     /// This operation is not needed if you are using append/write/delete to manipulate the dataset.
@@ -1416,6 +1538,7 @@ impl Dataset {
         .await
     }
 
+    #[cfg(feature = "write")]
     /// Commits changes exactly the same as [`Self::commit`] but the commit will
     /// not be associated with the dataset lineage.
     ///
@@ -1446,6 +1569,7 @@ impl Dataset {
         .await
     }
 
+    #[cfg(feature = "write")]
     pub(crate) async fn apply_commit(
         &mut self,
         transaction: Transaction,
@@ -1463,6 +1587,7 @@ impl Dataset {
         .await
     }
 
+    #[cfg(feature = "write")]
     pub(crate) async fn apply_tagged_frag_reuse_trim(
         &mut self,
         transaction: Transaction,
@@ -1481,6 +1606,7 @@ impl Dataset {
         .await
     }
 
+    #[cfg(feature = "write")]
     async fn apply_commit_with_expected_latest_version(
         &mut self,
         transaction: Transaction,
@@ -1499,6 +1625,7 @@ impl Dataset {
         self.apply_commit_with_options(transaction, options).await
     }
 
+    #[cfg(feature = "write")]
     async fn apply_commit_with_options(
         &mut self,
         transaction: Transaction,
@@ -1639,39 +1766,19 @@ impl Dataset {
         .await
     }
 
-    /// Take Rows by the internal ROW ids.
-    ///
-    /// In Lance format, each row has a unique `u64` id, which is used to identify the row globally.
+    /// Read selected rows by their internal row IDs.
     ///
     /// ```rust
-    /// # use std::sync::Arc;
-    /// # use tokio::runtime::Runtime;
-    /// # use arrow_array::{RecordBatch, RecordBatchIterator, Int64Array};
-    /// # use arrow_schema::{Schema, Field, DataType};
-    /// # use lance::dataset::{WriteParams, Dataset, ProjectionRequest};
-    /// #
-    /// # let mut rt = Runtime::new().unwrap();
-    /// # rt.block_on(async {
-    /// # let test_dir = tempfile::tempdir().unwrap();
-    /// # let uri = test_dir.path().to_str().unwrap().to_string();
-    /// #
-    /// # let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-    /// # let write_params = WriteParams::default();
-    /// # let array = Arc::new(Int64Array::from_iter(0..128));
-    /// # let batch = RecordBatch::try_new(schema.clone(), vec![array]).unwrap();
-    /// # let reader = RecordBatchIterator::new(
-    /// #    vec![batch].into_iter().map(Ok), schema
-    /// # );
-    /// # let dataset = Dataset::write(reader, &uri, Some(write_params)).await.unwrap();
-    /// #
-    /// let schema = dataset.schema().clone();
-    /// let row_ids = vec![0, 4, 7];
-    /// let rows = dataset.take_rows(&row_ids, schema).await.unwrap();
+    /// use lance::{Dataset, Result, dataset::ProjectionRequest};
     ///
-    /// // We can have more fine-grained control over the projection, i.e., SQL projection.
-    /// let projection = ProjectionRequest::from_sql([("identity", "id * 2")]);
-    /// let rows = dataset.take_rows(&row_ids, projection).await.unwrap();
-    /// # });
+    /// async fn read_rows(dataset: &Dataset, row_ids: &[u64]) -> Result<()> {
+    ///     let schema = dataset.schema().clone();
+    ///     let rows = dataset.take_rows(row_ids, schema).await?;
+    ///     let projection = ProjectionRequest::from_sql([("identity", "id * 2")]);
+    ///     let computed = dataset.take_rows(row_ids, projection).await?;
+    ///     assert_eq!(rows.num_rows(), computed.num_rows());
+    ///     Ok(())
+    /// }
     /// ```
     pub async fn take_rows(
         &self,
@@ -1768,7 +1875,7 @@ impl Dataset {
         let mut scan = self.scan();
         scan.with_row_address();
         let batches = scan.try_into_stream().await?;
-        let plan = Arc::new(blob::BlobV2BatchRewritePlan::try_new(
+        let plan = Arc::new(lance_table_runtime::blob::BlobV2BatchRewritePlan::try_new(
             self.schema(),
             lance_io::stream::RecordBatchStream::schema(&batches).as_ref(),
             false,
@@ -1779,11 +1886,14 @@ impl Dataset {
         let batches = batches
             .and_then(move |batch| {
                 let (plan, dataset) = (plan.clone(), dataset.clone());
-                async move { plan.transform_batch(&dataset, batch).await }
+                async move {
+                    plan.transform_batch(&dataset.table_view().to_table(), batch)
+                        .await
+                }
             })
-            .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)));
+            .map_err(|err| datafusion_common::DataFusionError::External(Box::new(err)));
         Ok(DatasetRecordBatchStream::new(Box::pin(
-            datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(schema, batches),
+            datafusion_physical_plan::stream::RecordBatchStreamAdapter::new(schema, batches),
         )))
     }
 
@@ -1963,17 +2073,20 @@ impl Dataset {
         }
     }
 
+    #[cfg(feature = "write")]
     /// Delete rows based on a predicate.
     pub async fn delete(&mut self, predicate: &str) -> Result<write::delete::DeleteResult> {
         info!(target: TRACE_DATASET_EVENTS, event=DATASET_DELETING_EVENT, uri = &self.table_state.uri, predicate=predicate);
         write::delete::delete(self, predicate).await
     }
 
+    #[cfg(feature = "write")]
     /// Truncate the dataset by deleting all rows.
     pub async fn truncate_table(&mut self) -> Result<()> {
         self.delete("true").await.map(|_| ())
     }
 
+    #[cfg(feature = "write")]
     /// Add new base paths to the dataset.
     ///
     /// This method allows you to register additional storage locations (buckets)
@@ -2154,6 +2267,7 @@ impl Dataset {
         Self::from_table_with_index_cache(table, self.session.clone(), self.index_cache.clone())
     }
 
+    #[cfg(feature = "write")]
     pub(crate) fn store_params_for_base(
         &self,
         base_path: Option<&lance_table::format::BasePath>,
@@ -2261,6 +2375,7 @@ impl Dataset {
         Ok((store, path))
     }
 
+    #[cfg(feature = "write")]
     /// Create a [`DataFile`] by reading metadata from an existing lance file.
     ///
     /// This reads the file's schema and version information, matches columns to
@@ -2544,6 +2659,7 @@ impl Dataset {
         self.object_store(index.base_id).await
     }
 
+    #[cfg(feature = "write")]
     /// This table as a reader of `manifest`, another manifest of it, sees its
     /// files: through that manifest's base paths, with base stores opened
     /// afresh when those differ, since `base_object_stores` caches by id alone.
@@ -2763,6 +2879,7 @@ impl Dataset {
         Ok(fragments.into_iter().flatten().collect())
     }
 
+    #[cfg(feature = "write")]
     pub(crate) fn get_existing_fragments_from_ids(
         &self,
         fragment_ids: &[u32],
@@ -2785,6 +2902,7 @@ impl Dataset {
             .collect())
     }
 
+    #[cfg(feature = "write")]
     pub(crate) fn get_existing_fragment_metadata_from_ids(
         &self,
         fragment_ids: &[u32],
@@ -2800,6 +2918,7 @@ impl Dataset {
         self.count_rows_in_resolved_fragments(fragments).await
     }
 
+    #[cfg(feature = "write")]
     pub(crate) async fn count_rows_in_existing_fragments(
         &self,
         fragment_ids: &[u32],
@@ -2858,6 +2977,9 @@ impl Dataset {
         self.table_view().find_fragment(id)
     }
 
+    // This method filters deleted items from `addr_or_ids` using `addrs` as a reference
+
+    #[cfg(feature = "write")]
     // This method filters deleted items from `addr_or_ids` using `addrs` as a reference
     async fn filter_addr_or_ids(&self, addr_or_ids: &[u64], addrs: &[u64]) -> Result<Vec<u64>> {
         // The final zip pairs these positionally; misalignment must fail
@@ -2979,6 +3101,7 @@ impl Dataset {
             .collect())
     }
 
+    #[cfg(feature = "write")]
     pub(crate) async fn filter_deleted_ids(&self, ids: &[u64]) -> Result<Vec<u64>> {
         let (ids, addresses) = if let Some(row_id_index) = get_row_id_index(self).await? {
             // Ids absent from the deletion-aware index are deleted; drop
@@ -3105,6 +3228,7 @@ impl Dataset {
         Ok(())
     }
 
+    #[cfg(feature = "write")]
     /// Migrate the dataset to use the new manifest path scheme.
     ///
     /// This function will rename all V1 manifests to [ManifestNamingScheme::V2].
@@ -3151,6 +3275,7 @@ impl Dataset {
         Ok(())
     }
 
+    #[cfg(feature = "write")]
     /// Assign a stable row ID sequence to every fragment, contiguously from
     /// `start`, and return the resulting `next_row_id` high-water mark. Only
     /// reached when the feature is off, so no fragment has a sequence yet.
@@ -3173,6 +3298,7 @@ impl Dataset {
         Ok(next_row_id)
     }
 
+    #[cfg(feature = "write")]
     /// Migrate a table to use stable row IDs.
     ///
     /// Afterwards a row keeps the same id for its lifetime: compaction, update
@@ -3230,6 +3356,7 @@ impl Dataset {
         Ok(())
     }
 
+    #[cfg(feature = "write")]
     /// Activate monotonic, non-reusable field IDs for a legacy dataset.
     ///
     /// The activation commit records the current maximum referenced field ID as
@@ -3275,6 +3402,7 @@ impl Dataset {
         Ok(())
     }
 
+    #[cfg(feature = "write")]
     /// Shared clone-target preflight for `shallow_clone` and `deep_clone`:
     /// permit the clone only when the target definitively holds no dataset.
     /// Only the codebase-wide "dataset absent" pair passes: the built-in
@@ -3300,6 +3428,7 @@ impl Dataset {
         }
     }
 
+    #[cfg(feature = "write")]
     /// Shallow clone the target version into a new dataset at target_path.
     /// 'target_path': the uri string to clone the dataset into.
     /// 'version': the version cloned from, could be a version number or tag.
@@ -3395,6 +3524,7 @@ impl Dataset {
         Ok(cloned)
     }
 
+    #[cfg(feature = "write")]
     /// Deep clone the target version into a new dataset at target_path.
     /// This copies all relevant dataset files (data files, deletion files, and
     /// index files) into the target dataset with bounded memory use.
@@ -3529,10 +3659,12 @@ impl Dataset {
         Ok(new_ds)
     }
 
+    #[cfg(feature = "write")]
     async fn resolve_reference(&self, reference: refs::Ref) -> Result<(Option<String>, u64)> {
         self.table_view().resolve_reference(reference).await
     }
 
+    #[cfg(feature = "write")]
     /// Collect all (relative_path, path) of the dataset files.
     async fn collect_paths(&self) -> Result<Vec<(String, Path)>> {
         let mut file_paths: Vec<(String, Path)> = Vec::new();
@@ -3650,6 +3782,7 @@ impl Dataset {
         Ok(file_paths)
     }
 
+    #[cfg(feature = "write")]
     /// Run a SQL query against the dataset.
     /// The underlying SQL engine is DataFusion.
     /// Please refer to the DataFusion documentation for supported SQL syntax.
@@ -3658,9 +3791,10 @@ impl Dataset {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 pub(crate) use lance_table_runtime::commit::TransactionReadSource;
 
+#[cfg(feature = "write")]
 /// # Schema Evolution
 ///
 /// Lance datasets support evolving the schema. Several operations are
@@ -3906,6 +4040,7 @@ impl Dataset {
         &self.manifest.config
     }
 
+    #[cfg(feature = "write")]
     /// Delete keys from the config.
     #[deprecated(
         note = "Use the new update_config(values, replace) method - pass None values to delete keys"
@@ -3916,6 +4051,7 @@ impl Dataset {
         Ok(())
     }
 
+    #[cfg(feature = "write")]
     /// Update table metadata.
     ///
     /// Pass `None` for a value to remove that key.
@@ -3949,6 +4085,7 @@ impl Dataset {
         metadata::UpdateMetadataBuilder::new(self, values, metadata::MetadataType::TableMetadata)
     }
 
+    #[cfg(feature = "write")]
     /// Update config.
     ///
     /// Pass `None` for a value to remove that key.
@@ -3982,6 +4119,7 @@ impl Dataset {
         metadata::UpdateMetadataBuilder::new(self, values, metadata::MetadataType::Config)
     }
 
+    #[cfg(feature = "write")]
     /// Update schema metadata.
     ///
     /// Pass `None` for a value to remove that key.
@@ -4015,6 +4153,7 @@ impl Dataset {
         metadata::UpdateMetadataBuilder::new(self, values, metadata::MetadataType::SchemaMetadata)
     }
 
+    #[cfg(feature = "write")]
     /// Update schema metadata
     #[deprecated(note = "Use the new update_schema_metadata(values).replace() instead")]
     pub async fn replace_schema_metadata(
@@ -4029,6 +4168,7 @@ impl Dataset {
         Ok(())
     }
 
+    #[cfg(feature = "write")]
     /// Update field metadata
     ///
     /// ```
@@ -4062,6 +4202,7 @@ impl Dataset {
         UpdateFieldMetadataBuilder::new(self)
     }
 
+    #[cfg(feature = "write")]
     /// Update field metadata
     pub async fn replace_field_metadata(
         &mut self,
@@ -4101,7 +4242,7 @@ impl DatasetTakeRows for Dataset {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_manifest_file(
     object_store: &ObjectStore,
@@ -4136,11 +4277,13 @@ impl Projectable for Dataset {
     }
 }
 
+#[cfg(feature = "write")]
 /// Marker files that `DirectoryNamespace` writes for a table that is declared or
 /// deregistered but was never materialized. Spelled out here because
 /// `lance-namespace-impls` depends on this crate, not the other way around.
 const NAMESPACE_TABLE_MARKERS: &[&str] = &[".lance-reserved", ".lance-deregistered"];
 
+#[cfg(feature = "write")]
 /// Check that `base` is a Lance dataset root before deleting it recursively.
 ///
 /// Dropping a dataset removes whatever the caller pointed at, so a mistyped or
@@ -4203,6 +4346,7 @@ pub async fn validate_dataset_root_for_drop(object_store: &ObjectStore, base: &P
     )))
 }
 
+#[cfg(feature = "write")]
 /// Whether `base` holds a manifest that actually deserializes, which is the only proof
 /// that a dataset was ever committed here.
 ///
@@ -4238,6 +4382,7 @@ async fn holds_readable_manifest(object_store: &ObjectStore, base: &Path) -> Res
     }
 }
 
+#[cfg(feature = "write")]
 /// Whether `meta` names a manifest, using the same parsing that manifest discovery uses.
 fn is_manifest_location(meta: &object_store::ObjectMeta) -> bool {
     if ManifestLocation::try_from(meta.clone()).is_ok() {
@@ -4249,5 +4394,5 @@ fn is_manifest_location(meta: &object_store::ObjectMeta) -> bool {
         .is_some()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests;

@@ -11,28 +11,31 @@ use arrow_array::{
     UInt64Array,
 };
 use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
-use datafusion::error::DataFusionError;
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_common::DataFusionError;
+use datafusion_execution::SendableRecordBatchStream;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use futures::StreamExt;
 use lance_core::{
     ROW_ID,
     datatypes::{Field, LogicalType, Schema, format_field_path, parse_field_path},
 };
 use lance_index::pbold::InvertedIndexDetails;
+#[cfg(feature = "write")]
 use lance_index::progress::IndexBuildProgress;
+#[cfg(feature = "write")]
 use lance_index::scalar::inverted::builder::{FinalizeOptions, finalize_staged_index_to};
 use lance_index::scalar::inverted::{
     DocumentGranularity, InvertedIndex, InvertedIndexParams, doc_index_storage_column,
 };
 use lance_index::scalar::lance_format::LanceIndexStore;
 use lance_index::scalar::registry::VALUE_COLUMN_NAME;
+#[cfg(feature = "write")]
 use lance_index::scalar::{IndexFile, IndexStore, index_files_to_table};
 use lance_table::format::IndexMetadata;
 use prost::Message;
 use roaring::RoaringBitmap;
-use uuid::Uuid;
 
+#[cfg(feature = "write")]
 use super::segment_merge::{SegmentMerge, open_source};
 use crate::{
     Dataset, Error, Result,
@@ -40,6 +43,8 @@ use crate::{
     index::{DatasetIndexExt, scalar::fetch_index_details},
     session::index_caches::InvertedIndexParamsKey,
 };
+#[cfg(feature = "write")]
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 enum FtsTraversal {
@@ -585,6 +590,7 @@ pub(crate) async fn indexed_fts_document_granularities(
     Ok(by_name.into_iter().collect())
 }
 
+#[cfg(feature = "write")]
 /// The effective [`InvertedIndexParams`] of every persisted FTS index on
 /// `column`, paired with the document granularity it was built for.
 ///
@@ -878,6 +884,7 @@ pub(crate) fn normalize_inverted_details(
     Ok(details)
 }
 
+#[cfg(feature = "write")]
 /// Build an empty update stream for the inverted merge API.
 ///
 /// `InvertedIndex::merge_segments` is shaped as "merge old segments plus new
@@ -910,6 +917,7 @@ fn empty_inverted_update_stream(
     )))
 }
 
+#[cfg(feature = "write")]
 impl Dataset {
     /// Merge fragment-scoped, staged FTS builds into an uncommitted segment with a fresh UUID.
     /// Concurrent attempts can share the same inputs. Each attempt reads the staged files and
@@ -985,6 +993,7 @@ impl Dataset {
     }
 }
 
+#[cfg(feature = "write")]
 /// Finalize a staged segment in place. Returns the final index files, or
 /// `None` when the segment already had its root metadata.
 pub(crate) async fn finalize_segment_files_if_needed(
@@ -1020,6 +1029,7 @@ pub(crate) async fn finalize_segment_files_if_needed(
     Ok(Some(files))
 }
 
+#[cfg(feature = "write")]
 /// A lone staged segment is the merged segment as it stands only while its
 /// files hold live row addresses: no reuse mapping moved its coverage and no
 /// tagged plan asks to translate it. Anything else must be rewritten.
@@ -1039,6 +1049,7 @@ fn single_segment_keeps_row_addresses(
     }
 }
 
+#[cfg(feature = "write")]
 /// Promote a lone staged segment under its own uuid: finalize its files in
 /// place and return its metadata with the final file list, with no second
 /// copy of the index.
@@ -1072,6 +1083,7 @@ async fn promote_finalized_segment(
     })
 }
 
+#[cfg(feature = "write")]
 /// Merge one caller-defined group of source FTS segments into a single segment.
 pub(crate) async fn merge_segments(
     dataset: &Dataset,
@@ -1311,12 +1323,17 @@ pub async fn load_segment_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::RecordBatchIterator;
-    use lance_io::object_store::ObjectStoreRegistry;
-
+    #[cfg(feature = "write")]
     use crate::dataset::WriteParams;
+    #[cfg(feature = "write")]
     use crate::session::Session;
+    #[cfg(feature = "write")]
+    use arrow_array::RecordBatchIterator;
+    #[cfg(feature = "write")]
+    use lance_io::object_store::ObjectStoreRegistry;
+    use uuid::Uuid;
 
+    #[cfg(feature = "write")]
     #[rstest::rstest]
     #[case::disabled(0)]
     #[case::oversized(1024)]
@@ -1437,6 +1454,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "write")]
     /// A covered FTS index (`fields=[tags, id]`, `id` carried) must still be
     /// recognized by `indexed_fts_document_granularities`: matching on
     /// `idx.fields` as a whole (rather than its keyed prefix) would leave
@@ -1632,6 +1650,7 @@ mod tests {
         assert!(!inverted_index_details_semantically_equal(&left, &right));
     }
 
+    #[cfg(feature = "write")]
     #[test]
     fn test_single_segment_keeps_row_addresses_only_without_translation() {
         use crate::index::frag_reuse::{MissingCoverageReason, SegmentRemappingPlan};
@@ -1676,6 +1695,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "write")]
     async fn write_text_dataset(uri: &str, rows_per_fragment: usize, fragments: usize) -> Dataset {
         use lance_datagen::{BatchCount, RowCount, array, gen_batch};
         let reader = gen_batch()
@@ -1698,6 +1718,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(feature = "write")]
     async fn fts_hits(dataset: &Dataset, column: &str, terms: &str) -> Vec<(u64, u32)> {
         use lance_index::scalar::FullTextSearchQuery;
         let mut scan = dataset.scan();
@@ -1734,6 +1755,7 @@ mod tests {
         hits
     }
 
+    #[cfg(feature = "write")]
     #[derive(Debug, Default)]
     struct PauseBeforePartitionWrites {
         paused: tokio::sync::Notify,
@@ -1744,6 +1766,7 @@ mod tests {
         last_completed_stage: std::sync::Mutex<String>,
     }
 
+    #[cfg(feature = "write")]
     impl lance_io::object_store::CopyObserver for PauseBeforePartitionWrites {
         fn observe(
             &self,
@@ -1760,6 +1783,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "write")]
     #[async_trait::async_trait]
     impl IndexBuildProgress for PauseBeforePartitionWrites {
         fn copy_observer(&self) -> Option<&dyn lance_io::object_store::CopyObserver> {
@@ -1790,6 +1814,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "write")]
     async fn index_file_contents(dataset: &Dataset, uuid: Uuid) -> BTreeMap<String, bytes::Bytes> {
         let dir = dataset.indices_dir().join(uuid.to_string());
         let store = &dataset.table_state.object_store;
@@ -1804,6 +1829,7 @@ mod tests {
         files
     }
 
+    #[cfg(feature = "write")]
     #[rstest::rstest]
     #[case::single(1)]
     #[case::multiple(2)]
@@ -1949,6 +1975,7 @@ mod tests {
         assert_eq!(texts, ["one match", "two match"]);
     }
 
+    #[cfg(feature = "write")]
     /// A single staged intermediate covering every fragment is finalized in
     /// place and committed under its own uuid (ENT-1419 kept: the root
     /// metadata exists), with no second copy of the index.
@@ -2105,6 +2132,7 @@ mod tests {
         assert_eq!(expected, actual);
     }
 
+    #[cfg(feature = "write")]
     /// Under a tagged fragment-reuse history a staged segment whose fragments
     /// no rewrite touched keeps its row addresses, so merging it alone still
     /// promotes it under its own uuid; a segment over rewritten fragments is
@@ -2256,6 +2284,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "write")]
     /// FTS hits keyed by the `i` column rather than the row address, for
     /// datasets whose rows were rewritten; ordered by score then id, scores
     /// compared bit for bit.

@@ -4,6 +4,9 @@
 //! Various utilities
 
 pub(crate) mod future;
+
+#[cfg(feature = "write")]
 pub(crate) mod temporal;
-#[cfg(test)]
+
+#[cfg(all(test, feature = "write"))]
 pub(crate) mod test;

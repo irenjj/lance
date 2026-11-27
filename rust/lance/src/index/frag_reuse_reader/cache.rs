@@ -133,7 +133,7 @@ impl CachedMapping {
         result
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub fn uncached(reader: Arc<dyn MappingReader>) -> Arc<Self> {
         Arc::new(Self {
             reader,

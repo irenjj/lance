@@ -7,17 +7,15 @@
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::{
-    execution::context::TaskContext,
-    physical_plan::{
-        DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
-        execution_plan::{Boundedness, EmissionType},
-    },
-};
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_execution::TaskContext;
+use datafusion_physical_expr::PhysicalExpr;
 use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+    execution_plan::{Boundedness, EmissionType},
+};
 use futures::StreamExt;
 
 #[derive(Debug)]
@@ -26,20 +24,21 @@ pub struct TestingExec {
     properties: Arc<PlanProperties>,
 }
 
-impl TestingExec {
-    pub(crate) fn new(batches: Vec<RecordBatch>) -> Self {
-        let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(batches[0].schema()),
-            Partitioning::RoundRobinBatch(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
-        Self {
-            batches,
-            properties,
-        }
+#[cfg(feature = "write")]
+pub(crate) fn new(batches: Vec<RecordBatch>) -> Self {
+    let properties = Arc::new(PlanProperties::new(
+        EquivalenceProperties::new(batches[0].schema()),
+        Partitioning::RoundRobinBatch(1),
+        EmissionType::Incremental,
+        Boundedness::Bounded,
+    ));
+    Self {
+        batches,
+        properties,
     }
 }
+
+impl TestingExec {}
 
 impl DisplayAs for TestingExec {
     fn fmt_as(&self, _t: DisplayFormatType, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -62,15 +61,15 @@ impl ExecutionPlan for TestingExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::error::Result<TreeNodeRecursion>,
-    ) -> datafusion::error::Result<TreeNodeRecursion> {
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
         Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
         self: Arc<Self>,
         _children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::error::Result<std::sync::Arc<dyn ExecutionPlan>> {
+    ) -> datafusion_common::Result<std::sync::Arc<dyn ExecutionPlan>> {
         todo!()
     }
 
@@ -78,13 +77,13 @@ impl ExecutionPlan for TestingExec {
         &self,
         _partition: usize,
         _context: Arc<TaskContext>,
-    ) -> datafusion::error::Result<SendableRecordBatchStream> {
+    ) -> datafusion_common::Result<SendableRecordBatchStream> {
         let stream = futures::stream::iter(self.batches.clone().into_iter().map(Ok));
         let stream = RecordBatchStreamAdapter::new(self.schema(), stream.boxed());
         Ok(Box::pin(stream))
     }
 
-    fn properties(&self) -> &Arc<datafusion::physical_plan::PlanProperties> {
+    fn properties(&self) -> &Arc<datafusion_physical_plan::PlanProperties> {
         &self.properties
     }
 }

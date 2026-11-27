@@ -6,20 +6,20 @@ use std::sync::{Arc, OnceLock};
 
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array, cast::AsArray, types::UInt64Type};
 use arrow_schema::{Schema, SchemaRef};
-use datafusion::common::ColumnStatistics;
-use datafusion::common::stats::Precision;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result};
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::ChildStats;
-use datafusion::physical_plan::StatisticsArgs;
-use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_common::ColumnStatistics;
+use datafusion_common::stats::Precision;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result};
+use datafusion_execution::SendableRecordBatchStream;
 use datafusion_physical_expr::EquivalenceProperties;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_plan::ChildStats;
 use datafusion_physical_plan::Statistics;
+use datafusion_physical_plan::StatisticsArgs;
 use datafusion_physical_plan::execution_plan::CardinalityEffect;
+use datafusion_physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{StreamExt, TryStreamExt};
 use lance_core::{
     Error as LanceError, ROW_ADDR, ROW_ADDR_FIELD, ROW_ID, ROW_OFFSET, ROW_OFFSET_FIELD,
@@ -179,7 +179,7 @@ impl AddRowAddrExec {
     fn do_execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let index_prereq = self
             .row_id_index
@@ -288,7 +288,7 @@ impl ExecutionPlan for AddRowAddrExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let schema = self.schema();
         let this = self.clone();
@@ -517,7 +517,7 @@ impl ExecutionPlan for AddRowOffsetExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let input_stream = self.input.execute(partition, context)?;
         let schema = self.schema();
@@ -545,29 +545,49 @@ impl ExecutionPlan for AddRowOffsetExec {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arrow_array::{Int32Array, RecordBatchIterator, record_batch};
     use arrow_schema::{DataType, Field};
-    use datafusion::physical_plan::StatisticsArgs;
-    use datafusion::physical_plan::StatisticsContext;
-    use datafusion::{datasource::memory::MemorySourceConfig, prelude::SessionContext};
+    #[cfg(feature = "write")]
+    use datafusion::prelude::SessionContext;
+    use datafusion_datasource::memory::MemorySourceConfig;
+    use datafusion_execution::TaskContext;
+    use datafusion_physical_plan::StatisticsArgs;
+    use datafusion_physical_plan::StatisticsContext;
     use futures::TryStreamExt;
     use lance_core::{ROW_ADDR, ROW_ID_FIELD};
     use lance_datafusion::exec::OneShotExec;
+    #[cfg(feature = "write")]
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(feature = "write")]
     use lance_io::object_store::WrappingObjectStore;
+    #[cfg(feature = "write")]
     use lance_table::io::deletion::DELETIONS_DIR;
     use rstest::rstest;
 
-    use crate::dataset::WriteParams;
+    use lance_table_runtime::write::{InsertBuilder, WriteParams};
 
     use super::*;
+
+    async fn write_test_dataset(
+        reader: impl lance_io::stream::StreamingWriteSource,
+        uri: &str,
+        params: WriteParams,
+    ) -> Dataset {
+        let table = InsertBuilder::new(uri)
+            .with_params(&params)
+            .execute_stream(reader)
+            .await
+            .unwrap();
+        Dataset::from_table(table, Arc::new(crate::session::Session::default()))
+    }
 
     async fn apply_to_batch(batch: RecordBatch, dataset: Arc<Dataset>) -> Result<RecordBatch> {
         let memory_exec = OneShotExec::from_batch(batch);
         let exec = AddRowAddrExec::try_new(Arc::new(memory_exec), dataset, 0)?;
-        let session = SessionContext::new();
-        let task_ctx = session.task_ctx();
+        let context = Arc::new(TaskContext::default());
+        let task_ctx = context;
         let stream = exec.execute(0, task_ctx)?;
         let batches = stream.try_collect::<Vec<_>>().await?;
         assert_eq!(batches.len(), 1);
@@ -580,16 +600,15 @@ mod test {
         // will be the same as the row id.
         let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
         let reader = RecordBatchIterator::new(vec![], schema.clone());
-        let dataset = Dataset::write(
+        let dataset = write_test_dataset(
             reader,
             "memory://",
-            Some(WriteParams {
+            WriteParams {
                 enable_stable_row_ids: false,
                 ..Default::default()
-            }),
+            },
         )
-        .await
-        .unwrap();
+        .await;
         let dataset = Arc::new(dataset);
 
         let rowids = Arc::new(UInt64Array::from(vec![1, 2, 3]));
@@ -616,17 +635,16 @@ mod test {
         )
         .unwrap();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], schema.clone());
-        let dataset = Dataset::write(
+        let dataset = write_test_dataset(
             reader,
             "memory://",
-            Some(WriteParams {
+            WriteParams {
                 enable_stable_row_ids: true,
                 max_rows_per_file: 1,
                 ..Default::default()
-            }),
+            },
         )
-        .await
-        .unwrap();
+        .await;
         assert_eq!(dataset.get_fragments().len(), 3);
         Arc::new(dataset)
     }
@@ -759,6 +777,7 @@ mod test {
         );
     }
 
+    #[cfg(feature = "write")]
     /// Forwards every request, but for deletion-file reads records how many
     /// were in flight at once. Instantaneous reads never overlap, so a short
     /// delay on just those reads is what makes concurrency observable.
@@ -769,6 +788,7 @@ mod test {
         max_in_flight: Arc<AtomicUsize>,
     }
 
+    #[cfg(feature = "write")]
     impl DeletionReadCounter {
         fn is_deletion_path(location: &object_store::path::Path) -> bool {
             location.as_ref().contains(DELETIONS_DIR)
@@ -782,12 +802,14 @@ mod test {
         }
     }
 
+    #[cfg(feature = "write")]
     impl std::fmt::Display for DeletionReadCounter {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             write!(f, "DeletionReadCounter({})", self.target)
         }
     }
 
+    #[cfg(feature = "write")]
     #[async_trait::async_trait]
     impl object_store::ObjectStore for DeletionReadCounter {
         async fn put_opts(
@@ -865,12 +887,14 @@ mod test {
         }
     }
 
+    #[cfg(feature = "write")]
     /// Installs a [`DeletionReadCounter`] around a dataset's object store.
     #[derive(Debug)]
     struct DeletionReadCounterWrapper {
         max_in_flight: Arc<AtomicUsize>,
     }
 
+    #[cfg(feature = "write")]
     impl WrappingObjectStore for DeletionReadCounterWrapper {
         fn wrap(
             &self,
@@ -894,6 +918,7 @@ mod test {
         }
     }
 
+    #[cfg(feature = "write")]
     /// Planning a `_rowoffset` scan fetches one deletion file per fragment that
     /// has one. Those reads must overlap instead of going out one fragment at a
     /// time, or planning pays one read latency per fragment with a deletion

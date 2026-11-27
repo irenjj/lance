@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 use lance_core::utils::row_addr_remap::RowAddrRemap;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -18,28 +18,25 @@ use arrow_array::{
     cast::AsArray,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::ChildStats;
-use datafusion::physical_plan::PlanProperties;
-use datafusion::physical_plan::StatisticsArgs;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{
+use datafusion_common::ColumnStatistics;
+use datafusion_common::stats::Precision;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_execution::config::SessionConfig;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::{Distribution, EquivalenceProperties};
+use datafusion_physical_plan::ChildStats;
+use datafusion_physical_plan::PlanProperties;
+use datafusion_physical_plan::StatisticsArgs;
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_physical_plan::metrics::MetricsSet;
+use datafusion_physical_plan::metrics::{BaselineMetrics, Count, Time};
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, SendableRecordBatchStream,
     Statistics,
 };
-use datafusion::prelude::SessionConfig;
-use datafusion::{common::ColumnStatistics, physical_plan::metrics::ExecutionPlanMetricsSet};
-use datafusion::{
-    common::stats::Precision,
-    physical_plan::execution_plan::{Boundedness, EmissionType},
-};
-use datafusion::{
-    error::{DataFusionError, Result as DataFusionResult},
-    physical_plan::metrics::MetricsSet,
-};
-use datafusion_physical_expr::{Distribution, EquivalenceProperties};
-use datafusion_physical_plan::metrics::{BaselineMetrics, Count, Time};
 use futures::{Stream, StreamExt, TryFutureExt, TryStreamExt, future, stream};
 use itertools::Itertools;
 use lance_core::ROW_ID;
@@ -985,7 +982,7 @@ impl ExecutionPlan for KNNVectorDistanceExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let input_stream = self.input.execute(partition, context)?;
         if self.is_batch {
@@ -1435,7 +1432,7 @@ impl ExecutionPlan for ANNIvfPartitionExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let timer = Instant::now();
 
@@ -2648,8 +2645,8 @@ impl ExecutionPlan for ANNIvfSubIndexExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
-    ) -> DataFusionResult<datafusion::physical_plan::SendableRecordBatchStream> {
+        context: Arc<datafusion_execution::TaskContext>,
+    ) -> DataFusionResult<datafusion_physical_plan::SendableRecordBatchStream> {
         let input_stream = self.input.execute(partition, context.clone())?;
         let schema = self.schema();
         let target_partitions = explicit_target_partitions(context.session_config());
@@ -2959,7 +2956,7 @@ impl ExecutionPlan for MultivectorScoringExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let inputs = self
             .inputs
@@ -3057,7 +3054,7 @@ impl ExecutionPlan for MultivectorScoringExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::adaptive_probe::AutoProbeConfig;
     use super::*;

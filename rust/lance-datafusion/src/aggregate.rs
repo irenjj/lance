@@ -3,7 +3,7 @@
 
 //! Aggregate specification for DataFusion aggregates.
 
-use datafusion::logical_expr::Expr;
+use datafusion_expr::Expr;
 
 use crate::planner::Planner;
 

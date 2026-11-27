@@ -3,12 +3,14 @@
 
 use std::sync::Arc;
 
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::ChildStats;
-use datafusion::physical_plan::StatisticsArgs;
-use datafusion::physical_plan::replace_children_if_necessary;
-use datafusion::{catalog::Session, execution::TaskContext, logical_expr::Expr};
+use datafusion_catalog::Session;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_execution::TaskContext;
+use datafusion_expr::Expr;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_plan::ChildStats;
+use datafusion_physical_plan::StatisticsArgs;
+use datafusion_physical_plan::replace_children_if_necessary;
 use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
     Statistics, filter::FilterExec, metrics::MetricsSet,
@@ -137,7 +139,7 @@ impl ExecutionPlan for LanceFilterExec {
     fn try_swapping_with_projection(
         &self,
         projection: &datafusion_physical_plan::projection::ProjectionExec,
-    ) -> datafusion::error::Result<Option<Arc<dyn ExecutionPlan>>> {
+    ) -> datafusion_common::Result<Option<Arc<dyn ExecutionPlan>>> {
         self.filter.try_swapping_with_projection(projection)
     }
 

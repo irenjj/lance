@@ -39,7 +39,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 lance-io = { workspace = true, features = ["test-util"] }
-lance-datagen.workspace = true
 lance-testing.workspace = true
 criterion.workspace = true
 rstest.workspace = true

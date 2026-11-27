@@ -773,13 +773,16 @@ async fn params_metadata_ignores_unknown_fields() {
 
 #[test]
 fn test_posting_block_size_schema_metadata() {
-    assert_eq!(parse_posting_block_size(&HashMap::new()).unwrap(), 128);
+    assert_eq!(
+        parse_posting_block_size(&arrow_schema::Metadata::new()).unwrap(),
+        128
+    );
 
-    let metadata = HashMap::from([(POSTING_BLOCK_SIZE_KEY.to_owned(), "512".to_owned())]);
+    let metadata = arrow_schema::Metadata::from([(POSTING_BLOCK_SIZE_KEY, "512")]);
     let err = parse_posting_block_size(&metadata).unwrap_err();
     assert!(err.to_string().contains("block_size"));
 
-    let metadata = HashMap::from([(POSTING_BLOCK_SIZE_KEY.to_owned(), "129".to_owned())]);
+    let metadata = arrow_schema::Metadata::from([(POSTING_BLOCK_SIZE_KEY, "129")]);
     let err = parse_posting_block_size(&metadata).unwrap_err();
     assert!(err.to_string().contains("block_size"));
 }
@@ -1723,7 +1726,7 @@ fn test_resolve_fts_format_version_defaults_to_v2() {
 
 #[test]
 fn test_block_size_256_metadata_resolves_to_v3() {
-    let metadata = HashMap::from([(POSTING_BLOCK_SIZE_KEY.to_owned(), "256".to_owned())]);
+    let metadata = arrow_schema::Metadata::from([(POSTING_BLOCK_SIZE_KEY, "256")]);
     assert_eq!(
         parse_format_version_from_metadata(&metadata).unwrap(),
         InvertedListFormatVersion::V3

@@ -6,11 +6,11 @@
 use std::collections::{HashMap, HashSet};
 use std::mem;
 
-use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::common::{Column, Result};
-use datafusion::logical_expr::expr::InList;
-use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
-use datafusion::scalar::ScalarValue;
+use datafusion_common::ScalarValue;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion_common::{Column, Result};
+use datafusion_expr::expr::InList;
+use datafusion_expr::{BinaryExpr, Expr, Operator};
 
 // Computed memberships are never merged. Bound their structural comparisons
 // so generated filters cannot turn this safety check into quadratic work.
@@ -510,7 +510,7 @@ fn rebuild_region(
                 // Follow the original shape so it still occupies one term.
                 if nodes.next() == Some(&true) {
                     let Expr::BinaryExpr(binary) = term else {
-                        return Err(datafusion::common::internal_datafusion_err!(
+                        return Err(datafusion_common::internal_datafusion_err!(
                             "Membership region lost a binary node"
                         ));
                     };
@@ -541,7 +541,7 @@ fn rebuild_region(
         }
     }
     *expr = rebuilt.pop().flatten().ok_or_else(|| {
-        datafusion::common::internal_datafusion_err!(
+        datafusion_common::internal_datafusion_err!(
             "Membership simplification removed every region term"
         )
     })?;
@@ -551,7 +551,7 @@ fn rebuild_region(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::logical_expr::{col, lit};
+    use datafusion_expr::{col, lit};
     use std::cell::Cell;
 
     #[test]

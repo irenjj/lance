@@ -16,18 +16,18 @@ use arrow_array::{
     types::Float32Type,
 };
 use arrow_schema::{DataType, SchemaRef};
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::TaskContext;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_execution::TaskContext;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::{Distribution, EquivalenceProperties};
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
-use datafusion_physical_expr::{Distribution, EquivalenceProperties};
 use futures::stream::FuturesUnordered;
 use futures::{Stream, StreamExt, TryFutureExt, future::try_join_all, stream};
 use lance_arrow::FixedSizeListArrayExt;
@@ -115,7 +115,7 @@ impl WarpParams {
     /// Probe `nprobe` partitions per query token and segment at the default
     /// effort, with no other bounds, and impute the `imputation_rank`-th
     /// similarity.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
     pub fn new(nprobe: usize, imputation_rank: usize) -> Self {
         Self {
             nprobe,
@@ -969,7 +969,7 @@ impl ExecutionPlan for WarpExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

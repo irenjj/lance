@@ -96,7 +96,47 @@ pub(super) fn v0_segment_cache_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "write")]
     use crate::dataset::index::frag_reuse::tests::{index_covering, reuse_version};
+    use lance_table::system_index::frag_reuse::FragReuseVersion;
+    use roaring::RoaringBitmap;
+
+    fn frag_digest(id: u64) -> lance_index::frag_reuse::FragDigest {
+        lance_index::frag_reuse::FragDigest {
+            id,
+            physical_rows: 100,
+            num_deleted_rows: 0,
+        }
+    }
+
+    pub fn reuse_version(dataset_version: u64, old: &[u64], new: &[u64]) -> FragReuseVersion {
+        FragReuseVersion {
+            dataset_version,
+            groups: vec![lance_index::frag_reuse::FragReuseGroup {
+                changed_row_addrs: Vec::new(),
+                old_frags: old.iter().copied().map(frag_digest).collect(),
+                new_frags: new.iter().copied().map(frag_digest).collect(),
+            }],
+        }
+    }
+
+    pub fn index_covering(dataset_version: u64, covered: &[u32]) -> IndexMetadata {
+        IndexMetadata {
+            uuid: uuid::Uuid::new_v4(),
+            fields: vec![0],
+            covering_fields: vec![],
+            name: "test_idx".into(),
+            dataset_version,
+            fragment_bitmap: Some(RoaringBitmap::from_iter(covered.iter().copied())),
+            index_details: None,
+            index_version: 0,
+            created_at: None,
+            base_id: None,
+            files: None,
+            clustering_id: None,
+            metadata: Default::default(),
+        }
+    }
 
     #[test]
     fn v0_segment_cache_id_tracks_versions_on_the_path() {

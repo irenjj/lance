@@ -3,29 +3,7 @@
 
 //! Vector segment query contracts and validation before transaction publication.
 
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
-
-use futures::{FutureExt, StreamExt, TryStreamExt, stream};
-use lance_core::{Error, Result, cache::CacheKey};
-use lance_index::{
-    INDEX_FILE_NAME, INDEX_METADATA_SCHEMA_KEY, IndexMetadata, IndexType,
-    metrics::NoOpMetricsCollector, vector::VectorIndex,
-};
-use lance_io::{
-    scheduler::{ScanScheduler, SchedulerConfig},
-    utils::{CachedFileSize, read_last_block, read_version},
-};
-use lance_linalg::distance::DistanceType;
-use lance_table::{
-    format::{IndexMetadata as TableIndexMetadata, Manifest},
-    transaction::action::Action,
-};
-use uuid::Uuid;
-
+#[cfg(feature = "write")]
 use crate::{
     dataset::{Dataset, transaction::Operation},
     index::{
@@ -37,6 +15,33 @@ use crate::{
         },
     },
 };
+#[cfg(feature = "write")]
+use futures::{FutureExt, StreamExt, TryStreamExt, stream};
+#[cfg(feature = "write")]
+use lance_core::cache::CacheKey;
+use lance_core::{Error, Result};
+#[cfg(feature = "write")]
+use lance_index::{INDEX_FILE_NAME, INDEX_METADATA_SCHEMA_KEY, metrics::NoOpMetricsCollector};
+use lance_index::{IndexMetadata, IndexType, vector::VectorIndex};
+#[cfg(feature = "write")]
+use lance_io::{
+    scheduler::{ScanScheduler, SchedulerConfig},
+    utils::{CachedFileSize, read_last_block, read_version},
+};
+use lance_linalg::distance::DistanceType;
+#[cfg(feature = "write")]
+use lance_table::{
+    format::{IndexMetadata as TableIndexMetadata, Manifest},
+    transaction::action::Action,
+};
+#[cfg(feature = "write")]
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
+#[cfg(feature = "write")]
+use uuid::Uuid;
 
 /// What a search ranks a vector segment by: its metric and its index type.
 /// Merging the distances of segments that differ in either ranks part of the
@@ -88,6 +93,7 @@ impl std::fmt::Display for VectorQueryContract {
     }
 }
 
+#[cfg(feature = "write")]
 /// Refuses an index addition that would leave the segments of one index name
 /// keyed on different columns, or its vector segments under different query
 /// contracts. The index APIs compare the contracts of opened segments with
@@ -239,11 +245,13 @@ pub async fn validate_committed_vector_segments(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 // The enclosing cache namespace identifies the physical index file. A legacy
 // marker routes the lookup through the active session's extension registry and
 // snapshot-specific remapping plan.
 struct VectorFileTypeKey;
 
+#[cfg(feature = "write")]
 impl CacheKey for VectorFileTypeKey {
     type ValueType = Option<IndexType>;
 
@@ -256,6 +264,7 @@ impl CacheKey for VectorFileTypeKey {
     }
 }
 
+#[cfg(feature = "write")]
 impl Dataset {
     /// Returns the physical index types of the query-visible segments on `column`,
     /// in the order of the supplied UUIDs. A UUID outside this snapshot's query
@@ -361,6 +370,7 @@ impl Dataset {
     }
 }
 
+#[cfg(feature = "write")]
 /// A vector segment's contract, read from its own index file. A file of the
 /// current format records it in its schema, read the way the opener reads it
 /// before loading any centroid; a file of an older format, or an index

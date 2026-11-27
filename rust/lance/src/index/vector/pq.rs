@@ -7,10 +7,9 @@ use lance_index::scalar::RowAddrTranslatorRef;
 use std::any::Any;
 use std::sync::Arc;
 
-use arrow::{
-    array::{ArrayData, make_array},
-    compute::concat,
-};
+use arrow::array::{ArrayData, make_array};
+#[cfg(feature = "write")]
+use arrow::compute::concat;
 use arrow_array::types::UInt64Type;
 use arrow_array::{
     Array, FixedSizeListArray, RecordBatch, UInt8Array, UInt64Array,
@@ -22,17 +21,21 @@ use arrow_ord::sort::sort_to_indices;
 use arrow_schema::{DataType, Field, Schema};
 use arrow_select::take::take;
 use async_trait::async_trait;
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_execution::SendableRecordBatchStream;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use lance_arrow::{BufferExt, DataTypeExt, FixedSizeListArrayExt};
+#[cfg(feature = "write")]
+use lance_core::ROW_ID;
+use lance_core::ROW_ID_FIELD;
 use lance_core::deepsize::DeepSizeOf;
 use lance_core::utils::address::RowAddress;
 use lance_core::utils::tokio::spawn_cpu;
-use lance_core::{ROW_ID, ROW_ID_FIELD};
 use lance_index::frag_reuse::CompactFragReuseIndex;
 use lance_index::metrics::MetricsCollector;
 use lance_index::vector::ivf::storage::IvfModel;
-use lance_index::vector::pq::storage::{ProductQuantizationStorage, transpose};
+#[cfg(feature = "write")]
+use lance_index::vector::pq::storage::ProductQuantizationStorage;
+use lance_index::vector::pq::storage::transpose;
 use lance_index::vector::quantizer::{Quantization, QuantizationType, Quantizer};
 use lance_index::vector::v3::subindex::SubIndexType;
 use lance_index::{
@@ -680,6 +683,7 @@ pub async fn build_pq_model_in_fragments(
     Ok(pq)
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn build_pq_storage(
     distance_type: DistanceType,
     row_ids: Arc<dyn Array>,
@@ -708,32 +712,48 @@ pub(crate) fn build_pq_storage(
 
     Ok(pq_store)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(feature = "write")]
     use std::collections::HashMap;
-    use std::{ops::Range, sync::Mutex};
+    #[cfg(feature = "write")]
+    use std::ops::Range;
+    use std::sync::Mutex;
 
+    #[cfg(feature = "write")]
     use arrow::datatypes::Float32Type;
+    #[cfg(feature = "write")]
     use arrow_array::RecordBatchIterator;
+    #[cfg(feature = "write")]
     use arrow_schema::{Field, Schema};
-    use lance_core::utils::tempfile::{TempObjFile, TempStrDir};
+    use lance_core::utils::tempfile::TempObjFile;
+    #[cfg(feature = "write")]
+    use lance_core::utils::tempfile::TempStrDir;
     use lance_io::object_store::ObjectStore;
     use lance_io::traits::Writer;
+
+    #[cfg(feature = "write")]
     use lance_linalg::kernels::normalize_fsl;
     use object_store::path::Path;
     use tokio::io::AsyncWriteExt;
 
+    #[cfg(feature = "write")]
     use crate::index::vector::ivf::build_ivf_model;
     use lance_index::metrics::NoOpMetricsCollector;
     use lance_index::vector::DEFAULT_QUERY_PARALLELISM;
+
+    #[cfg(feature = "write")]
     use lance_index::vector::ivf::IvfBuildParams;
     use lance_select::RowAddrMask;
+    #[cfg(feature = "write")]
     use lance_testing::datagen::{
         generate_random_array_with_range, generate_random_array_with_seed,
     };
 
+    #[cfg(feature = "write")]
     const DIM: usize = 128;
 
     #[tokio::test]
@@ -776,6 +796,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "write")]
     async fn generate_dataset(
         test_uri: &str,
         range: Range<f32>,
@@ -803,6 +824,7 @@ mod tests {
         (Dataset::write(batches, test_uri, None).await.unwrap(), fsl)
     }
 
+    #[cfg(feature = "write")]
     #[tokio::test]
     async fn test_build_pq_model_l2() {
         let test_dir = TempStrDir::default();
@@ -838,6 +860,7 @@ mod tests {
             });
     }
 
+    #[cfg(feature = "write")]
     #[tokio::test]
     async fn test_build_pq_model_rejects_empty_ivf_centroids() {
         let (dataset, vectors) = generate_dataset("memory://", 100.0..120.0).await;
@@ -854,6 +877,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "write")]
     #[tokio::test]
     async fn test_build_pq_model_cosine() {
         let test_dir = TempStrDir::default();
@@ -928,6 +952,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "write")]
     #[tokio::test]
     async fn test_build_pq_model_insufficient_rows_returns_prereq() {
         let test_dir = TempStrDir::default();
@@ -957,6 +982,7 @@ mod tests {
         assert!(matches!(err, Error::Unprocessable { .. }));
     }
 
+    #[cfg(feature = "write")]
     /// The supplied codebook is checked before 2^num_bits is derived, so a
     /// num_bits that does not fit reports the input rather than overflowing.
     #[tokio::test]

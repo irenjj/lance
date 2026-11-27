@@ -44,20 +44,20 @@
 
 use std::sync::Arc;
 
-use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::config::ConfigOptions;
-use datafusion::error::Result as DFResult;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::execution_plan::CardinalityEffect;
-use datafusion::physical_plan::{
+use datafusion_common::Result as DFResult;
+use datafusion_common::config::ConfigOptions;
+use datafusion_common::tree_node::{Transformed, TreeNode};
+use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
+use datafusion_physical_expr::expressions::{Column, Literal};
+use datafusion_physical_optimizer::PhysicalOptimizerRule;
+use datafusion_physical_plan::execution_plan::CardinalityEffect;
+use datafusion_physical_plan::{
     ExecutionPlan, ExecutionPlanProperties,
     aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy},
     coalesce_partitions::CoalescePartitionsExec,
     projection::ProjectionExec,
     union::UnionExec,
 };
-use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
-use datafusion_physical_expr::expressions::{Column, Literal};
 use lance_index::scalar::expression::ScalarIndexExpr;
 use log::warn;
 use roaring::RoaringBitmap;
@@ -339,7 +339,7 @@ fn try_rewrite(agg: &AggregateExec) -> DFResult<Option<Arc<dyn ExecutionPlan>>> 
             // the optional per-aggregate `FILTER (WHERE ...)` clause. We
             // rejected any aggregate carrying a filter back at the gate, so
             // every slot is `None` here.
-            let filters: Vec<Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>> =
+            let filters: Vec<Option<Arc<dyn datafusion_physical_expr::PhysicalExpr>>> =
                 (0..aggr_exprs.len()).map(|_| None).collect();
             let final_agg = AggregateExec::try_new(
                 AggregateMode::Final,
@@ -381,7 +381,7 @@ fn build_scan_branch(
     // Per-aggregate `FILTER (WHERE ...)` placeholders — see the matching
     // comment in `try_rewrite`; we've already rejected any aggregate that
     // carried a filter, so every slot is `None`.
-    let filters: Vec<Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>> =
+    let filters: Vec<Option<Arc<dyn datafusion_physical_expr::PhysicalExpr>>> =
         (0..aggr_exprs.len()).map(|_| None).collect();
     let partial = AggregateExec::try_new(
         AggregateMode::Partial,
@@ -472,7 +472,7 @@ fn is_count_star(af: &Arc<AggregateFunctionExpr>) -> bool {
     !lit.value().is_null()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use std::sync::Arc;
 

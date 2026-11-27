@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use arrow_schema::DataType;
+use async_trait::async_trait;
 use lance_core::cache::{CacheKey, CacheKeySchema, KeyBuilder};
 use lance_core::{Error, Result};
 use lance_table::format::{IndexMetadata, Manifest};
@@ -80,12 +81,50 @@ impl CacheKey for InferredIndexListingKey<'_> {
     }
 }
 
+/// Read-side inference for index entries predating persisted type details.
+#[async_trait]
+pub trait LegacyIndexDetails: Send + Sync {
+    /// Whether the reader should infer or retry inference for this entry.
+    fn needs_legacy_details(&self, table: &Table, index: &IndexMetadata) -> bool;
+
+    /// Cache namespace for successful inference. Return `None` to disable caching.
+    fn legacy_details_cache_namespace(&self) -> Option<&'static str>;
+
+    /// Populate details the reader can infer from the snapshot's index files.
+    async fn infer_legacy_details(&self, table: &Table, indices: &mut [IndexMetadata]);
+}
+
+#[async_trait]
+impl LegacyIndexDetails for &dyn CommitIndexHook {
+    fn needs_legacy_details(&self, table: &Table, index: &IndexMetadata) -> bool {
+        CommitIndexHook::needs_legacy_details(*self, table, index)
+    }
+
+    fn legacy_details_cache_namespace(&self) -> Option<&'static str> {
+        CommitIndexHook::legacy_details_cache_namespace(*self)
+    }
+
+    async fn infer_legacy_details(&self, table: &Table, indices: &mut [IndexMetadata]) {
+        CommitIndexHook::infer_legacy_details(*self, table, indices).await;
+    }
+}
+
 /// The complete index listing for commit bookkeeping. Version-zero FRI
 /// coverage is translated, and tagged histories retain their stored provenance.
 /// Query-time filters and coverage projections must never seed a commit.
 pub async fn load_all_indices(
     table: &Table,
     hook: Option<&dyn CommitIndexHook>,
+) -> Result<Arc<Vec<IndexMetadata>>> {
+    let inference = hook.as_ref().map(|hook| hook as &dyn LegacyIndexDetails);
+    load_indices_with_legacy_details(table, inference).await
+}
+
+/// Read all manifest index entries, including projected v0 coverage and any
+/// legacy type details the reader can infer.
+pub async fn load_indices_with_legacy_details(
+    table: &Table,
+    hook: Option<&dyn LegacyIndexDetails>,
 ) -> Result<Arc<Vec<IndexMetadata>>> {
     let raw = table.load_index_metadata().await?;
     let metadata_key = table.index_metadata_key();

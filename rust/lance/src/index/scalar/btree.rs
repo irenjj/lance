@@ -4,7 +4,7 @@
 #![allow(clippy::redundant_pub_crate)]
 
 //! BTree-specific helpers for the segmented index workflow.
-use datafusion::execution::SendableRecordBatchStream;
+use datafusion_execution::SendableRecordBatchStream;
 use lance_index::pbold::BTreeIndexDetails;
 use lance_index::scalar::btree::BTreeIndex;
 use lance_index::scalar::lance_format::LanceIndexStore;

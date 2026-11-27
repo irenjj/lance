@@ -1607,13 +1607,10 @@ mod tests {
     }
 
     fn arrow_json_field(name: &str, data_type: DataType) -> ArrowField {
-        ArrowField::new(name, data_type, true).with_metadata(
-            [(
-                ARROW_EXT_NAME_KEY.to_string(),
-                ARROW_JSON_EXT_NAME.to_string(),
-            )]
-            .into(),
-        )
+        ArrowField::new(name, data_type, true).with_metadata([(
+            ARROW_EXT_NAME_KEY.to_string(),
+            ARROW_JSON_EXT_NAME.to_string(),
+        )])
     }
 
     fn single_column_batch(field: ArrowField, column: ArrayRef) -> RecordBatch {

@@ -19,7 +19,6 @@ object_store_opendal = { workspace = true, optional = true }
 opendal-service-goosefs = { workspace = true, optional = true }
 goosefs-sdk = { workspace = true, optional = true }
 lance-core.workspace = true
-lance-namespace.workspace = true
 arrow = { workspace = true, features = ["ffi"] }
 arrow-array.workspace = true
 arrow-schema.workspace = true
@@ -79,6 +78,7 @@ harness = false
 
 [features]
 default = ["aws", "azure", "gcp"]
+write = []
 metrics = ["dep:metrics"]
 gcs-test = []
 goosefs-test = []

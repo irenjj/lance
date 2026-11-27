@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datafusion::execution::SendableRecordBatchStream;
-use lance_index::{
-    FtsPrewarmResult, IndexParams, IndexType, PrewarmOptions, optimize::OptimizeOptions,
-};
+use datafusion_execution::SendableRecordBatchStream;
+use lance_index::{FtsPrewarmResult, PrewarmOptions};
+#[cfg(feature = "write")]
+use lance_index::{IndexParams, IndexType, optimize::OptimizeOptions};
 use lance_table::format::IndexMetadata;
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
@@ -134,6 +134,7 @@ impl IndexSegment {
         &self.fragment_bitmap
     }
 
+    #[cfg(feature = "write")]
     pub(crate) fn fragment_bitmap_mut(&mut self) -> &mut RoaringBitmap {
         &mut self.fragment_bitmap
     }
@@ -166,6 +167,7 @@ impl IndexSegment {
         }
     }
 
+    #[cfg(feature = "write")]
     pub(crate) fn declares_same_fields(&self, other: &Self) -> bool {
         IndexMetadata::keyed_fields_of(&self.fields, &self.covering_fields)
             == IndexMetadata::keyed_fields_of(&other.fields, &other.covering_fields)
@@ -218,6 +220,7 @@ pub trait IntoIndexSegment {
 }
 
 impl IndexSegment {
+    #[cfg(any(test, feature = "write"))]
     /// The segment as index metadata under `name`, for machinery that works
     /// on manifest entries (the commit-time replay). Files are not carried:
     /// the commit collects them from the index directory.
@@ -277,10 +280,12 @@ impl IntoIndexSegment for IndexMetadata {
 /// Extends [`crate::Dataset`] with secondary index APIs.
 #[async_trait]
 pub trait DatasetIndexExt {
+    #[cfg(feature = "write")]
     type IndexBuilder<'a>
     where
         Self: 'a;
 
+    #[cfg(feature = "write")]
     /// Create a builder for creating an index on columns.
     ///
     /// This returns a builder that can be configured with additional options
@@ -292,6 +297,7 @@ pub trait DatasetIndexExt {
         params: &'a dyn IndexParams,
     ) -> Self::IndexBuilder<'a>;
 
+    #[cfg(feature = "write")]
     /// Create indices on columns.
     ///
     /// Upon finish, a new dataset version is generated.
@@ -304,6 +310,7 @@ pub trait DatasetIndexExt {
         replace: bool,
     ) -> Result<IndexMetadata>;
 
+    #[cfg(feature = "write")]
     /// Drop indices by name.
     ///
     /// Upon finish, a new dataset version is generated.
@@ -434,6 +441,7 @@ pub trait DatasetIndexExt {
         criteria: lance_index::IndexCriteria<'b>,
     ) -> Result<Option<IndexMetadata>>;
 
+    #[cfg(feature = "write")]
     /// Optimize indices.
     async fn optimize_indices(&mut self, options: &OptimizeOptions) -> Result<()>;
 
@@ -496,12 +504,14 @@ pub trait DatasetIndexExt {
         ))
     }
 
+    #[cfg(feature = "write")]
     /// Merge one or more existing uncommitted index segments into a single uncommitted segment.
     async fn merge_existing_index_segments(
         &self,
         source_segments: Vec<IndexMetadata>,
     ) -> Result<IndexMetadata>;
 
+    #[cfg(feature = "write")]
     /// Commit one or more existing physical index segments as a logical index.
     ///
     /// `column` names the first field in each segment. Built-in indices require

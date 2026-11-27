@@ -4,8 +4,6 @@
 pub mod aggregate;
 pub use lance_datafusion_exec::chunker;
 pub mod dataframe;
-#[cfg(feature = "datagen")]
-pub use lance_datafusion_exec::datagen;
 pub mod exec;
 pub use lance_datafusion_exec::expr;
 pub mod logical_expr;
@@ -28,7 +26,5 @@ mod numeric_coercion;
 pub mod signed_zero;
 pub mod spill;
 pub mod sql;
-#[cfg(feature = "substrait")]
-pub mod substrait;
 pub mod udf;
 pub use lance_datafusion_exec::utils;

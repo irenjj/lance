@@ -15,21 +15,21 @@ use std::sync::Arc;
 
 use arrow_schema::{DataType, Schema as ArrowSchema, SortOptions};
 use async_recursion::async_recursion;
-use datafusion::common::{JoinType, NullEquality};
-use datafusion::functions_aggregate;
-use datafusion::logical_expr::lit;
-use datafusion::physical_expr::PhysicalSortExpr;
-use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
-use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::repartition::RepartitionExec;
-use datafusion::physical_plan::sorts::sort::SortExec;
-use datafusion::physical_plan::union::UnionExec;
-use datafusion::physical_plan::{ExecutionPlan, expressions};
+use datafusion_common::{JoinType, NullEquality};
+use datafusion_expr::lit;
+use datafusion_functions_aggregate as functions_aggregate;
+use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{LexOrdering, Partitioning, PhysicalExpr};
+use datafusion_physical_plan::aggregates::{AggregateExec, AggregateMode, PhysicalGroupBy};
+use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::empty::EmptyExec;
 use datafusion_physical_plan::joins::{HashJoinExec, PartitionMode};
 use datafusion_physical_plan::projection::ProjectionExec;
+use datafusion_physical_plan::repartition::RepartitionExec;
+use datafusion_physical_plan::sorts::sort::SortExec;
+use datafusion_physical_plan::union::UnionExec;
+use datafusion_physical_plan::{ExecutionPlan, expressions};
 use lance_arrow::SchemaExt as ArrowSchemaExt;
 use lance_core::ROW_ID;
 use lance_core::datatypes::OnMissing;
@@ -215,9 +215,7 @@ fn supports_compound_scorer(query: &FtsQuery) -> bool {
 fn supports_indexed_stats_residual_compound(query: &FtsQuery) -> bool {
     match query {
         FtsQuery::Match(query) => query.fuzziness == Some(0),
-        // MemWAL phrase matching currently collapses tokenizer position gaps.
-        // Keep phrase queries on the established fallback until it can retain
-        // those gaps exactly (notably when stop words are configured).
+        // Keep phrase leaves on the position-aware indexed and flat readers.
         FtsQuery::Phrase(_) => false,
         FtsQuery::Boost(query) => {
             supports_indexed_stats_residual_compound(&query.positive)

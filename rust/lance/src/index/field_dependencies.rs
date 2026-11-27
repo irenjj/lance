@@ -14,6 +14,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+#[cfg(any(test, feature = "write"))]
 use lance_core::datatypes::Schema;
 use lance_index::scalar::registry::ScalarIndexPlugin;
 use lance_table::format::IndexMetadata;
@@ -89,6 +90,7 @@ fn resolve_input_field_ids<'a>(
     ))
 }
 
+#[cfg(any(test, feature = "write"))]
 /// Persist additional dependencies after the input columns for a newly built index.
 /// The plugin must already have recorded any dataset field IDs in its details.
 pub fn fields_with_dependencies(

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-//! Lance extensions for [DataFrame].
+//! Group consecutive rows in a sorted record batch stream.
 
 use std::ops::Range;
 use std::pin::Pin;
@@ -11,13 +11,15 @@ use std::task::{Context, Poll};
 use arrow_array::RecordBatch;
 use arrow_ord::partition::partition;
 use arrow_schema::Schema;
+#[cfg(feature = "write")]
 use datafusion::dataframe::DataFrame;
-use datafusion::error::Result as DFResult;
-use datafusion::physical_plan::SendableRecordBatchStream;
-use datafusion::scalar::ScalarValue;
+use datafusion_common::Result as DFResult;
+use datafusion_common::ScalarValue;
+use datafusion_physical_plan::SendableRecordBatchStream;
 use futures::{Stream, StreamExt};
 use lance_arrow::RecordBatchExt;
 
+#[cfg(feature = "write")]
 #[async_trait::async_trait]
 pub trait DataFrameExt {
     /// Execute the query and return as a grouped stream.
@@ -26,22 +28,23 @@ pub trait DataFrameExt {
     async fn group_by_stream(self, partition_columns: &[&str]) -> DFResult<BatchStreamGrouper>;
 }
 
+#[cfg(feature = "write")]
 #[async_trait::async_trait]
 impl DataFrameExt for DataFrame {
     async fn group_by_stream(self, partition_columns: &[&str]) -> DFResult<BatchStreamGrouper> {
         if partition_columns.is_empty() {
-            return Err(datafusion::error::DataFusionError::Execution(
+            return Err(datafusion_common::DataFusionError::Execution(
                 "No partition columns specified".into(),
             ));
         }
         if partition_columns.len() > 1 {
-            return Err(datafusion::error::DataFusionError::NotImplemented(
+            return Err(datafusion_common::DataFusionError::NotImplemented(
                 "Only one partition column supported".into(),
             ));
         }
         for col in partition_columns {
             if self.schema().field_with_name(None, col).is_err() {
-                return Err(datafusion::error::DataFusionError::Execution(format!(
+                return Err(datafusion_common::DataFusionError::Execution(format!(
                     "Partition column '{}' not found",
                     col
                 )));
@@ -126,7 +129,7 @@ impl BatchStreamGrouper {
     /// end of the vector one-by-one.
     fn compute_ranges(&self, batch: &RecordBatch) -> DFResult<Vec<(ScalarValue, Range<usize>)>> {
         let column = batch.column_by_name(&self.partition_column).ok_or(
-            datafusion::error::DataFusionError::Execution("Partition column not found".into()),
+            datafusion_common::DataFusionError::Execution("Partition column not found".into()),
         )?;
         let ranges = partition(std::slice::from_ref(column))?.ranges();
         ranges
@@ -240,8 +243,9 @@ impl Stream for BatchStreamGrouper {
 mod tests {
     use arrow_array::Int32Array;
     use arrow_schema::{DataType, Field};
-    use datafusion::{datasource::MemTable, execution::context::SessionContext};
+    use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
     use futures::TryStreamExt;
+    use futures::stream;
 
     use super::*;
 
@@ -265,13 +269,9 @@ mod tests {
             batch.slice(5, 3), // a = [6, 7, 8], b = [3, 3, 4]
         ];
 
-        let table = MemTable::try_new(schema, vec![batches]).unwrap();
-        let ctx = SessionContext::new();
-        let df = ctx.read_table(Arc::new(table)).unwrap();
-        let actual = df
-            .group_by_stream(&["b"])
-            .await
-            .unwrap()
+        let input =
+            RecordBatchStreamAdapter::new(schema, stream::iter(batches.into_iter().map(Ok)));
+        let actual = BatchStreamGrouper::new(Box::pin(input), "b".to_owned())
             .try_collect::<Vec<_>>()
             .await
             .unwrap();

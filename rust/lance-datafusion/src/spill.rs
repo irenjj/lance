@@ -14,20 +14,18 @@ use std::{
 use arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_array::RecordBatch;
 use arrow_schema::{ArrowError, Schema, SchemaRef};
-use datafusion::{
-    catalog::{TableProvider, streaming::StreamingTable},
-    execution::{
-        SendableRecordBatchStream, SpillFile, TaskContext, disk_manager::DiskManager,
-        runtime_env::RuntimeEnv,
-    },
-    physical_plan::{
-        SpillManager,
-        metrics::{ExecutionPlanMetricsSet, SpillMetrics},
-        stream::RecordBatchStreamAdapter,
-        streaming::PartitionStream,
-    },
-};
+use datafusion_catalog::{TableProvider, streaming::StreamingTable};
 use datafusion_common::DataFusionError;
+use datafusion_execution::{
+    SendableRecordBatchStream, SpillFile, TaskContext, disk_manager::DiskManager,
+    runtime_env::RuntimeEnv,
+};
+use datafusion_physical_plan::{
+    SpillManager,
+    metrics::{ExecutionPlanMetricsSet, SpillMetrics},
+    stream::RecordBatchStreamAdapter,
+    streaming::PartitionStream,
+};
 use futures::StreamExt;
 use lance_arrow::memory::MemoryAccumulator;
 use lance_core::error::LanceOptionExt;
@@ -219,8 +217,8 @@ impl MaterializedStream {
 /// # use std::sync::Arc;
 /// # use arrow_array::RecordBatch;
 /// # use arrow_schema::Schema;
-/// # use datafusion::execution::{SendableRecordBatchStream, runtime_env::RuntimeEnvBuilder};
-/// # use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+/// # use datafusion_execution::{SendableRecordBatchStream, runtime_env::RuntimeEnvBuilder};
+/// # use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 /// # use datafusion_common::DataFusionError;
 /// # use lance_datafusion::spill::materialize_replayable_stream;
 /// # async fn example() -> Result<(), DataFusionError> {
@@ -324,14 +322,14 @@ pub async fn materialize_stream(
 /// # use std::sync::Arc;
 /// # use arrow_array::{Int32Array, RecordBatch};
 /// # use arrow_schema::{DataType, Field, Schema};
-/// # use datafusion::execution::SendableRecordBatchStream;
-/// # use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+/// # use datafusion_execution::SendableRecordBatchStream;
+/// # use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 /// # use futures::TryStreamExt;
 /// # use lance_datafusion::exec::provider_to_stream;
-/// # use datafusion::execution::disk_manager::DiskManager;
+/// # use datafusion_session::Session;
+/// # use datafusion_execution::disk_manager::DiskManager;
 /// # use lance_datafusion::spill::spilling_table_provider_with_job_disk_manager;
-/// # #[tokio::main]
-/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # async fn replay(session: &dyn Session) -> Result<(), Box<dyn std::error::Error>> {
 /// let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
 /// let batch = RecordBatch::try_new(
 ///     schema.clone(),
@@ -348,7 +346,7 @@ pub async fn materialize_stream(
 /// );
 /// let provider =
 ///     spilling_table_provider_with_job_disk_manager(source, 0, disk_manager).await?;
-/// let replayed: Vec<RecordBatch> = provider_to_stream(provider).await?.try_collect().await?;
+/// let replayed: Vec<RecordBatch> = provider_to_stream(provider, session).await?.try_collect().await?;
 /// assert_eq!(replayed.iter().map(RecordBatch::num_rows).sum::<usize>(), 3);
 /// # Ok(())
 /// # }
@@ -1037,7 +1035,7 @@ impl AsyncStreamReader {
 mod tests {
     use arrow_array::{Int32Array, record_batch};
     use arrow_schema::{DataType, Field};
-    use datafusion::execution::{disk_manager::DiskManagerBuilder, runtime_env::RuntimeEnvBuilder};
+    use datafusion_execution::{disk_manager::DiskManagerBuilder, runtime_env::RuntimeEnvBuilder};
     use futures::{StreamExt, TryStreamExt, poll};
     use lance_core::utils::tempfile::{TempStdFile, TempStdPath};
     use rstest::rstest;
@@ -1045,6 +1043,7 @@ mod tests {
 
     use super::*;
     use crate::exec::provider_to_stream;
+    use lance_testing::datafusion::TestSession;
 
     struct DropSignal(Option<oneshot::Sender<()>>);
 
@@ -1092,7 +1091,7 @@ mod tests {
                 .clone_inner()
                 .iter()
                 .filter_map(|metric| match metric.value() {
-                    datafusion::physical_plan::metrics::MetricValue::SpillCount(value) => {
+                    datafusion_physical_plan::metrics::MetricValue::SpillCount(value) => {
                         Some(value.value())
                     }
                     _ => None,
@@ -1138,7 +1137,7 @@ mod tests {
                 .clone_inner()
                 .iter()
                 .filter_map(|metric| match metric.value() {
-                    datafusion::physical_plan::metrics::MetricValue::SpillCount(value) => {
+                    datafusion_physical_plan::metrics::MetricValue::SpillCount(value) => {
                         Some(value.value())
                     }
                     _ => None,
@@ -1459,7 +1458,7 @@ mod tests {
             spilling_table_provider_with_job_disk_manager(source, 0, disk_manager.clone())
                 .await
                 .unwrap();
-        let error = provider_to_stream(provider)
+        let error = provider_to_stream(provider, &TestSession::default())
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -1520,7 +1519,7 @@ mod tests {
                 .await
                 .unwrap();
         let collect = |provider| async move {
-            provider_to_stream(provider)
+            provider_to_stream(provider, &TestSession::default())
                 .await
                 .unwrap()
                 .try_collect::<Vec<_>>()
@@ -1580,7 +1579,7 @@ mod tests {
         )
         .await
         .unwrap();
-        provider_to_stream(provider.clone())
+        provider_to_stream(provider.clone(), &TestSession::default())
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -1618,7 +1617,7 @@ mod tests {
         )
         .await
         .unwrap();
-        provider_to_stream(next_provider.clone())
+        provider_to_stream(next_provider.clone(), &TestSession::default())
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -1665,7 +1664,7 @@ mod tests {
         )
         .await
         .unwrap();
-        provider_to_stream(first.clone())
+        provider_to_stream(first.clone(), &TestSession::default())
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -1676,7 +1675,7 @@ mod tests {
             spilling_table_provider_with_job_disk_manager(source(batch), 0, disk_manager.clone())
                 .await
                 .unwrap();
-        let error = provider_to_stream(second)
+        let error = provider_to_stream(second, &TestSession::default())
             .await
             .unwrap()
             .try_collect::<Vec<_>>()

@@ -9,17 +9,17 @@ use std::time::Instant;
 use arrow::array::{Float32Builder, Int32Builder, UInt64Builder};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::{Distribution, EquivalenceProperties};
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
-use datafusion_physical_expr::{Distribution, EquivalenceProperties};
 use futures::{StreamExt, stream};
 use lance_core::utils::futures::FinallyStreamExt;
 use lance_index::metrics::{IndexTimer, IndexTiming};
@@ -252,7 +252,7 @@ impl ExecutionPlan for ANNIvfBatchExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::context::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let schema = self.schema();
         let ds = self.dataset.clone();

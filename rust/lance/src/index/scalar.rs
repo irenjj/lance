@@ -4,19 +4,24 @@
 //! Utilities for integrating scalar indices with datasets
 //!
 
+#[cfg(feature = "write")]
 pub(crate) mod bitmap;
+
+#[cfg(feature = "write")]
 pub(crate) mod bloomfilter;
+
+#[cfg(feature = "write")]
 pub(crate) mod btree;
+
+#[cfg(feature = "write")]
 pub(crate) mod fmindex;
+
 pub(crate) mod inverted;
+
+#[cfg(feature = "write")]
 pub(crate) mod label_list;
+
 pub(crate) mod list_element;
-pub(crate) mod minhash_lsh;
-pub(crate) mod ngram;
-#[cfg(feature = "geo")]
-pub(crate) mod rtree;
-pub(crate) mod segment_merge;
-pub(crate) mod zonemap;
 
 use super::field_dependencies::input_field_ids;
 use super::frag_reuse::ResolvedRemapping;
@@ -28,26 +33,32 @@ use std::sync::{Arc, LazyLock};
 
 use uuid::Uuid;
 
+#[cfg(feature = "write")]
+use crate::dataset::scanner::{ColumnOrdering, RowAddrMask, RowAddrTreeMap};
 use crate::index::DatasetIndexExt;
+#[cfg(feature = "write")]
 use crate::index::create::CreateIndexBuilder;
+#[cfg(feature = "write")]
 use crate::index::loading::DatasetIndexInternalExt;
 use crate::session::index_caches::ProstAny;
-use crate::{
-    Dataset,
-    dataset::{
-        index::LanceIndexStoreExt,
-        scanner::{ColumnOrdering, RowAddrMask, RowAddrTreeMap},
-    },
-};
+use crate::{Dataset, dataset::index::LanceIndexStoreExt};
 use arrow_schema::DataType;
+#[cfg(feature = "write")]
 use datafusion::physical_plan::SendableRecordBatchStream;
+#[cfg(feature = "write")]
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+#[cfg(feature = "write")]
 use futures::TryStreamExt;
+#[cfg(feature = "write")]
 use itertools::Itertools;
 use lance_core::datatypes::Field;
+#[cfg(feature = "write")]
 use lance_core::utils::tokio::get_num_compute_intensive_cpus;
 use lance_core::utils::tracing::{IO_TYPE_OPEN_SCALAR, TRACE_IO_EVENTS};
-use lance_core::{Error, ROW_ADDR, ROW_ID, Result};
+use lance_core::{Error, Result};
+#[cfg(feature = "write")]
+use lance_core::{ROW_ADDR, ROW_ID};
+#[cfg(feature = "write")]
 use lance_datafusion::exec::LanceExecutionOptions;
 use lance_index::metrics::{MetricsCollector, NoOpMetricsCollector};
 use lance_index::pb::{
@@ -57,40 +68,66 @@ use lance_index::pbold::{
     BTreeIndexDetails, BitmapIndexDetails, InvertedIndexDetails, LabelListIndexDetails,
     NGramIndexDetails, ZoneMapIndexDetails,
 };
+#[cfg(feature = "write")]
 use lance_index::progress::IndexBuildProgress;
 use lance_index::registry::IndexPluginRegistry;
 use lance_index::scalar::IndexStore;
+use lance_index::scalar::InvertedIndexParams;
 use lance_index::scalar::bloomfilter::BLOOMFILTER_FILENAME;
 use lance_index::scalar::btree::BTREE_LOOKUP_NAME;
+#[cfg(feature = "write")]
 use lance_index::scalar::inverted::builder::resolve_num_workers;
 use lance_index::scalar::inverted::{InvertedIndex, METADATA_FILE};
 use lance_index::scalar::label_list::{
     LABEL_LIST_NULLS_METADATA_KEY, LABEL_LIST_NULLS_MIN_VERSION,
 };
 use lance_index::scalar::ngram::POSTINGS_FILENAME;
-use lance_index::scalar::registry::{
-    ScalarIndexCacheKey, ScalarIndexLoad, ScalarIndexPlugin, TrainingCriteria, TrainingOrdering,
-    VALUE_COLUMN_NAME,
-};
-use lance_index::scalar::zonemap::{ZONEMAP_INDEX_FILENAME, ZoneMapIndexBuilderParams};
-use lance_index::scalar::{BuiltinIndexType, CreatedIndex, InvertedIndexParams};
+use lance_index::scalar::registry::{ScalarIndexCacheKey, ScalarIndexLoad, ScalarIndexPlugin};
+#[cfg(feature = "write")]
+use lance_index::scalar::registry::{TrainingCriteria, TrainingOrdering, VALUE_COLUMN_NAME};
+use lance_index::scalar::zonemap::ZONEMAP_INDEX_FILENAME;
+#[cfg(feature = "write")]
+use lance_index::scalar::zonemap::ZoneMapIndexBuilderParams;
+#[cfg(feature = "write")]
+use lance_index::scalar::{BuiltinIndexType, CreatedIndex};
 use lance_index::scalar::{
     ScalarIndex, ScalarIndexParams, bitmap::BITMAP_LOOKUP_NAME, inverted::INVERT_LIST_FILE,
     lance_format::LanceIndexStore,
 };
 use lance_index::{IndexCriteria, IndexType};
-use lance_table::format::{Fragment, IndexMetadata};
+#[cfg(feature = "write")]
+use lance_table::format::Fragment;
+use lance_table::format::IndexMetadata;
+#[cfg(feature = "write")]
 use log::info;
 use prost::Message;
+#[cfg(feature = "write")]
 use tracing::instrument;
 
 // Log an update every TRAINING_UPDATE_FREQ million rows processed
+
+#[cfg(feature = "write")]
+pub(crate) mod minhash_lsh;
+
+#[cfg(feature = "write")]
+pub(crate) mod ngram;
+
+#[cfg(feature = "write")]
+pub(crate) mod segment_merge;
+
+#[cfg(feature = "write")]
+pub(crate) mod zonemap;
+
+#[cfg(feature = "write")]
+// Log an update every TRAINING_UPDATE_FREQ million rows processed
 const TRAINING_UPDATE_FREQ: usize = 1000000;
 
+#[cfg(feature = "write")]
 pub(crate) struct TrainingRequest {
     pub fragment_ids: Option<Vec<u32>>,
 }
 
+#[cfg(feature = "write")]
 impl TrainingRequest {
     pub fn with_fragment_ids(
         _dataset: Arc<Dataset>,
@@ -153,6 +190,7 @@ tokio::task_local! {
     pub(crate) static TEST_TRAINING_IO_BUFFER_SIZE: u64;
 }
 
+#[cfg(feature = "write")]
 /// Which rows [`scan_training_data`] reads.
 pub(crate) enum TrainingRows {
     /// Every row of these fragments.
@@ -165,6 +203,7 @@ pub(crate) enum TrainingRows {
     Rows(RowAddrTreeMap),
 }
 
+#[cfg(feature = "write")]
 /// Optional row selection, progress, and decode concurrency for a training scan.
 #[derive(Default)]
 pub(crate) struct TrainingScanOptions {
@@ -176,6 +215,7 @@ pub(crate) struct TrainingScanOptions {
     batch_readahead: Option<usize>,
 }
 
+#[cfg(feature = "write")]
 /// Reads the rows a scalar index is built from: `column` projected as the
 /// index's value column, with row ids or addresses as `criteria` asks, sorted
 /// by value when the index type needs it. The scan goes through the regular
@@ -270,6 +310,7 @@ pub(crate) async fn scan_training_data(
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema, batches)))
 }
 
+#[cfg(feature = "write")]
 pub(crate) async fn load_training_data(
     dataset: &Dataset,
     column: &str,
@@ -322,6 +363,7 @@ pub(crate) async fn load_training_data(
     }
 }
 
+#[cfg(feature = "write")]
 pub(crate) async fn load_fts_training_data(
     dataset: &Dataset,
     resolved: &inverted::ResolvedFtsField,
@@ -374,22 +416,8 @@ pub(crate) async fn load_fts_training_data(
     }
 }
 
-// The R-tree plugin is added here because `register_scalar_index_plugin` only works before the
-// first default registry is built, and code outside `lance` can build one at any time.
 pub(crate) static SCALAR_INDEX_PLUGIN_REGISTRY: LazyLock<Arc<IndexPluginRegistry>> =
-    LazyLock::new(|| {
-        #[cfg(feature = "geo")]
-        {
-            IndexPluginRegistry::with_default_plugins_and(|registry| {
-                registry.add_plugin::<
-                    lance_index::pb::RTreeIndexDetails,
-                    lance_geo::rtree::RTreeIndexPlugin,
-                >();
-            })
-        }
-        #[cfg(not(feature = "geo"))]
-        IndexPluginRegistry::with_default_plugins()
-    });
+    LazyLock::new(IndexPluginRegistry::with_default_plugins);
 
 pub struct IndexDetails(pub Arc<prost_types::Any>);
 
@@ -430,15 +458,12 @@ impl IndexDetails {
     }
 }
 
+#[cfg(feature = "write")]
 /// The format version of `index_type` from before it moved to the row-address
 /// domain, for the index types that did so with a version bump.
 pub(in crate::index) fn row_id_domain_version(index_type: &str) -> Option<u32> {
     use lance_index::scalar::{bitmap, btree, label_list, ngram};
     let is = |builtin: BuiltinIndexType| index_type.eq_ignore_ascii_case(builtin.as_str());
-    #[cfg(feature = "geo")]
-    if is(BuiltinIndexType::RTree) {
-        return Some(lance_geo::rtree::RTREE_ROW_ID_DOMAIN_VERSION);
-    }
     if is(BuiltinIndexType::BTree) {
         Some(btree::BTREE_ROW_ID_DOMAIN_VERSION)
     } else if is(BuiltinIndexType::Bitmap) {
@@ -452,6 +477,7 @@ pub(in crate::index) fn row_id_domain_version(index_type: &str) -> Option<u32> {
     }
 }
 
+#[cfg(feature = "write")]
 /// The domain (see [`IndexMetadata::results_are_row_addrs`]) shared by
 /// `segments`, for a merge that reuses their stored data without a rescan and
 /// so writes its result in that same domain.
@@ -492,6 +518,7 @@ pub(in crate::index) fn shared_segment_domain(
     Ok(results_are_row_addrs)
 }
 
+#[cfg(feature = "write")]
 /// Build a Scalar Index (returns details to store in the manifest)
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "debug", skip_all)]
@@ -677,6 +704,7 @@ pub(super) async fn build_scalar_index(
     Ok(created_index)
 }
 
+#[cfg(feature = "write")]
 /// Build a canonical bitmap index segment over a caller-selected fragment set.
 ///
 /// This is intentionally separate from `build_scalar_index(..., fragment_ids=Some(...))`.
@@ -783,38 +811,19 @@ pub async fn fetch_index_details(
 
 /// Recover the build parameters of a committed scalar index segment.
 ///
-/// The segment must index one keyed field in `dataset`'s current schema. Carried
-/// covering fields do not affect parameter recovery. The returned index type and
-/// parameters can be passed to [`DatasetIndexExt::create_index`] with
-/// [`IndexType::Scalar`], including for wrapper indices such as JSON.
-///
-/// Inverted indices use the metadata-only [`load_segment_params`] path without
-/// opening or caching the index. Other scalar indices are opened through the
-/// dataset's index cache and recover their parameters with
-/// [`ScalarIndex::derive_index_params`]. Only persisted or reconstructible
-/// settings are recovered; creation-only options such as FTS worker counts and
-/// memory limits are not retained.
-///
-/// # Example
+/// The segment must index one keyed field in the current snapshot.
+/// Inverted indices use the metadata-only [`load_segment_params`] path.
+/// Other scalar indices are opened through the dataset's index cache and
+/// recover their parameters with [`ScalarIndex::derive_index_params`].
 ///
 /// ```
 /// # use lance::{Dataset, Result};
 /// use lance::index::{DatasetIndexExt, scalar::load_scalar_segment_params};
-/// use lance_index::IndexType;
 ///
-/// # async fn rebuild(dataset: &mut Dataset) -> Result<()> {
-/// let indices = dataset.load_indices().await?;
-/// if let Some(segment) = indices.iter().find(|index| index.name == "text_idx") {
-///     let params = load_scalar_segment_params(dataset, segment).await?;
-///     dataset
-///         .create_index(
-///             &["text"],
-///             IndexType::Scalar,
-///             Some(segment.name.clone()),
-///             &params,
-///             true,
-///         )
-///         .await?;
+/// # async fn inspect(dataset: &Dataset) -> Result<()> {
+/// for segment in dataset.load_indices_by_name("text_idx").await? {
+///     let params = load_scalar_segment_params(dataset, &segment).await?;
+///     println!("{params:?}");
 /// }
 /// # Ok(())
 /// # }
@@ -907,25 +916,26 @@ pub async fn open_scalar_index(
         dataset,
         column,
         index,
+        #[cfg(feature = "write")]
         None,
+        #[cfg(feature = "write")]
         super::frag_reuse::OpenPurpose::Query,
         metrics,
     )
     .await
 }
 
-/// [`open_scalar_index`] for a segment the manifest does not list (a staged
-/// build being merged): `staged` is its translation plan from
-/// [`super::frag_reuse::plan_staged_segments`]. With `None` the segment is
-/// looked up in the snapshot plan, which only knows committed segments.
+/// Open a scalar segment with its row-ID remapping plan. Writers also use
+/// this entry point for staged segments and maintenance.
 pub(crate) async fn open_scalar_index_with_plan(
     dataset: &Dataset,
     column: &str,
     index: &IndexMetadata,
-    staged: Option<&super::frag_reuse::SegmentRemappingPlan>,
-    purpose: super::frag_reuse::OpenPurpose,
+    #[cfg(feature = "write")] staged: Option<&super::frag_reuse::SegmentRemappingPlan>,
+    #[cfg(feature = "write")] purpose: super::frag_reuse::OpenPurpose,
     metrics: &dyn MetricsCollector,
 ) -> Result<Arc<dyn ScalarIndex>> {
+    super::loading::reject_mem_wal_index(index)?;
     let index_uuid = index.uuid;
     let index_store = Arc::new(LanceIndexStore::from_dataset_for_existing(dataset, index).await?);
 
@@ -936,7 +946,13 @@ pub(crate) async fn open_scalar_index_with_plan(
     let plugin = SCALAR_INDEX_PLUGIN_REGISTRY.get_plugin_by_details(index_details.as_ref())?;
 
     let resolved = super::frag_reuse::open_row_id_remapping_with_plan(
-        dataset, index, staged, purpose, metrics,
+        dataset,
+        index,
+        #[cfg(feature = "write")]
+        staged,
+        #[cfg(feature = "write")]
+        purpose,
+        metrics,
     )
     .await?;
     let cache_id = super::frag_reuse::fri_cache_id(&resolved);
@@ -1042,9 +1058,17 @@ pub(crate) async fn cached_scalar_index_container(
 ) -> Option<Arc<dyn ScalarIndex>> {
     let metadata = dataset.load_indices().await.ok()?;
     let index = metadata.iter().find(|idx| idx.uuid == *uuid)?;
-    let resolved = super::frag_reuse::open_row_id_remapping(dataset, index, &NoOpMetricsCollector)
-        .await
-        .ok()?;
+    let resolved = super::frag_reuse::open_row_id_remapping_with_plan(
+        dataset,
+        index,
+        #[cfg(feature = "write")]
+        None,
+        #[cfg(feature = "write")]
+        super::frag_reuse::OpenPurpose::Query,
+        &NoOpMetricsCollector,
+    )
+    .await
+    .ok()?;
     let cache_id = super::frag_reuse::fri_cache_id(&resolved);
     let index_cache =
         super::frag_reuse::scoped_index_cache(dataset, &resolved).for_index(uuid, cache_id);
@@ -1251,6 +1275,7 @@ pub fn index_matches_criteria(
     Ok(true)
 }
 
+#[cfg(feature = "write")]
 /// Initialize a scalar index from a source dataset
 pub async fn initialize_scalar_index(
     target_dataset: &mut Dataset,
@@ -1317,7 +1342,7 @@ pub async fn initialize_scalar_index(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use crate::utils::test::{DatagenExt, FragmentCount, FragmentRowCount};
 
@@ -1328,7 +1353,6 @@ mod tests {
         datatypes::{Int32Type, UInt64Type},
     };
     use arrow_schema::DataType;
-    use futures::TryStreamExt;
     use lance_core::utils::tempfile::TempStrDir;
     use lance_core::{datatypes::Field, utils::address::RowAddress};
     use lance_datagen::array;

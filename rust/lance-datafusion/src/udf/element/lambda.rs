@@ -25,7 +25,7 @@ use std::collections::VecDeque;
 use std::ops::ControlFlow;
 
 use arrow_schema::DataType;
-use datafusion::sql::sqlparser::ast::{
+use datafusion_sql::sqlparser::ast::{
     AccessExpr, BinaryOperator, Expr as SQLExpr, FunctionArg, FunctionArgExpr,
     FunctionArgumentList, FunctionArguments, Ident, LambdaFunction, ObjectName, ObjectNamePart,
     OneOrManyWithParens, Subscript, Value, Visit, VisitMut, Visitor, VisitorMut, visit_expressions,

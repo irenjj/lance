@@ -49,22 +49,22 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use arrow_schema::{Fields, Schema as ArrowSchema};
-use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::config::ConfigOptions;
-use datafusion::error::Result as DFResult;
-use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
-use datafusion::physical_plan::coop::CooperativeExec;
-use datafusion::physical_plan::execution_plan::CardinalityEffect;
-use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_plan::repartition::RepartitionExec;
-use datafusion::physical_plan::replace_children_if_necessary;
-use datafusion::physical_plan::sorts::sort::SortExec;
-use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use datafusion::physical_plan::{ExecutionPlan, Partitioning};
+use datafusion_common::Result as DFResult;
+use datafusion_common::config::ConfigOptions;
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::utils::{collect_columns, reassign_expr_columns};
 use datafusion_physical_expr::{LexOrdering, PhysicalExpr, PhysicalSortExpr};
+use datafusion_physical_optimizer::PhysicalOptimizerRule;
+use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion_physical_plan::coop::CooperativeExec;
+use datafusion_physical_plan::execution_plan::CardinalityEffect;
+use datafusion_physical_plan::projection::ProjectionExec;
+use datafusion_physical_plan::repartition::RepartitionExec;
+use datafusion_physical_plan::replace_children_if_necessary;
+use datafusion_physical_plan::sorts::sort::SortExec;
+use datafusion_physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
+use datafusion_physical_plan::{ExecutionPlan, Partitioning};
 use lance_core::ROW_ID;
 use lance_core::datatypes::OnMissing;
 use lance_select::RowSetOps;
@@ -85,12 +85,14 @@ pub type PassThrough = Arc<dyn Fn(&dyn ExecutionPlan) -> bool + Send + Sync>;
 ///
 /// ```
 /// # use std::sync::Arc;
-/// # use datafusion::execution::SessionStateBuilder;
-/// # use lance::io::exec::topk_late_materialization::TopKLateMaterialization;
-/// let state = SessionStateBuilder::new()
-///     .with_default_features()
-///     .with_physical_optimizer_rule(Arc::new(TopKLateMaterialization::new()))
-///     .build();
+/// # use datafusion_common::{Result, config::ConfigOptions};
+/// # use datafusion_physical_optimizer::PhysicalOptimizerRule;
+/// # use datafusion_physical_plan::ExecutionPlan;
+/// use lance::io::exec::topk_late_materialization::TopKLateMaterialization;
+///
+/// # fn optimize(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
+/// TopKLateMaterialization::new().optimize(plan, &ConfigOptions::default())
+/// # }
 /// ```
 #[derive(Clone, Default)]
 pub struct TopKLateMaterialization {
@@ -507,7 +509,7 @@ fn max_rows(read: &FilteredReadExec) -> Option<usize> {
         .sum()
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::{

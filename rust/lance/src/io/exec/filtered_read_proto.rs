@@ -19,9 +19,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow_schema::Schema as ArrowSchema;
-use datafusion::execution::SessionState;
-use datafusion::logical_expr::Expr;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion_execution::SessionState;
+use datafusion_expr::Expr;
+use datafusion_physical_plan::ExecutionPlan;
 use lance_core::datatypes::{BlobHandling, Projection};
 use lance_core::{Error, Result};
 use lance_datafusion::pb;
@@ -96,7 +96,7 @@ pub fn filtered_read_exec_to_proto_with_table(
 /// Encoding does not evaluate the index or eagerly prepare a read plan.
 ///
 /// ```
-/// # use datafusion::execution::SessionState;
+/// # use datafusion_execution::SessionState;
 /// # use lance::io::exec::filtered_read::FilteredReadExec;
 /// # use lance::io::exec::filtered_read_proto::filtered_read_exec_to_proto_v2;
 /// # async fn example(exec: &FilteredReadExec, state: &SessionState) -> lance::Result<()> {
@@ -120,7 +120,7 @@ pub async fn filtered_read_exec_to_proto_v2(
 /// [`filtered_read_exec_to_proto_v2`] for codec routing and child-plan requirements.
 ///
 /// ```
-/// # use datafusion::execution::SessionState;
+/// # use datafusion_execution::SessionState;
 /// # use lance::io::exec::filtered_read::FilteredReadExec;
 /// # use lance::io::exec::filtered_read_proto::filtered_read_exec_to_proto_with_table_v2;
 /// # fn example(exec: &FilteredReadExec, state: &SessionState,
@@ -215,8 +215,8 @@ pub async fn filtered_read_exec_from_proto(
 ///
 /// ```
 /// # use std::sync::Arc;
-/// # use datafusion::execution::SessionState;
-/// # use datafusion::physical_plan::ExecutionPlan;
+/// # use datafusion_execution::SessionState;
+/// # use datafusion_physical_plan::ExecutionPlan;
 /// # use lance::io::exec::filtered_read::FilteredReadExec;
 /// # use lance::io::exec::filtered_read_proto::filtered_read_exec_from_proto_v2;
 /// # async fn example(message: lance_datafusion::pb::FilteredReadExecV2Proto,

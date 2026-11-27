@@ -15,16 +15,16 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use arrow_schema::DataType;
-use datafusion::catalog::Session;
-use datafusion::logical_expr::Expr;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion_catalog::Session;
+use datafusion_common::ScalarValue;
+use datafusion_expr::Expr;
+use datafusion_physical_plan::ExecutionPlan;
 #[allow(deprecated)]
-use datafusion::physical_plan::coalesce_batches::CoalesceBatchesExec;
-use datafusion::physical_plan::empty::EmptyExec;
-use datafusion::physical_plan::limit::GlobalLimitExec;
-use datafusion::physical_plan::repartition::RepartitionExec;
-use datafusion::physical_plan::union::UnionExec;
-use datafusion::scalar::ScalarValue;
+use datafusion_physical_plan::coalesce_batches::CoalesceBatchesExec;
+use datafusion_physical_plan::empty::EmptyExec;
+use datafusion_physical_plan::limit::GlobalLimitExec;
+use datafusion_physical_plan::repartition::RepartitionExec;
+use datafusion_physical_plan::union::UnionExec;
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use lance_core::datatypes::{OnMissing, Projection};
@@ -588,7 +588,7 @@ impl Scanner {
         let unioned = UnionExec::try_new(vec![plan, stale_path])?;
         Ok(Arc::new(RepartitionExec::try_new(
             unioned,
-            datafusion::physical_plan::Partitioning::RoundRobinBatch(1),
+            datafusion_physical_plan::Partitioning::RoundRobinBatch(1),
         )?))
     }
 
@@ -1115,7 +1115,7 @@ impl Scanner {
             let unioned = UnionExec::try_new(all_paths)?;
             Ok(Arc::new(RepartitionExec::try_new(
                 unioned,
-                datafusion::physical_plan::Partitioning::RoundRobinBatch(1),
+                datafusion_physical_plan::Partitioning::RoundRobinBatch(1),
             )?))
         }
     }
@@ -1320,7 +1320,7 @@ impl Scanner {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

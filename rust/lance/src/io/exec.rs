@@ -5,15 +5,11 @@
 //!
 //! WARNING: Internal API with no stability guarantees.
 
-#[cfg(feature = "substrait")]
-pub mod ann_proto;
 pub(crate) mod column_width;
 pub mod count_from_mask;
 pub mod count_pushdown;
 mod filter;
 pub mod filtered_read;
-#[cfg(feature = "substrait")]
-pub mod filtered_read_proto;
 pub mod fts;
 pub(crate) mod knn;
 pub mod minhash;
@@ -26,11 +22,11 @@ pub(crate) mod row_addr_mask;
 mod rowids;
 pub mod scalar_index;
 mod scan;
-#[cfg(feature = "substrait")]
-pub mod table_identifier;
 pub(crate) mod take;
-#[cfg(test)]
+
+#[cfg(all(test, feature = "write"))]
 pub mod testing;
+
 pub mod topk_late_materialization;
 pub mod utils;
 

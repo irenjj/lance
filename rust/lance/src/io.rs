@@ -3,7 +3,9 @@
 
 //! I/O utilities.
 
+#[cfg(feature = "write")]
 pub mod commit;
+
 pub mod deletion;
 pub mod exec;
 

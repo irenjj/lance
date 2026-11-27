@@ -16,8 +16,10 @@ use std::sync::Arc;
 
 use lance_core::datatypes::Field;
 use lance_index::pb::ListElementIndexDetails;
+#[cfg(feature = "write")]
+use lance_index::scalar::CreatedIndex;
+use lance_index::scalar::ScalarIndex;
 use lance_index::scalar::list_element::ListElementIndex;
-use lance_index::scalar::{CreatedIndex, ScalarIndex};
 use lance_table::format::IndexMetadata;
 use prost::Message;
 
@@ -51,6 +53,7 @@ fn element_fields(column: &Field) -> Option<&[Field]> {
         .then_some(item.children.as_slice())
 }
 
+#[cfg(feature = "write")]
 /// Record, in a segment the plugin has just trained on `column`, the field IDs
 /// of the keys it names. Training validated the names against the same schema.
 pub fn record_key_field_ids(column: &Field, created: &mut CreatedIndex) -> Result<()> {
@@ -139,6 +142,7 @@ pub fn details_for_open(
     })
 }
 
+#[cfg(feature = "write")]
 /// Whether the recorded key IDs still resolve to children of the expected types
 /// in `schema`. Renames preserve the IDs and continue to resolve.
 pub fn key_fields_resolve(
@@ -244,6 +248,7 @@ mod tests {
         assert_eq!(bound_keys(&column(), &details(ids, keys, types)), None);
     }
 
+    #[cfg(feature = "write")]
     #[test]
     fn test_record_key_field_ids() {
         let mut created = CreatedIndex {

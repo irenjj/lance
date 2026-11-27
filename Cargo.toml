@@ -1,23 +1,18 @@
 [workspace]
 members = [
     "protos",
-    "rust/examples",
     "rust/lance",
     "rust/lance-arrow",
     "rust/lance-core",
+    "rust/lance-datafusion",
     "rust/lance-datafusion-exec",
-    "rust/lance-datagen",
     "rust/lance-encoding",
     "rust/lance-file",
-    "rust/lance-geo",
     "rust/lance-index",
     "rust/lance-index-core",
     "rust/lance-io",
     "rust/lance-jsonb",
     "rust/lance-linalg",
-    "rust/lance-namespace",
-    "rust/lance-namespace-impls",
-    "rust/lance-namespace-datafusion",
     "rust/lance-select",
     "rust/lance-tokenizer",
     "rust/lance-table",
@@ -25,11 +20,20 @@ members = [
     "rust/lance-derive",
     "rust/lance-test-macros",
     "rust/lance-testing",
-    "rust/lance-tools",
     "rust/compression/fsst",
     "rust/compression/bitpacking",
 ]
-exclude = ["python", "java/lance-jni"]
+exclude = [
+    "python",
+    "java/lance-jni",
+    "rust/lance-namespace",
+    "rust/lance-namespace-datafusion",
+    "rust/lance-namespace-impls",
+    "rust/lance-geo",
+    "rust/lance-tools",
+    "rust/lance-datagen",
+    "rust/examples",
+]
 # Python package needs to be built by maturin.
 resolver = "3"
 
@@ -65,19 +69,14 @@ lance-arrow = { version = "=15.1.0-beta.2", path = "./rust/lance-arrow" }
 lance-core = { version = "=15.1.0-beta.2", path = "./rust/lance-core" }
 lance-datafusion = { version = "=15.1.0-beta.2", path = "./rust/lance-datafusion" }
 lance-datafusion-exec = { version = "=15.1.0-beta.2", path = "./rust/lance-datafusion-exec" }
-lance-datagen = { version = "=15.1.0-beta.2", path = "./rust/lance-datagen" }
 lance-derive = { version = "=15.1.0-beta.2", path = "./rust/lance-derive" }
 lance-encoding = { version = "=15.1.0-beta.2", path = "./rust/lance-encoding" }
 lance-file = { version = "=15.1.0-beta.2", path = "./rust/lance-file" }
-lance-geo = { version = "=15.1.0-beta.2", path = "./rust/lance-geo" }
 lance-index = { version = "=15.1.0-beta.2", path = "./rust/lance-index" }
 lance-index-core = { version = "=15.1.0-beta.2", path = "./rust/lance-index-core" }
 lance-io = { version = "=15.1.0-beta.2", path = "./rust/lance-io", default-features = false }
 lance-jsonb = { version = "=15.1.0-beta.2", path = "./rust/lance-jsonb" }
 lance-linalg = { version = "=15.1.0-beta.2", path = "./rust/lance-linalg" }
-lance-namespace = { version = "=15.1.0-beta.2", path = "./rust/lance-namespace" }
-lance-namespace-impls = { version = "=15.1.0-beta.2", path = "./rust/lance-namespace-impls" }
-lance-namespace-reqwest-client = "0.13.0"
 lance-select = { version = "=15.1.0-beta.2", path = "./rust/lance-select" }
 lance-tokenizer = { version = "=15.1.0-beta.2", path = "./rust/lance-tokenizer" }
 lance-table = { version = "=15.1.0-beta.2", path = "./rust/lance-table" }
@@ -88,17 +87,17 @@ all_asserts = "2.3.1"
 approx = "0.5.1"
 argminmax = "0.7.1"
 # Note that this one does not include pyarrow
-arrow = { version = "59.2.0", optional = false, features = ["prettyprint"] }
-arrow-arith = "59.2.0"
-arrow-array = "59.2.0"
-arrow-buffer = "59.2.0"
-arrow-cast = "59.2.0"
-arrow-data = "59.2.0"
-arrow-ipc = { version = "59.2.0", features = ["zstd"] }
-arrow-ord = "59.2.0"
-arrow-row = "59.2.0"
-arrow-schema = "59.2.0"
-arrow-select = "59.2.0"
+arrow = { version = "60.2.0", optional = false, features = ["prettyprint"] }
+arrow-arith = "60.2.0"
+arrow-array = "60.2.0"
+arrow-buffer = "60.2.0"
+arrow-cast = "60.2.0"
+arrow-data = "60.2.0"
+arrow-ipc = { version = "60.2.0", features = ["zstd"] }
+arrow-ord = "60.2.0"
+arrow-row = "60.2.0"
+arrow-schema = "60.2.0"
+arrow-select = "60.2.0"
 async-recursion = "1.0"
 async-trait = "0.1"
 axum = "0.7"
@@ -134,25 +133,22 @@ criterion = { version = "0.8.2", features = [
 crossbeam-queue = "0.3"
 crossbeam-skiplist = "0.1"
 dashmap = "6"
-datafusion = { version = "55.0.0", default-features = false, features = [
-    "crypto_expressions",
-    "datetime_expressions",
-    "encoding_expressions",
-    "nested_expressions",
-    "regex_expressions",
-    "sql",
-    "string_expressions",
-    "unicode_expressions",
-] }
-datafusion-common = "55.0.0"
-datafusion-functions = { version = "55.0.0", default-features = false, features = ["regex_expressions"] }
-datafusion-sql = "55.0.0"
-datafusion-execution = "55.0.0"
-datafusion-expr = "55.0.0"
-datafusion-functions-nested = "55.0.0"
-datafusion-physical-expr = "55.0.0"
-datafusion-physical-plan = "55.0.0"
-datafusion-substrait = { version = "55.0.0", default-features = false }
+datafusion-common = { version = "57.0.0-dev", default-features = false }
+datafusion-common-runtime = { version = "57.0.0-dev", default-features = false }
+datafusion-expr = { version = "57.0.0-dev", default-features = false }
+datafusion-execution = { version = "57.0.0-dev", default-features = false }
+datafusion-session = { version = "57.0.0-dev", default-features = false }
+datafusion-catalog = { version = "57.0.0-dev", default-features = false }
+datafusion-datasource = { version = "57.0.0-dev", default-features = false }
+datafusion-functions = { version = "57.0.0-dev", default-features = false, features = ["crypto_expressions", "datetime_expressions", "encoding_expressions", "math_expressions", "regex_expressions", "string_expressions", "unicode_expressions"] }
+datafusion-functions-nested = { version = "57.0.0-dev", default-features = false }
+datafusion-functions-aggregate = { version = "57.0.0-dev", default-features = false }
+datafusion-functions-window = { version = "57.0.0-dev", default-features = false }
+datafusion-physical-expr = { version = "57.0.0-dev", default-features = false }
+datafusion-physical-optimizer = { version = "57.0.0-dev", default-features = false }
+datafusion-physical-plan = { version = "57.0.0-dev", default-features = false }
+datafusion-optimizer = { version = "57.0.0-dev", default-features = false }
+datafusion-sql = { version = "57.0.0-dev", default-features = false }
 dirs = "6.0.0"
 either = "1.0"
 env_logger = "0.11.7"
@@ -160,9 +156,6 @@ nalgebra = { version = "0.33.2", default-features = false, features = ["std"] }
 fst = { version = "0.4.7", features = ["levenshtein"] }
 fsst = { version = "=15.1.0-beta.2", path = "./rust/compression/fsst" }
 futures = "0.3"
-geoarrow-array = "0.9"
-geoarrow-schema = "0.9"
-geodatafusion = "0.6.0"
 geo-traits = "0.3.0"
 geo-types = "0.7.16"
 hex = "0.4.3"
@@ -205,7 +198,7 @@ goosefs-sdk = { version = "0.2.2", default-features = false }
 # Cache features (`metadata-cache`, `page-cache-io-uring`) belong on the
 # consumer (`lance-io`'s `goosefs` feature), not this workspace pin.
 opendal-service-goosefs = { version = "0.59.2", default-features = false }
-parquet = { version = "59.2.0", default-features = false, features = [
+parquet = { version = "60.2.0", default-features = false, features = [
     "arrow",
     "async",
 ] }

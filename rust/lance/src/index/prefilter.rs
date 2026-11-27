@@ -593,7 +593,7 @@ impl PreFilter for DatasetPreFilter {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod test {
     use lance_select::RowSetOps;
 

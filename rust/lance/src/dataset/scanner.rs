@@ -17,8 +17,10 @@ mod list_structure;
 mod minhash;
 mod plan;
 mod source;
-#[cfg(test)]
+
+#[cfg(all(test, feature = "write"))]
 pub mod test_dataset;
+
 mod vector;
 
 pub use aggregate::{AggregateExpr, AggregateExprBuilder};
@@ -33,11 +35,11 @@ use std::task::{Context, Poll};
 use crate::index::DatasetIndexExt;
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Schema as ArrowSchema, SchemaRef};
-use datafusion::catalog::Session;
-use datafusion::common::DFSchema;
-use datafusion::logical_expr::Expr;
-use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
+use datafusion_catalog::Session;
+use datafusion_common::DFSchema;
+use datafusion_expr::Expr;
 use datafusion_expr::ExprSchemable;
+use datafusion_physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use futures::stream::{Stream, StreamExt};
 use lance_core::datatypes::BlobHandling;
 use lance_datafusion::aggregate::Aggregate;
@@ -67,11 +69,7 @@ use crate::io::exec::LanceFilterExec;
 use crate::io::exec::{FilterPlan as ExprFilterPlan, Planner};
 use crate::{Error, Result};
 
-#[cfg(feature = "substrait")]
-use futures::FutureExt;
 pub use lance_datafusion::exec::{ExecutionStatsCallback, ExecutionSummaryCounts};
-#[cfg(feature = "substrait")]
-use lance_datafusion::substrait::parse_substrait;
 
 use lance_table_runtime::fragment::read_defaults::parse_env_var;
 pub(crate) use lance_table_runtime::fragment::read_defaults::validate_batch_size;
@@ -369,24 +367,6 @@ impl ExprFilter {
                 })?;
                 Ok(optimized)
             }
-            #[cfg(feature = "substrait")]
-            Self::Substrait(expr) => {
-                use lance_datafusion::exec::{LanceExecutionOptions, get_session_context};
-
-                let ctx = get_session_context(&LanceExecutionOptions::default());
-                let state = ctx.state();
-                let schema = Arc::new(ArrowSchema::from(dataset_schema));
-                let expr = parse_substrait(expr, schema.clone(), &ctx.state())
-                    .now_or_never()
-                    .expect("could not parse the Substrait filter in a synchronous fashion")?;
-                let planner = Planner::new(schema);
-                planner.optimize_expr(expr.clone()).map_err(|e| {
-                    Error::invalid_input(format!(
-                        "Error optimizing substrait filter: {expr:?} ({e})"
-                    ))
-                })
-            }
-            #[cfg(not(feature = "substrait"))]
             Self::Substrait(_) => Err(Error::not_supported_source(
                 "Substrait filter is not supported in this build".into(),
             )),
@@ -894,7 +874,7 @@ impl From<DatasetRecordBatchStream> for SendableRecordBatchStream {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

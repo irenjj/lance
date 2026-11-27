@@ -3,60 +3,83 @@
 
 //! IVF - Inverted File index.
 
+#[cfg(feature = "write")]
+use super::builder::{ExistingIndex, IvfIndexBuilder, index_type_string};
+#[cfg(feature = "write")]
 use super::details::target_partition_size_from_details;
+use super::pq::PQIndex;
+use super::utils::PartitionLoadLock;
+#[cfg(feature = "write")]
 use super::{
     LogicalIvfView, derive_hnsw_params,
-    pq::{PQIndex, build_pq_model},
+    pq::build_pq_model,
     utils::{
         filter_finite_training_data, maybe_sample_ivf_training_data, sample_unseen_training_data,
     },
 };
-use super::{
-    builder::{ExistingIndex, IvfIndexBuilder, index_type_string},
-    utils::PartitionLoadLock,
-};
-use crate::dataset::index::dataset_format_version;
-use crate::index::DatasetIndexExt;
-use crate::index::loading::DatasetIndexInternalExt;
-use crate::index::vector::open_index_file;
-use crate::index::vector::utils::{get_vector_dim, get_vector_type};
+#[cfg(feature = "write")]
 use crate::{
     dataset::Dataset,
-    index::{
-        prefilter::PreFilter,
-        vector::ivf::io::{write_pq_partition_payload, write_pq_partitions},
-    },
+    index::vector::ivf::io::{write_pq_partition_payload, write_pq_partitions},
 };
-use crate::{dataset::builder::DatasetBuilder, index::vector::IndexFileVersion};
+use lance_index::prefilter::PreFilter;
+
+#[cfg(feature = "write")]
+use crate::dataset::builder::DatasetBuilder;
+#[cfg(feature = "write")]
+use crate::dataset::index::dataset_format_version;
+#[cfg(feature = "write")]
+use crate::index::DatasetIndexExt;
+#[cfg(feature = "write")]
+use crate::index::loading::DatasetIndexInternalExt;
+use crate::index::vector::IndexFileVersion;
+#[cfg(feature = "write")]
+use crate::index::vector::open_index_file;
+#[cfg(feature = "write")]
+use crate::index::vector::utils::{get_vector_dim, get_vector_type};
+#[cfg(feature = "write")]
 use arrow::array::ArrayData;
+#[cfg(feature = "write")]
 use arrow::compute::concat_batches;
 use arrow::datatypes::UInt8Type;
 use arrow_arith::numeric::sub;
 use arrow_array::Float32Array;
 use arrow_array::{
-    Array, ArrayRef, FixedSizeListArray, PrimitiveArray, RecordBatch, UInt32Array,
+    Array, FixedSizeListArray, RecordBatch, UInt32Array,
     cast::AsArray,
-    types::{ArrowPrimitiveType, Float16Type, Float32Type, Float64Type},
+    types::{Float16Type, Float32Type, Float64Type},
 };
+#[cfg(feature = "write")]
+use arrow_array::{ArrayRef, PrimitiveArray, types::ArrowPrimitiveType};
+#[cfg(feature = "write")]
 use arrow_buffer::MutableBuffer;
-use arrow_schema::{DataType, Schema};
+use arrow_schema::DataType;
+#[cfg(feature = "write")]
+use arrow_schema::Schema;
 use async_trait::async_trait;
-use datafusion::execution::SendableRecordBatchStream;
+use datafusion_execution::SendableRecordBatchStream;
 use futures::TryFutureExt;
+#[cfg(feature = "write")]
 use futures::{
-    Stream, TryStreamExt,
-    stream::{self, StreamExt},
+    Stream,
+    stream::{self},
 };
+use futures::{TryStreamExt, stream::StreamExt};
+#[cfg(feature = "write")]
 use lance_arrow::*;
+#[cfg(feature = "write")]
+use lance_core::ROW_ID_FIELD;
 use lance_core::deepsize::DeepSizeOf;
 use lance_core::utils::row_addr_remap::RowAddrRemap;
 use lance_core::{
-    Error, ROW_ID_FIELD, Result,
+    Error, Result,
     cache::{CacheKeySchema, KeyBuilder, LanceCache, UnsizedCacheKey, WeakLanceCache},
     utils::parse::parse_env_as_bool,
     utils::tracing::{IO_TYPE_LOAD_VECTOR_PART, TRACE_IO_EVENTS},
 };
+#[cfg(feature = "write")]
 use lance_encoding::decoder::FilterExpression;
+#[cfg(feature = "write")]
 use lance_file::{
     format::MAGIC,
     reader::{FileReader as V2Reader, FileReaderOptions as V2ReaderOptions},
@@ -68,89 +91,143 @@ use lance_index::metrics::MetricsCollector;
 use lance_index::metrics::NoOpMetricsCollector;
 use lance_index::prefilter::NoFilter;
 use lance_index::scalar::RowAddrTranslator;
+#[cfg(feature = "write")]
 use lance_index::vector::DISTANCE_TYPE_KEY;
+#[cfg(feature = "write")]
 use lance_index::vector::bq::builder::RabitQuantizer;
+#[cfg(feature = "write")]
 use lance_index::vector::bq::storage::{
     RABIT_METADATA_KEY, RabitQuantizationMetadata, RabitQuantizationStorage,
 };
+#[cfg(feature = "write")]
 use lance_index::vector::flat::index::{FlatBinQuantizer, FlatIndex, FlatMetadata, FlatQuantizer};
+#[cfg(feature = "write")]
 use lance_index::vector::flat::storage::{FLAT_COLUMN, FlatBinStorage, FlatFloatStorage};
+#[cfg(feature = "write")]
 use lance_index::vector::hnsw::HnswMetadata;
+#[cfg(feature = "write")]
 use lance_index::vector::hnsw::builder::HNSW_METADATA_KEY;
+#[cfg(feature = "write")]
 use lance_index::vector::ivf::storage::IVF_METADATA_KEY;
 use lance_index::vector::ivf::storage::IvfModel;
+#[cfg(feature = "write")]
 use lance_index::vector::kmeans::{KMeans, KMeansParams};
+#[cfg(feature = "write")]
 use lance_index::vector::pq::storage::{
     PQ_METADATA_KEY, ProductQuantizationMetadata, ProductQuantizationStorage, transpose,
 };
-use lance_index::vector::quantizer::{QuantizationType, QuantizerMetadata as _};
+use lance_index::vector::quantizer::QuantizationType;
+#[cfg(feature = "write")]
+use lance_index::vector::quantizer::QuantizerMetadata as _;
+#[cfg(feature = "write")]
 use lance_index::vector::storage::{STORAGE_METADATA_KEY, VectorStore};
+#[cfg(feature = "write")]
 use lance_index::vector::v3::shuffler::create_owned_ivf_shuffler;
-use lance_index::vector::v3::subindex::{IvfSubIndex, SubIndexType};
+#[cfg(feature = "write")]
+use lance_index::vector::v3::subindex::IvfSubIndex;
+use lance_index::vector::v3::subindex::SubIndexType;
+#[cfg(feature = "write")]
 use lance_index::{
-    INDEX_AUXILIARY_FILE_NAME, INDEX_FILE_NAME, INDEX_METADATA_SCHEMA_KEY, Index, IndexMetadata,
-    IndexType, MAX_PARTITION_SIZE_FACTOR, MIN_PARTITION_SIZE_PERCENT,
+    INDEX_AUXILIARY_FILE_NAME, INDEX_FILE_NAME, INDEX_METADATA_SCHEMA_KEY, IndexMetadata,
+    MAX_PARTITION_SIZE_FACTOR, MIN_PARTITION_SIZE_PERCENT,
     optimize::OptimizeOptions,
     pb,
     vector::{
-        Query, VectorIndex,
-        hnsw::{HNSW, HNSWIndex, builder::HnswBuildParams},
+        hnsw::{HNSW, builder::HnswBuildParams},
         ivf::{
             IvfBuildParams, builder::load_precomputed_partitions, shuffler::shuffle_dataset,
             storage::IVF_PARTITION_KEY,
         },
-        pq::{PQBuildParams, ProductQuantizer},
-        quantizer::{Quantization, QuantizationMetadata, Quantizer, QuantizerStorage},
-        sq::{
-            ScalarQuantizer,
-            storage::{SQ_METADATA_KEY, ScalarQuantizationMetadata, ScalarQuantizationStorage},
-        },
+        pq::PQBuildParams,
+        quantizer::{Quantization, QuantizationMetadata, QuantizerStorage},
+        sq::storage::{SQ_METADATA_KEY, ScalarQuantizationMetadata, ScalarQuantizationStorage},
     },
 };
+use lance_index::{
+    Index, IndexType,
+    vector::{
+        Query, VectorIndex, hnsw::HNSWIndex, pq::ProductQuantizer, quantizer::Quantizer,
+        sq::ScalarQuantizer,
+    },
+};
+#[cfg(feature = "write")]
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
+#[cfg(feature = "write")]
 use lance_io::utils::CachedFileSize;
+#[cfg(feature = "write")]
 use lance_io::{
     ReadBatchParams,
-    local::to_local_path,
     object_store::ObjectStore,
     stream::RecordBatchStream,
-    traits::{Reader, WriteExt, Writer},
+    traits::{WriteExt, Writer},
 };
-use lance_linalg::distance::{DistanceType, Dot, L2, MetricType};
+use lance_io::{local::to_local_path, traits::Reader};
+use lance_linalg::distance::MetricType;
+#[cfg(feature = "write")]
+use lance_linalg::distance::{DistanceType, Dot, L2};
+#[cfg(feature = "write")]
 use lance_linalg::{distance::Normalize, kernels::normalize_fsl_owned};
 use lance_select::RowAddrTreeMap;
+#[cfg(feature = "write")]
 use lance_table::format::{IndexFile, IndexMetadata as TableIndexMetadata};
-use log::{info, warn};
+#[cfg(feature = "write")]
+use log::info;
+use log::warn;
+#[cfg(feature = "write")]
 use num_traits::{AsPrimitive, Float, FromPrimitive};
+#[cfg(feature = "write")]
 use object_store::path::Path;
+#[cfg(feature = "write")]
 use prost::Message;
+#[cfg(feature = "write")]
 use rand::rngs::SmallRng;
+#[cfg(feature = "write")]
 use rand::{Rng, SeedableRng};
-use roaring::{RoaringBitmap, RoaringTreemap};
+use roaring::RoaringBitmap;
+#[cfg(feature = "write")]
+use roaring::RoaringTreemap;
 use serde::Serialize;
+#[cfg(feature = "write")]
 use serde_json::json;
 use std::{
     any::Any,
+    sync::{Arc, OnceLock},
+};
+#[cfg(feature = "write")]
+use std::{
     collections::{HashMap, HashSet},
     future::Future,
     ops::Range,
     pin::Pin,
-    sync::{Arc, OnceLock},
 };
+#[cfg(feature = "write")]
 use tokio::sync::{Mutex, mpsc};
 use tracing::instrument;
 use uuid::Uuid;
 
+#[cfg(feature = "write")]
 pub mod builder;
+
 mod compatibility;
+
+#[cfg(feature = "write")]
 mod coreset_algo;
+
+#[cfg(feature = "write")]
 pub mod io;
+
 mod partition_serde;
 mod shape;
+
+#[cfg(feature = "write")]
 mod streaming_hamming;
+
 pub mod v2;
 
-pub(crate) use compatibility::{VectorQueryContract, validate_committed_vector_segments};
+pub(crate) use compatibility::VectorQueryContract;
+#[cfg(feature = "write")]
+pub(crate) use compatibility::validate_committed_vector_segments;
+#[cfg(feature = "write")]
 use coreset_algo::{FloatCoresetAlgorithm, HammingCoresetAlgorithm, StreamingCoresetAlgorithm};
 
 // Cache wrapper for vector index trait objects
@@ -369,6 +446,7 @@ impl std::fmt::Debug for IVFIndex {
     }
 }
 
+#[cfg(feature = "write")]
 #[derive(Clone, Copy, Debug)]
 struct SegmentRebalanceCandidate {
     segment_id: Uuid,
@@ -376,6 +454,7 @@ struct SegmentRebalanceCandidate {
     created_at_ms: i64,
 }
 
+#[cfg(feature = "write")]
 fn candidate_is_better(
     candidate: SegmentRebalanceCandidate,
     current_best: Option<SegmentRebalanceCandidate>,
@@ -394,11 +473,13 @@ fn candidate_is_better(
     }
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn index_type_for_segmented_optimize(index: &dyn VectorIndex) -> Result<IndexType> {
     let (sub_index_type, quantization_type) = index.sub_index_type();
     IndexType::try_from(index_type_string(sub_index_type, quantization_type).as_str())
 }
 
+#[cfg(feature = "write")]
 /// What a steady-state optimize (no new rows) should do to a logical IVF index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SteadyStateRebalance {
@@ -409,6 +490,7 @@ pub(crate) enum SteadyStateRebalance {
     MergeAll,
 }
 
+#[cfg(feature = "write")]
 /// Pick the steady-state rebalance for a logical IVF index.
 ///
 /// Splits are decided per segment, since an oversized partition lives in one
@@ -493,12 +575,14 @@ pub(crate) fn select_steady_state_rebalance(
     Ok(has_join_candidate.then_some(SteadyStateRebalance::MergeAll))
 }
 
+#[cfg(feature = "write")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VectorSegmentCompatibility {
     SharedModel,
     QueryCompatibleModelsDiffer,
 }
 
+#[cfg(feature = "write")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VectorModelMismatch {
     StorageFormat,
@@ -506,6 +590,7 @@ enum VectorModelMismatch {
     QuantizerMetadata,
 }
 
+#[cfg(feature = "write")]
 fn vector_index_dimension(index: &dyn VectorIndex) -> usize {
     let ivf_dimension = index.ivf_model().dimension();
     if ivf_dimension != 0 {
@@ -521,6 +606,7 @@ fn vector_index_dimension(index: &dyn VectorIndex) -> usize {
     }
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn validate_vector_query_compatibility(
     indices: &[Arc<dyn VectorIndex>],
     operation: &str,
@@ -572,6 +658,7 @@ pub(crate) fn validate_vector_query_compatibility(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 fn vector_model_mismatch(indices: &[Arc<dyn VectorIndex>]) -> Option<VectorModelMismatch> {
     let first = indices.first()?;
     let first_centroids = first.ivf_model().centroids_array();
@@ -599,6 +686,7 @@ fn vector_model_mismatch(indices: &[Arc<dyn VectorIndex>]) -> Option<VectorModel
     None
 }
 
+#[cfg(feature = "write")]
 fn vector_segments_share_merge_model(
     left: (&TableIndexMetadata, &Arc<dyn VectorIndex>),
     right: (&TableIndexMetadata, &Arc<dyn VectorIndex>),
@@ -612,6 +700,7 @@ fn vector_segments_share_merge_model(
         && vector_model_mismatch(&indices).is_none()
 }
 
+#[cfg(feature = "write")]
 /// Partition a logical vector index into groups that remain acceptable to the
 /// distributed merger after compaction remaps their row addresses.
 pub(crate) fn compaction_vector_segment_merge_groups(
@@ -659,6 +748,7 @@ pub(crate) fn compaction_vector_segment_merge_groups(
         .collect()
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn vector_segment_compatibility(
     logical_index: &LogicalIvfView<'_>,
     operation: &str,
@@ -673,6 +763,7 @@ pub(crate) fn vector_segment_compatibility(
     })
 }
 
+#[cfg(feature = "write")]
 fn validate_shared_vector_model(indices: &[Arc<dyn VectorIndex>], operation: &str) -> Result<()> {
     validate_vector_query_compatibility(indices, operation)?;
     match vector_model_mismatch(indices) {
@@ -689,6 +780,7 @@ fn validate_shared_vector_model(indices: &[Arc<dyn VectorIndex>], operation: &st
     }
 }
 
+#[cfg(feature = "write")]
 fn shared_quantizer_model(left: &Quantizer, right: &Quantizer) -> bool {
     match (left, right) {
         (Quantizer::Flat(left), Quantizer::Flat(right)) => {
@@ -726,6 +818,7 @@ fn shared_quantizer_model(left: &Quantizer, right: &Quantizer) -> bool {
     }
 }
 
+#[cfg(feature = "write")]
 /// Pair every segment with the coverage that decides which of its rows this optimize
 /// pass may still copy into the new index.
 ///
@@ -751,6 +844,7 @@ fn existing_index_sources(
         .collect()
 }
 
+#[cfg(feature = "write")]
 // TODO: move to `lance-index` crate.
 ///
 /// Returns (new_uuid, num_indices_merged, files)
@@ -865,6 +959,7 @@ pub(crate) async fn optimize_vector_indices(
     Ok((new_uuid, merged, vec![file]))
 }
 
+#[cfg(feature = "write")]
 pub(crate) async fn optimize_vector_indices_v2(
     dataset: &Dataset,
     unindexed: Option<impl RecordBatchStream + Unpin + 'static>,
@@ -1153,6 +1248,7 @@ pub(crate) async fn optimize_vector_indices_v2(
     Ok((new_uuid, summary.indices_merged, summary.files))
 }
 
+#[cfg(feature = "write")]
 #[allow(clippy::too_many_arguments)]
 async fn optimize_ivf_pq_indices(
     first_idx: &IVFIndex,
@@ -1552,6 +1648,7 @@ impl VectorIndex for IVFIndex {
     }
 }
 
+#[cfg(feature = "write")]
 /// Ivf PQ index metadata.
 ///
 /// It contains the on-disk data for a IVF PQ index.
@@ -1582,6 +1679,7 @@ pub struct IvfPQIndexMetadata {
     transforms: Vec<pb::Transform>,
 }
 
+#[cfg(feature = "write")]
 impl IvfPQIndexMetadata {
     /// Create a new IvfPQIndexMetadata object
     pub fn new(
@@ -1607,6 +1705,7 @@ impl IvfPQIndexMetadata {
     }
 }
 
+#[cfg(feature = "write")]
 /// Convert a IvfPQIndex to protobuf payload
 impl TryFrom<&IvfPQIndexMetadata> for pb::Index {
     type Error = Error;
@@ -1655,6 +1754,7 @@ impl TryFrom<&IvfPQIndexMetadata> for pb::Index {
     }
 }
 
+#[cfg(feature = "write")]
 fn sanity_check_ivf_params(ivf: &IvfBuildParams) -> Result<()> {
     if ivf.precomputed_partitions_file.is_some() && ivf.centroids.is_none() {
         return Err(Error::index(
@@ -1678,6 +1778,7 @@ fn sanity_check_ivf_params(ivf: &IvfBuildParams) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "write")]
 fn sanity_check_params(ivf: &IvfBuildParams, pq: &PQBuildParams) -> Result<()> {
     sanity_check_ivf_params(ivf)?;
     if ivf.precomputed_shuffle_buffers.is_some() && pq.codebook.is_none() {
@@ -1689,6 +1790,7 @@ fn sanity_check_params(ivf: &IvfBuildParams, pq: &PQBuildParams) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "write")]
 /// Build IVF model from the dataset.
 ///
 /// Parameters
@@ -1726,6 +1828,7 @@ pub async fn build_ivf_model(
     .await
 }
 
+#[cfg(feature = "write")]
 /// Whether IVF training from a sample measures the k-means loss over that
 /// sample, which takes one more assignment of every sampled vector to every
 /// centroid.
@@ -1737,6 +1840,7 @@ pub(crate) enum SampleLoss {
     Skip,
 }
 
+#[cfg(feature = "write")]
 /// [`build_ivf_model`] that measures the training loss only when
 /// `sample_loss` asks for it. Streaming training always reports its loss.
 #[allow(clippy::too_many_arguments)]
@@ -1825,6 +1929,7 @@ pub(crate) async fn build_ivf_model_with_sample_loss(
         .await
 }
 
+#[cfg(feature = "write")]
 /// Train an in-memory IVF model from caller-supplied vector samples.
 ///
 /// This uses the same preprocessing, k-means, loss calculation, and progress
@@ -1876,6 +1981,7 @@ pub async fn train_ivf_model_from_sample(
     .await
 }
 
+#[cfg(feature = "write")]
 async fn train_ivf_model_from_sample_with_loss(
     training_data: FixedSizeListArray,
     metric_type: MetricType,
@@ -1997,6 +2103,7 @@ async fn train_ivf_model_from_sample_with_loss(
     Ok(ivf)
 }
 
+#[cfg(feature = "write")]
 async fn build_ivf_model_and_pq(
     dataset: &Dataset,
     column: &str,
@@ -2042,6 +2149,7 @@ async fn build_ivf_model_and_pq(
     Ok((ivf_model, pq))
 }
 
+#[cfg(feature = "write")]
 async fn scan_index_field_stream(
     dataset: &Dataset,
     column: &str,
@@ -2052,6 +2160,7 @@ async fn scan_index_field_stream(
     scanner.try_into_stream().await
 }
 
+#[cfg(feature = "write")]
 pub async fn load_precomputed_partitions_if_available(
     ivf_params: &IvfBuildParams,
 ) -> Result<Option<HashMap<u64, u32>>> {
@@ -2072,6 +2181,7 @@ pub async fn load_precomputed_partitions_if_available(
     }
 }
 
+#[cfg(feature = "write")]
 #[allow(clippy::too_many_arguments)]
 pub async fn build_ivf_pq_index(
     dataset: &Dataset,
@@ -2115,6 +2225,7 @@ pub async fn build_ivf_pq_index(
     Ok(vec![file])
 }
 
+#[cfg(feature = "write")]
 #[allow(clippy::too_many_arguments)]
 pub async fn build_ivf_hnsw_pq_index(
     dataset: &Dataset,
@@ -2156,12 +2267,14 @@ pub async fn build_ivf_hnsw_pq_index(
     .await
 }
 
+#[cfg(feature = "write")]
 struct RemapPageTask {
     offset: usize,
     length: u32,
     page: Option<Box<dyn VectorIndex>>,
 }
 
+#[cfg(feature = "write")]
 impl RemapPageTask {
     fn new(offset: usize, length: u32) -> Self {
         Self {
@@ -2172,6 +2285,7 @@ impl RemapPageTask {
     }
 }
 
+#[cfg(feature = "write")]
 impl RemapPageTask {
     async fn load_and_remap(
         mut self,
@@ -2212,6 +2326,7 @@ impl RemapPageTask {
     }
 }
 
+#[cfg(feature = "write")]
 fn generate_remap_tasks(offsets: &[usize], lengths: &[u32]) -> Result<Vec<RemapPageTask>> {
     let mut tasks: Vec<RemapPageTask> = Vec::with_capacity(offsets.len() * 2 + 1);
 
@@ -2222,6 +2337,7 @@ fn generate_remap_tasks(offsets: &[usize], lengths: &[u32]) -> Result<Vec<RemapP
     Ok(tasks)
 }
 
+#[cfg(feature = "write")]
 /// Runs one specialized builder's remap on the heap.
 ///
 /// The eager compaction remap runs under Python's `block_on` on the calling
@@ -2244,6 +2360,7 @@ fn remap_boxed<'a, S: IvfSubIndex + 'static, Q: Quantization + 'static>(
     Box::pin(async move { builder.remap_with(mapping.clone(), owned_fragments).await })
 }
 
+#[cfg(feature = "write")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn remap_index_file_v3(
     dataset: &Dataset,
@@ -2377,6 +2494,7 @@ pub(crate) async fn remap_index_file_v3(
     }
 }
 
+#[cfg(feature = "write")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn remap_index_file(
     dataset: &Dataset,
@@ -2459,6 +2577,7 @@ pub(crate) async fn remap_index_file(
     })
 }
 
+#[cfg(feature = "write")]
 /// Write the index to the index file.
 ///
 #[allow(clippy::too_many_arguments)]
@@ -2528,6 +2647,7 @@ async fn write_ivf_pq_file(
     })
 }
 
+#[cfg(feature = "write")]
 pub async fn write_ivf_pq_file_from_existing_index(
     dataset: &Dataset,
     column: &str,
@@ -2563,6 +2683,7 @@ pub async fn write_ivf_pq_file_from_existing_index(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 #[allow(clippy::too_many_arguments)]
 async fn write_ivf_hnsw_file(
     dataset: &Dataset,
@@ -2689,6 +2810,7 @@ async fn write_ivf_hnsw_file(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 /// Merge one caller-defined group of source segments into a single segment.
 pub(crate) async fn merge_segments(
     dataset: &Dataset,
@@ -2726,6 +2848,7 @@ pub(crate) async fn merge_segments(
     .await
 }
 
+#[cfg(feature = "write")]
 /// Merge staging segments whose remap already removed rows not owned by each
 /// source segment.
 pub(crate) async fn merge_remapped_segments(
@@ -2744,7 +2867,7 @@ pub(crate) async fn merge_remapped_segments(
 
 /// Merge one caller-defined group of source segments into a single segment and
 /// report progress through the provided callback.
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 pub(crate) async fn merge_segments_with_progress(
     object_store: &ObjectStore,
     indices_dir: &Path,
@@ -2776,6 +2899,7 @@ pub(crate) async fn merge_segments_with_progress(
     .await
 }
 
+#[cfg(feature = "write")]
 async fn merge_segments_inner(
     object_store: &ObjectStore,
     indices_dir: &Path,
@@ -2840,6 +2964,7 @@ async fn merge_segments_inner(
     Ok(merged_segment)
 }
 
+#[cfg(feature = "write")]
 /// Merge the selected input segments into `final_dir`.
 ///
 /// The caller defines the source segment group explicitly. This helper reads
@@ -2909,6 +3034,7 @@ async fn merge_segments_to_dir(
     Ok(vec![auxiliary_file, index_file])
 }
 
+#[cfg(feature = "write")]
 fn infer_source_index_version(group: &[TableIndexMetadata]) -> Result<i32> {
     debug_assert!(!group.is_empty());
     let first = group[0].index_version;
@@ -2920,6 +3046,7 @@ fn infer_source_index_version(group: &[TableIndexMetadata]) -> Result<i32> {
     Ok(first)
 }
 
+#[cfg(feature = "write")]
 /// Best-effort reset of one target directory before rewriting it.
 async fn reset_final_segment_dir(object_store: &ObjectStore, final_dir: &Path) -> Result<()> {
     match object_store.remove_dir_all(final_dir.clone()).await {
@@ -2930,6 +3057,7 @@ async fn reset_final_segment_dir(object_store: &ObjectStore, final_dir: &Path) -
     Ok(())
 }
 
+#[cfg(feature = "write")]
 async fn write_root_vector_index_from_auxiliary(
     object_store: &ObjectStore,
     index_dir: &Path,
@@ -3112,6 +3240,7 @@ async fn write_root_vector_index_from_auxiliary(
     })
 }
 
+#[cfg(feature = "write")]
 async fn read_hnsw_index_metadata_from_sources(
     object_store: &ObjectStore,
     scheduler: &Arc<ScanScheduler>,
@@ -3164,10 +3293,12 @@ async fn read_hnsw_index_metadata_from_sources(
     Ok(index_metadata)
 }
 
+#[cfg(feature = "write")]
 fn index_metadata_eq(left: &IndexMetadata, right: &IndexMetadata) -> bool {
     left.index_type == right.index_type && left.distance_type == right.distance_type
 }
 
+#[cfg(feature = "write")]
 async fn read_hnsw_build_params_from_sources(
     object_store: &ObjectStore,
     scheduler: &Arc<ScanScheduler>,
@@ -3222,6 +3353,7 @@ async fn read_hnsw_build_params_from_sources(
     Ok(build_params.unwrap_or_default())
 }
 
+#[cfg(feature = "write")]
 fn hnsw_build_params_eq(left: &HnswBuildParams, right: &HnswBuildParams) -> bool {
     left.max_level == right.max_level
         && left.m == right.m
@@ -3229,6 +3361,7 @@ fn hnsw_build_params_eq(left: &HnswBuildParams, right: &HnswBuildParams) -> bool
         && left.prefetch_distance == right.prefetch_distance
 }
 
+#[cfg(feature = "write")]
 async fn write_hnsw_root_index_from_auxiliary(
     writer: &mut V2Writer,
     aux_reader: &V2Reader,
@@ -3300,6 +3433,7 @@ async fn write_hnsw_root_index_from_auxiliary(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 async fn read_v2_partition_batch(reader: &V2Reader, range: Range<usize>) -> Result<RecordBatch> {
     let schema = Arc::new(reader.schema().as_ref().into());
     let stream = reader
@@ -3318,6 +3452,7 @@ async fn read_v2_partition_batch(reader: &V2Reader, range: Range<usize>) -> Resu
     }
 }
 
+#[cfg(feature = "write")]
 async fn build_hnsw_from_storage_batch(
     index_type: &str,
     batch: RecordBatch,
@@ -3375,6 +3510,7 @@ async fn build_hnsw_from_storage_batch(
     }
 }
 
+#[cfg(feature = "write")]
 async fn write_hnsw_index_metadata(
     writer: &mut V2Writer,
     ivf: &IvfModel,
@@ -3396,6 +3532,7 @@ async fn write_hnsw_index_metadata(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 async fn read_pq_storage_metadata(reader: &V2Reader) -> Result<ProductQuantizationMetadata> {
     let mut metadata =
         read_storage_metadata::<ProductQuantizationMetadata>(reader, PQ_METADATA_KEY)?;
@@ -3409,6 +3546,7 @@ async fn read_pq_storage_metadata(reader: &V2Reader) -> Result<ProductQuantizati
     Ok(metadata)
 }
 
+#[cfg(feature = "write")]
 /// An `IVF_HNSW_RQ` auxiliary file's RQ metadata, with the dense rotation loaded.
 async fn read_rq_storage_metadata(reader: &V2Reader) -> Result<RabitQuantizationMetadata> {
     let mut metadata =
@@ -3422,6 +3560,7 @@ async fn read_rq_storage_metadata(reader: &V2Reader) -> Result<RabitQuantization
     Ok(metadata)
 }
 
+#[cfg(feature = "write")]
 fn read_storage_metadata<T>(reader: &V2Reader, storage_metadata_key: &str) -> Result<T>
 where
     T: serde::de::DeserializeOwned,
@@ -3451,6 +3590,7 @@ where
     Ok(serde_json::from_str(metadata)?)
 }
 
+#[cfg(feature = "write")]
 async fn do_train_ivf_model<T: ArrowPrimitiveType>(
     centroids: Option<Arc<FixedSizeListArray>>,
     data: &PrimitiveArray<T>,
@@ -3516,6 +3656,7 @@ where
     ))
 }
 
+#[cfg(feature = "write")]
 /// Given `drawn_offsets`, the chunk takes only rows absent from that set and
 /// stops drawing once the set holds the paired number of offsets.
 async fn sample_ivf_training_chunk(
@@ -3551,12 +3692,14 @@ async fn sample_ivf_training_chunk(
     Ok((filter_finite_training_data(training_data)?, mt))
 }
 
+#[cfg(feature = "write")]
 #[derive(Debug, Clone)]
 struct FixedIvfTrainingRanges {
     ranges: Vec<Range<u64>>,
     num_rows: usize,
 }
 
+#[cfg(feature = "write")]
 impl FixedIvfTrainingRanges {
     fn new(ranges: Vec<Range<u64>>) -> Self {
         let num_rows = ranges.iter().map(range_len).sum();
@@ -3596,17 +3739,30 @@ impl FixedIvfTrainingRanges {
     }
 }
 
+#[cfg(feature = "write")]
 fn range_len(range: &Range<u64>) -> usize {
     (range.end - range.start) as usize
 }
 
+#[cfg(feature = "write")]
 const DEFAULT_STREAMING_IVF_TAKE_RANGE_ROWS: usize = 8192;
+
+#[cfg(feature = "write")]
 const DEFAULT_STREAMING_IVF_PREFETCH_DEPTH: usize = 1;
+
+#[cfg(feature = "write")]
 const DEFAULT_STREAMING_IVF_PROGRESS_INTERVAL: u64 = 128;
+
+#[cfg(feature = "write")]
 const STREAMING_IVF_PREFETCH_DEPTH_ENV: &str = "LANCE_STREAMING_IVF_PREFETCH_DEPTH";
+
+#[cfg(feature = "write")]
 const STREAMING_IVF_TAKE_RANGE_ROWS_ENV: &str = "LANCE_STREAMING_IVF_TAKE_RANGE_ROWS";
+
+#[cfg(feature = "write")]
 const STREAMING_IVF_PROGRESS_INTERVAL_ENV: &str = "LANCE_STREAMING_IVF_PROGRESS_INTERVAL";
 
+#[cfg(feature = "write")]
 fn streaming_ivf_prefetch_depth() -> usize {
     std::env::var(STREAMING_IVF_PREFETCH_DEPTH_ENV)
         .ok()
@@ -3615,6 +3771,7 @@ fn streaming_ivf_prefetch_depth() -> usize {
         .unwrap_or(DEFAULT_STREAMING_IVF_PREFETCH_DEPTH)
 }
 
+#[cfg(feature = "write")]
 fn streaming_ivf_take_range_rows() -> usize {
     std::env::var(STREAMING_IVF_TAKE_RANGE_ROWS_ENV)
         .ok()
@@ -3623,6 +3780,7 @@ fn streaming_ivf_take_range_rows() -> usize {
         .unwrap_or(DEFAULT_STREAMING_IVF_TAKE_RANGE_ROWS)
 }
 
+#[cfg(feature = "write")]
 fn streaming_ivf_progress_interval() -> u64 {
     std::env::var(STREAMING_IVF_PROGRESS_INTERVAL_ENV)
         .ok()
@@ -3631,10 +3789,12 @@ fn streaming_ivf_progress_interval() -> u64 {
         .unwrap_or(DEFAULT_STREAMING_IVF_PROGRESS_INTERVAL)
 }
 
+#[cfg(feature = "write")]
 fn should_report_streaming_ivf_progress(total: u64, interval: u64) -> bool {
     total == 1 || total.is_multiple_of(interval.max(1))
 }
 
+#[cfg(feature = "write")]
 fn split_ranges_by_row_count(ranges: &[Range<u64>], max_rows: usize) -> Vec<Range<u64>> {
     let max_rows = max_rows.max(1) as u64;
     let mut split = Vec::new();
@@ -3649,6 +3809,7 @@ fn split_ranges_by_row_count(ranges: &[Range<u64>], max_rows: usize) -> Vec<Rang
     split
 }
 
+#[cfg(feature = "write")]
 fn generate_fixed_training_ranges(
     num_rows: usize,
     sample_size: usize,
@@ -3727,10 +3888,12 @@ fn generate_fixed_training_ranges(
     FixedIvfTrainingRanges::new(merged)
 }
 
+#[cfg(feature = "write")]
 fn default_streaming_coreset_rate(total_sample_rate: usize, streaming_sample_rate: usize) -> usize {
     total_sample_rate.min(streaming_sample_rate).min(64)
 }
 
+#[cfg(feature = "write")]
 fn streaming_coreset_rate(
     total_sample_rate: usize,
     streaming_sample_rate: usize,
@@ -3742,6 +3905,7 @@ fn streaming_coreset_rate(
         .max(1)
 }
 
+#[cfg(feature = "write")]
 fn streaming_local_coreset_k(
     num_partitions: usize,
     step_sample_size: usize,
@@ -3759,6 +3923,7 @@ fn streaming_local_coreset_k(
         .min(step_sample_size)
 }
 
+#[cfg(feature = "write")]
 fn get_top_level_vector_column(batch: &RecordBatch, column: &str) -> Result<ArrayRef> {
     batch.column_by_name(column).cloned().ok_or_else(|| {
         Error::index(format!(
@@ -3768,6 +3933,7 @@ fn get_top_level_vector_column(batch: &RecordBatch, column: &str) -> Result<Arra
     })
 }
 
+#[cfg(feature = "write")]
 fn append_fsl_values(
     values_buf: &mut MutableBuffer,
     total_rows: &mut usize,
@@ -3786,6 +3952,7 @@ fn append_fsl_values(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 fn fsl_values_to_fixed_array(
     vector_type: &DataType,
     values_buf: MutableBuffer,
@@ -3812,6 +3979,7 @@ fn fsl_values_to_fixed_array(
     )?)
 }
 
+#[cfg(feature = "write")]
 struct FixedIvfTrainingSampler<'a> {
     dataset: &'a Dataset,
     column: &'a str,
@@ -3820,6 +3988,7 @@ struct FixedIvfTrainingSampler<'a> {
     byte_width: usize,
 }
 
+#[cfg(feature = "write")]
 impl<'a> FixedIvfTrainingSampler<'a> {
     fn try_new(dataset: &'a Dataset, column: &'a str) -> Result<Option<Self>> {
         let vector_field = dataset.schema().field(column).ok_or(Error::index(format!(
@@ -3876,26 +4045,31 @@ impl<'a> FixedIvfTrainingSampler<'a> {
     }
 }
 
+#[cfg(feature = "write")]
 type KMeansProgressCallback = Arc<dyn Fn(u32, u32) + Send + Sync>;
 
+#[cfg(feature = "write")]
 trait StreamingKMeansArrowType:
     ArrowPrimitiveType<Native: Float + FromPrimitive + AsPrimitive<f64> + std::ops::AddAssign> + Sized
 {
     fn from_values(values: Vec<Self::Native>) -> PrimitiveArray<Self>;
 }
 
+#[cfg(feature = "write")]
 impl StreamingKMeansArrowType for Float32Type {
     fn from_values(values: Vec<Self::Native>) -> PrimitiveArray<Self> {
         PrimitiveArray::from(values)
     }
 }
 
+#[cfg(feature = "write")]
 impl StreamingKMeansArrowType for Float64Type {
     fn from_values(values: Vec<Self::Native>) -> PrimitiveArray<Self> {
         PrimitiveArray::from(values)
     }
 }
 
+#[cfg(feature = "write")]
 fn cast_weight<T: StreamingKMeansArrowType>(
     weight: f64,
     context: impl std::fmt::Display,
@@ -3908,6 +4082,7 @@ fn cast_weight<T: StreamingKMeansArrowType>(
     })
 }
 
+#[cfg(feature = "write")]
 fn streaming_kmeans_values<T: StreamingKMeansArrowType>(
     data: &FixedSizeListArray,
 ) -> Result<&[T::Native]> {
@@ -3921,6 +4096,7 @@ fn streaming_kmeans_values<T: StreamingKMeansArrowType>(
     Ok(data.values().as_primitive::<T>().values())
 }
 
+#[cfg(feature = "write")]
 fn streaming_kmeans_fsl_from_values<T: StreamingKMeansArrowType>(
     values: Vec<T::Native>,
     dimension: usize,
@@ -3931,6 +4107,7 @@ fn streaming_kmeans_fsl_from_values<T: StreamingKMeansArrowType>(
     )?)
 }
 
+#[cfg(feature = "write")]
 fn prepare_streaming_coreset_sample<T: StreamingKMeansArrowType>(
     training_data: FixedSizeListArray,
 ) -> Result<FixedSizeListArray> {
@@ -3958,6 +4135,7 @@ fn prepare_streaming_coreset_sample<T: StreamingKMeansArrowType>(
     Ok(prepared)
 }
 
+#[cfg(feature = "write")]
 struct StreamingCoresetTrainingRequest<'a> {
     dataset: &'a Dataset,
     column: &'a str,
@@ -3968,6 +4146,7 @@ struct StreamingCoresetTrainingRequest<'a> {
     progress: Arc<dyn lance_index::progress::IndexBuildProgress>,
 }
 
+#[cfg(feature = "write")]
 /// Metric-specific behavior for streaming coreset training.
 ///
 /// Cosine input is normalized by the sampler and therefore uses the L2 policy.
@@ -4022,6 +4201,7 @@ trait StreamingKMeansMetricPolicy: Send + Sync {
     }
 }
 
+#[cfg(feature = "write")]
 /// Operations specific to floating-point coreset summaries.
 trait StreamingFloatKMeansMetricPolicy<T: StreamingKMeansArrowType>:
     StreamingKMeansMetricPolicy
@@ -4052,8 +4232,10 @@ trait StreamingFloatKMeansMetricPolicy<T: StreamingKMeansArrowType>:
     }
 }
 
+#[cfg(feature = "write")]
 struct L2MetricPolicy;
 
+#[cfg(feature = "write")]
 #[async_trait]
 impl StreamingKMeansMetricPolicy for L2MetricPolicy {
     fn metric_type(&self) -> MetricType {
@@ -4068,6 +4250,7 @@ impl StreamingKMeansMetricPolicy for L2MetricPolicy {
     }
 }
 
+#[cfg(feature = "write")]
 impl<T: StreamingKMeansArrowType> StreamingFloatKMeansMetricPolicy<T> for L2MetricPolicy {
     fn local_summary_loss(&self, distance: f32) -> f64 {
         distance as f64
@@ -4090,8 +4273,10 @@ impl<T: StreamingKMeansArrowType> StreamingFloatKMeansMetricPolicy<T> for L2Metr
     }
 }
 
+#[cfg(feature = "write")]
 struct DotMetricPolicy;
 
+#[cfg(feature = "write")]
 #[async_trait]
 impl StreamingKMeansMetricPolicy for DotMetricPolicy {
     fn metric_type(&self) -> MetricType {
@@ -4133,6 +4318,7 @@ impl StreamingKMeansMetricPolicy for DotMetricPolicy {
     }
 }
 
+#[cfg(feature = "write")]
 impl<T: StreamingKMeansArrowType> StreamingFloatKMeansMetricPolicy<T> for DotMetricPolicy {
     fn local_summary_loss(&self, _distance: f32) -> f64 {
         0.0
@@ -4161,8 +4347,10 @@ impl<T: StreamingKMeansArrowType> StreamingFloatKMeansMetricPolicy<T> for DotMet
     }
 }
 
+#[cfg(feature = "write")]
 struct HammingMetricPolicy;
 
+#[cfg(feature = "write")]
 #[async_trait]
 impl StreamingKMeansMetricPolicy for HammingMetricPolicy {
     fn metric_type(&self) -> MetricType {
@@ -4177,10 +4365,16 @@ impl StreamingKMeansMetricPolicy for HammingMetricPolicy {
     }
 }
 
+#[cfg(feature = "write")]
 static L2_METRIC_POLICY: L2MetricPolicy = L2MetricPolicy;
+
+#[cfg(feature = "write")]
 static DOT_METRIC_POLICY: DotMetricPolicy = DotMetricPolicy;
+
+#[cfg(feature = "write")]
 static HAMMING_METRIC_POLICY: HammingMetricPolicy = HammingMetricPolicy;
 
+#[cfg(feature = "write")]
 fn streaming_kmeans_metric_policy(
     metric_type: MetricType,
 ) -> Result<&'static dyn StreamingKMeansMetricPolicy> {
@@ -4191,6 +4385,7 @@ fn streaming_kmeans_metric_policy(
     }
 }
 
+#[cfg(feature = "write")]
 fn streaming_float_kmeans_metric_policy<T: StreamingKMeansArrowType>(
     metric_type: MetricType,
 ) -> Result<&'static dyn StreamingFloatKMeansMetricPolicy<T>> {
@@ -4204,6 +4399,7 @@ fn streaming_float_kmeans_metric_policy<T: StreamingKMeansArrowType>(
     }
 }
 
+#[cfg(feature = "write")]
 fn squared_l2<N: AsPrimitive<f64>>(left: &[N], right: &[N]) -> f64 {
     left.iter()
         .zip(right)
@@ -4214,6 +4410,7 @@ fn squared_l2<N: AsPrimitive<f64>>(left: &[N], right: &[N]) -> f64 {
         .sum()
 }
 
+#[cfg(feature = "write")]
 fn validate_finite_kmeans_distance(
     distance: f32,
     row_idx: usize,
@@ -4232,6 +4429,7 @@ fn validate_finite_kmeans_distance(
     }
 }
 
+#[cfg(feature = "write")]
 struct KMeansStepOptions {
     dimension: usize,
     metric_type: MetricType,
@@ -4242,6 +4440,7 @@ struct KMeansStepOptions {
     on_progress: KMeansProgressCallback,
 }
 
+#[cfg(feature = "write")]
 fn train_ivf_kmeans_step<T: ArrowPrimitiveType>(
     centroids: Option<Arc<FixedSizeListArray>>,
     data: &PrimitiveArray<T>,
@@ -4270,6 +4469,7 @@ where
     )
 }
 
+#[cfg(feature = "write")]
 fn train_ivf_kmeans_step_arrow_array_no_loss(
     centroids: Option<Arc<FixedSizeListArray>>,
     data: &FixedSizeListArray,
@@ -4316,6 +4516,7 @@ fn train_ivf_kmeans_step_arrow_array_no_loss(
     Ok(kmeans)
 }
 
+#[cfg(feature = "write")]
 fn accumulate_refine_assignments<T: StreamingKMeansArrowType>(
     data: &FixedSizeListArray,
     centroids: &FixedSizeListArray,
@@ -4357,6 +4558,7 @@ fn accumulate_refine_assignments<T: StreamingKMeansArrowType>(
     Ok(loss)
 }
 
+#[cfg(feature = "write")]
 fn update_refined_centroids<T: StreamingKMeansArrowType>(
     centroids: &FixedSizeListArray,
     cluster_sums: &[T::Native],
@@ -4379,6 +4581,7 @@ fn update_refined_centroids<T: StreamingKMeansArrowType>(
     streaming_kmeans_fsl_from_values::<T>(next, dimension)
 }
 
+#[cfg(feature = "write")]
 async fn refine_streaming_kmeans_with_sampler<T: StreamingKMeansArrowType>(
     sampler: &FixedIvfTrainingSampler<'_>,
     metric_type: MetricType,
@@ -4423,6 +4626,7 @@ async fn refine_streaming_kmeans_with_sampler<T: StreamingKMeansArrowType>(
     Ok(centroids)
 }
 
+#[cfg(feature = "write")]
 #[allow(clippy::too_many_arguments)]
 async fn refine_streaming_kmeans_with_resampling<T: StreamingKMeansArrowType>(
     dataset: &Dataset,
@@ -4480,6 +4684,7 @@ async fn refine_streaming_kmeans_with_resampling<T: StreamingKMeansArrowType>(
     Ok(centroids)
 }
 
+#[cfg(feature = "write")]
 async fn refine_streaming_hamming_kmodes_with_sampler(
     sampler: &FixedIvfTrainingSampler<'_>,
     streaming_sample_size: usize,
@@ -4521,6 +4726,7 @@ async fn refine_streaming_hamming_kmodes_with_sampler(
     Ok(centroids)
 }
 
+#[cfg(feature = "write")]
 #[allow(clippy::too_many_arguments)]
 async fn refine_streaming_hamming_kmodes_with_resampling(
     dataset: &Dataset,
@@ -4573,12 +4779,14 @@ async fn refine_streaming_hamming_kmodes_with_resampling(
     Ok(centroids)
 }
 
+#[cfg(feature = "write")]
 struct WeightedCoreset<T: StreamingKMeansArrowType> {
     values: Vec<T::Native>,
     weights: Vec<f64>,
     losses: Vec<f64>,
 }
 
+#[cfg(feature = "write")]
 impl<T: StreamingKMeansArrowType> WeightedCoreset<T> {
     fn new(dimension: usize, capacity: usize) -> Self {
         Self {
@@ -4721,6 +4929,7 @@ impl<T: StreamingKMeansArrowType> WeightedCoreset<T> {
     }
 }
 
+#[cfg(feature = "write")]
 #[derive(Debug)]
 struct WeightedKMeansResult<T: StreamingKMeansArrowType> {
     centroids: Vec<T::Native>,
@@ -4730,6 +4939,7 @@ struct WeightedKMeansResult<T: StreamingKMeansArrowType> {
     loss: f64,
 }
 
+#[cfg(feature = "write")]
 fn initialize_weighted_centroids<T: StreamingKMeansArrowType>(
     data_values: &[T::Native],
     dimension: usize,
@@ -4809,6 +5019,7 @@ fn initialize_weighted_centroids<T: StreamingKMeansArrowType>(
     centroids
 }
 
+#[cfg(feature = "write")]
 fn assign_weighted_points<T: StreamingKMeansArrowType>(
     data: &FixedSizeListArray,
     weights: &[f64],
@@ -4886,6 +5097,7 @@ fn assign_weighted_points<T: StreamingKMeansArrowType>(
     })
 }
 
+#[cfg(feature = "write")]
 fn train_weighted_kmeans<T: StreamingKMeansArrowType>(
     data: &FixedSizeListArray,
     weights: &[f64],
@@ -4930,6 +5142,7 @@ fn train_weighted_kmeans<T: StreamingKMeansArrowType>(
     unreachable!("weighted kmeans runs at least one iteration")
 }
 
+#[cfg(feature = "write")]
 fn refine_weighted_kmeans<T: StreamingKMeansArrowType>(
     data: &FixedSizeListArray,
     weights: &[f64],
@@ -4956,6 +5169,7 @@ fn refine_weighted_kmeans<T: StreamingKMeansArrowType>(
     unreachable!("weighted kmeans refinement runs at least one iteration")
 }
 
+#[cfg(feature = "write")]
 fn append_local_coreset<T: StreamingKMeansArrowType>(
     coreset: &mut WeightedCoreset<T>,
     data: &FixedSizeListArray,
@@ -5034,6 +5248,7 @@ fn append_local_coreset<T: StreamingKMeansArrowType>(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 struct WeightedCluster<T: StreamingKMeansArrowType> {
     id: usize,
     indices: Vec<usize>,
@@ -5043,6 +5258,7 @@ struct WeightedCluster<T: StreamingKMeansArrowType> {
     finalized: bool,
 }
 
+#[cfg(feature = "write")]
 impl<T: StreamingKMeansArrowType> Clone for WeightedCluster<T> {
     fn clone(&self) -> Self {
         Self {
@@ -5056,8 +5272,10 @@ impl<T: StreamingKMeansArrowType> Clone for WeightedCluster<T> {
     }
 }
 
+#[cfg(feature = "write")]
 impl<T: StreamingKMeansArrowType> Eq for WeightedCluster<T> {}
 
+#[cfg(feature = "write")]
 impl<T: StreamingKMeansArrowType> PartialEq for WeightedCluster<T> {
     fn eq(&self, other: &Self) -> bool {
         self.finalized == other.finalized
@@ -5066,6 +5284,7 @@ impl<T: StreamingKMeansArrowType> PartialEq for WeightedCluster<T> {
     }
 }
 
+#[cfg(feature = "write")]
 impl<T: StreamingKMeansArrowType> Ord for WeightedCluster<T> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self.finalized, other.finalized) {
@@ -5084,12 +5303,14 @@ impl<T: StreamingKMeansArrowType> Ord for WeightedCluster<T> {
     }
 }
 
+#[cfg(feature = "write")]
 impl<T: StreamingKMeansArrowType> PartialOrd for WeightedCluster<T> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
+#[cfg(feature = "write")]
 struct WeightedHierarchicalKMeansParams<'a, T: StreamingKMeansArrowType> {
     dimension: usize,
     target_k: usize,
@@ -5098,6 +5319,7 @@ struct WeightedHierarchicalKMeansParams<'a, T: StreamingKMeansArrowType> {
     on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
 }
 
+#[cfg(feature = "write")]
 fn weighted_subset<T: StreamingKMeansArrowType>(
     data_values: &[T::Native],
     weights: &[f64],
@@ -5120,6 +5342,7 @@ fn weighted_subset<T: StreamingKMeansArrowType>(
     ))
 }
 
+#[cfg(feature = "write")]
 /// Splits `cluster` in two by L2 around the row farthest from its centroid and
 /// the row farthest from that one, or returns `None` when all its rows are
 /// identical. Each seed row is nearest to itself, so both halves are non-empty
@@ -5199,6 +5422,7 @@ fn bisect_weighted_cluster<T: StreamingKMeansArrowType>(
     Ok(Some([first, second]))
 }
 
+#[cfg(feature = "write")]
 fn train_weighted_hierarchical_kmeans<T: StreamingKMeansArrowType>(
     data: &FixedSizeListArray,
     weights: &[f64],
@@ -5417,6 +5641,7 @@ fn train_weighted_hierarchical_kmeans<T: StreamingKMeansArrowType>(
     streaming_kmeans_fsl_from_values::<T>(values, dimension)
 }
 
+#[cfg(feature = "write")]
 async fn finish_streaming_ivf_training<T>(
     training_result: Result<T>,
     progress_tx: mpsc::UnboundedSender<u64>,
@@ -5447,6 +5672,7 @@ async fn finish_streaming_ivf_training<T>(
     }
 }
 
+#[cfg(feature = "write")]
 async fn train_streaming_coreset_ivf_model(
     dataset: &Dataset,
     column: &str,
@@ -5469,6 +5695,7 @@ async fn train_streaming_coreset_ivf_model(
         .await
 }
 
+#[cfg(feature = "write")]
 async fn train_streaming_float_coreset_ivf_model<P>(
     request: StreamingCoresetTrainingRequest<'_>,
     metric_policy: &P,
@@ -5500,6 +5727,7 @@ where
     }
 }
 
+#[cfg(feature = "write")]
 async fn train_streaming_coreset_ivf_model_with_algorithm<A: StreamingCoresetAlgorithm>(
     request: StreamingCoresetTrainingRequest<'_>,
     algorithm: &A,
@@ -5747,6 +5975,7 @@ async fn train_streaming_coreset_ivf_model_with_algorithm<A: StreamingCoresetAlg
     Ok(ivf_model)
 }
 
+#[cfg(feature = "write")]
 async fn train_streaming_ivf_model(
     dataset: &Dataset,
     column: &str,
@@ -5877,6 +6106,7 @@ async fn train_streaming_ivf_model(
     Ok(ivf_model)
 }
 
+#[cfg(feature = "write")]
 /// Train IVF partitions using kmeans.
 async fn train_ivf_model(
     centroids: Option<Arc<FixedSizeListArray>>,
@@ -5965,7 +6195,7 @@ async fn train_ivf_model(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use lance_core::utils::row_addr_remap::RowAddrRemap;

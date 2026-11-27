@@ -3,48 +3,81 @@
 
 //! Wraps a Fragment of the dataset.
 
+#[cfg(feature = "write")]
 mod aligned_update;
+
 pub mod session;
-pub mod write;
 
 use std::ops::Range;
 use std::sync::Arc;
 
+use arrow_array::RecordBatch;
+#[cfg(feature = "write")]
 use arrow_array::cast::as_primitive_array;
-use arrow_array::{RecordBatch, RecordBatchReader, UInt64Array};
+#[cfg(feature = "write")]
+use arrow_array::{RecordBatchReader, UInt64Array};
+#[cfg(feature = "write")]
 use datafusion::logical_expr::Expr;
+#[cfg(feature = "write")]
 use datafusion::scalar::ScalarValue;
 use futures::future::try_join_all;
-use futures::{FutureExt, Stream, StreamExt, TryStreamExt};
-use lance_core::datatypes::{BlobHandling, Schema, SchemaCompareOptions};
+use futures::{FutureExt, StreamExt};
+#[cfg(feature = "write")]
+use futures::{Stream, TryStreamExt};
+use lance_core::datatypes::Schema;
+#[cfg(feature = "write")]
+use lance_core::datatypes::{BlobHandling, SchemaCompareOptions};
 use lance_core::utils::deletion::DeletionVector;
-use lance_core::{Error, ROW_ADDR, ROW_ID, Result};
+use lance_core::{Error, Result};
+#[cfg(feature = "write")]
+use lance_core::{ROW_ADDR, ROW_ID};
+#[cfg(feature = "write")]
 use lance_datafusion::utils::StreamingWriteSource;
+#[cfg(feature = "write")]
 use lance_encoding::decoder::DecoderPlugins;
 use lance_file::reader::{CachedFileMetadata, FileMetadataIndex};
+#[cfg(feature = "write")]
 use lance_file::version::ConcreteFileVersion;
+#[cfg(feature = "write")]
 use lance_file::writer::FileWriterOptions;
+#[cfg(feature = "write")]
 use lance_file::{determine_file_version, versions as file_versions};
-use lance_io::scheduler::{FileScheduler, ScanScheduler, SchedulerConfig};
+#[cfg(feature = "write")]
+use lance_io::scheduler::SchedulerConfig;
+use lance_io::scheduler::{FileScheduler, ScanScheduler};
 use lance_io::stream::RecordBatchStream;
+#[cfg(feature = "write")]
 use lance_io::utils::CachedFileSize;
 use lance_table::format::{DataFile, Fragment};
 use lance_table::utils::stream::ReadBatchFutStream;
 use lance_table_runtime::Table;
-use roaring::RoaringBitmap;
 
+#[cfg(feature = "write")]
 use self::write::FragmentCreateBuilder;
-
+#[cfg(feature = "write")]
 use super::hash_joiner::HashJoiner;
 use super::scanner::Scanner;
+#[cfg(feature = "write")]
 use super::updater::Updater;
+#[cfg(feature = "write")]
 use super::write::seeds::LanceWriteSeedHook;
+#[cfg(feature = "write")]
 use super::{NewColumnTransform, WriteParams, schema_evolution, versions};
+#[cfg(feature = "write")]
 use crate::blob::BlobWriteSources;
+use crate::dataset::Dataset;
+#[cfg(feature = "write")]
+use crate::dataset::UpdateJoinOptions;
 use crate::dataset::fragment::session::FragmentSession;
+#[cfg(feature = "write")]
 use crate::dataset::overlay::writer::{OverlayWriter, WriteOverlayError};
-use crate::dataset::{Dataset, UpdateJoinOptions};
+#[cfg(feature = "write")]
+use roaring::RoaringBitmap;
 
+#[cfg(feature = "write")]
+pub mod write;
+
+#[cfg(feature = "write")]
 /// Result of a fragment column update: updated fragment metadata, modified field ids, and physical
 /// row offsets that matched the join (for stable row-id version metadata).
 #[derive(Debug, Clone)]
@@ -55,6 +88,7 @@ pub struct FragmentUpdateColumnsResult {
     pub matched_offsets: RoaringBitmap,
 }
 
+#[cfg(feature = "write")]
 /// Cleanup ownership for files staged by [`FileFragment::add_columns_with_cleanup`].
 ///
 /// Call [`Self::cleanup`] only after establishing that the outer commit did not
@@ -67,6 +101,7 @@ pub struct FragmentAddColumnsCleanup {
     fragments_to_cleanup: Vec<Fragment>,
 }
 
+#[cfg(feature = "write")]
 impl FragmentAddColumnsCleanup {
     /// Remove only the files created by the fragment-level add-columns operation.
     ///
@@ -82,6 +117,7 @@ impl FragmentAddColumnsCleanup {
     }
 }
 
+#[cfg(feature = "write")]
 /// A staged fragment-level add-columns result and its cleanup ownership.
 ///
 /// The fragment and schema can be used to build an outer [`Operation::Merge`].
@@ -113,7 +149,7 @@ pub(crate) use lance_table_runtime::fragment::V1FragmentReader;
 pub use lance_table_runtime::fragment::{
     BaseSchedulers, FragReadConfig, FragmentReader, GenericFileReader,
 };
-
+#[cfg(feature = "write")]
 pub(crate) use lance_table_runtime::fragment::{duplicate_field_path, relax_nullability};
 
 impl FileFragment {
@@ -132,6 +168,7 @@ impl FileFragment {
         &self.core
     }
 
+    #[cfg(feature = "write")]
     /// Create a new [`FileFragment`] from a [`StreamingWriteSource`].
     ///
     /// This method can be used before a `Dataset` is created. For example,
@@ -153,6 +190,7 @@ impl FileFragment {
         builder.write(source, Some(id as u64)).await
     }
 
+    #[cfg(feature = "write")]
     /// Create a list of [`FileFragment`] from a [`StreamingWriteSource`].
     pub async fn create_fragments(
         dataset_uri: &str,
@@ -168,6 +206,7 @@ impl FileFragment {
         builder.write_fragments(source).await
     }
 
+    #[cfg(feature = "write")]
     pub async fn create_from_file(
         filename: &str,
         dataset: &Dataset,
@@ -190,6 +229,7 @@ impl FileFragment {
         .await
     }
 
+    #[cfg(feature = "write")]
     pub(crate) async fn create_from_v1_file(
         filename: &str,
         dataset: &Dataset,
@@ -204,6 +244,7 @@ impl FileFragment {
         ))
     }
 
+    #[cfg(feature = "write")]
     pub(crate) async fn create_from_current_file(
         filename: &str,
         dataset: &Dataset,
@@ -306,6 +347,7 @@ impl FileFragment {
         self.core.metadata()
     }
 
+    #[cfg(feature = "write")]
     pub(super) fn metadata_mut(&mut self) -> &mut Fragment {
         self.core.metadata_mut()
     }
@@ -483,9 +525,7 @@ impl FileFragment {
     ///
     /// Unlike logical range reads, offsets address the immutable rows stored in
     /// the fragment's files. Deleted positions remain present with their stored
-    /// column values. Callers can stream the batches into
-    /// [`Dataset::write_data_file_part`](super::Dataset::write_data_file_part)
-    /// when independently computing a physical-row part.
+    /// column values. Overlays still apply to the selected physical rows.
     ///
     /// ```
     /// # use lance::{dataset::fragment::FileFragment, Result};
@@ -557,19 +597,23 @@ impl FileFragment {
         }
         let stream = scanner.try_into_stream().await?;
         if has_blob_columns {
-            let rewrite_plan = Arc::new(super::blob::BlobV2BatchRewritePlan::try_new(
-                projection,
-                stream.schema().as_ref(),
-                false,
-                false,
-            )?);
+            let rewrite_plan =
+                Arc::new(lance_table_runtime::blob::BlobV2BatchRewritePlan::try_new(
+                    projection,
+                    stream.schema().as_ref(),
+                    false,
+                    false,
+                )?);
             Ok(stream
                 .map(move |batch_result| {
                     let physical_dataset = physical_dataset.clone();
                     let rewrite_plan = rewrite_plan.clone();
                     async move {
                         rewrite_plan
-                            .transform_batch(&physical_dataset, batch_result?)
+                            .transform_batch(
+                                &physical_dataset.table_view().to_table(),
+                                batch_result?,
+                            )
                             .await
                     }
                     .boxed()
@@ -605,6 +649,7 @@ impl FileFragment {
             .await
     }
 
+    #[cfg(feature = "write")]
     pub(crate) async fn take_rows(
         &self,
         row_offsets: &[u32],
@@ -623,6 +668,7 @@ impl FileFragment {
         Scanner::from_fragment(self.dataset.clone(), self.metadata().clone())
     }
 
+    #[cfg(feature = "write")]
     /// Create an [`Updater`] to append new columns.
     ///
     /// The `columns` parameter is a list of existing columns to be read from
@@ -659,6 +705,7 @@ impl FileFragment {
             .await
     }
 
+    #[cfg(feature = "write")]
     pub(crate) async fn updater_with_version<T: AsRef<str>>(
         &self,
         columns: Option<&[T]>,
@@ -683,6 +730,7 @@ impl FileFragment {
         ))
     }
 
+    #[cfg(feature = "write")]
     pub async fn merge_columns(
         &mut self,
         stream: impl RecordBatchReader + Send + 'static,
@@ -734,6 +782,7 @@ impl FileFragment {
         Ok((new_fragment, new_schema))
     }
 
+    #[cfg(feature = "write")]
     pub(crate) async fn merge(mut self, join_column: &str, joiner: &HashJoiner) -> Result<Self> {
         let mut updater = self.updater(Some(&[join_column]), None, None, None).await?;
 
@@ -749,6 +798,7 @@ impl FileFragment {
         Ok(self)
     }
 
+    #[cfg(feature = "write")]
     /// Same as [`Self::update_columns_with_offsets`] but discards the matched row offsets.
     /// Use [`Self::update_columns_with_offsets`] if you need per-row version metadata for stable row IDs.
     pub async fn update_columns(
@@ -763,6 +813,7 @@ impl FileFragment {
         Ok((r.fragment, r.fields_modified))
     }
 
+    #[cfg(feature = "write")]
     /// Same operation as [`Self::update_columns`], and also returns matched physical row offsets for stable row IDs.
     pub async fn update_columns_with_offsets(
         &mut self,
@@ -779,6 +830,7 @@ impl FileFragment {
         .await
     }
 
+    #[cfg(feature = "write")]
     /// Updates columns using explicit join-strategy and external-resource controls.
     ///
     /// The returned offsets are physical row offsets within this fragment. Existing callers can
@@ -814,6 +866,7 @@ impl FileFragment {
             .await
     }
 
+    #[cfg(feature = "write")]
     /// Append new columns to the fragment
     ///
     /// This is the fragment-level version of [`Dataset::add_columns`].
@@ -831,6 +884,7 @@ impl FileFragment {
         Ok((result.fragment, result.schema))
     }
 
+    #[cfg(feature = "write")]
     /// Append new columns while retaining ownership of the staged files.
     ///
     /// This variant is intended for distributed or multi-step callers that
@@ -892,6 +946,7 @@ impl FileFragment {
         })
     }
 
+    #[cfg(feature = "write")]
     /// Write new data for columns of this fragment as a standalone data file,
     /// without committing it, and return the
     /// [`DataReplacementGroup`](super::transaction::DataReplacementGroup)
@@ -927,6 +982,7 @@ impl FileFragment {
             .await
     }
 
+    #[cfg(feature = "write")]
     /// Write replacement column data with runtime file-writer options.
     ///
     /// This has the same format and commit semantics as [`Self::write_columns`].
@@ -954,6 +1010,7 @@ impl FileFragment {
         .await
     }
 
+    #[cfg(feature = "write")]
     /// Stage replacement columns using prepared Blob v2 leaves and trusted
     /// payload sources associated with each batch.
     ///
@@ -1004,6 +1061,7 @@ impl FileFragment {
         .await
     }
 
+    #[cfg(feature = "write")]
     /// Write replacement column data using an exact V2 data file version.
     ///
     /// The input and commit requirements are the same as [`Self::write_columns`].
@@ -1041,6 +1099,7 @@ impl FileFragment {
         .await
     }
 
+    #[cfg(feature = "write")]
     async fn write_column_with_version_and_options(
         &self,
         data: impl Stream<Item = Result<(RecordBatch, Option<BlobWriteSources>)>> + Send,
@@ -1061,6 +1120,7 @@ impl FileFragment {
         .await
     }
 
+    #[cfg(feature = "write")]
     /// Stage a data overlay supplying new values for a subset of this fragment's
     /// cells, without rewriting its base data files.
     ///
@@ -1122,6 +1182,7 @@ impl FileFragment {
         Box::pin(self.core.write_overlay(schema)).await
     }
 
+    #[cfg(feature = "write")]
     /// Delete rows from the fragment.
     ///
     /// If all rows are deleted, returns `Ok(None)`. Otherwise, returns a new
@@ -1198,6 +1259,7 @@ impl FileFragment {
         self.write_deletions(deletion_vector).await
     }
 
+    #[cfg(feature = "write")]
     pub async fn extend_deletions(
         self,
         new_deletions: impl IntoIterator<Item = u32>,
@@ -1208,6 +1270,7 @@ impl FileFragment {
             .map(|core| Self { dataset, core }))
     }
 
+    #[cfg(feature = "write")]
     async fn write_deletions(self, deletion_vector: DeletionVector) -> Result<Option<Self>> {
         let Self { dataset, core } = self;
         Ok(Box::pin(core.write_deletions(deletion_vector))
@@ -1222,7 +1285,7 @@ impl From<FileFragment> for Fragment {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 pub(crate) mod tests {
     use crate::dataset::rowids::load_row_id_sequence;
     use arrow::compute::concat_batches;

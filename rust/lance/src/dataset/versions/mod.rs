@@ -8,33 +8,42 @@
 
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
+#[cfg(feature = "write")]
 use arrow_schema::{DataType, Field as ArrowField};
-use datafusion::catalog::Session;
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_catalog::Session;
+use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
+#[cfg(feature = "write")]
 use lance_arrow::DataTypeExt;
+#[cfg(feature = "write")]
+use lance_core::datatypes::Field;
 use lance_core::{
     Error, Result,
-    datatypes::{Field, Projection, Schema},
+    datatypes::{Projection, Schema},
 };
 use lance_file::version::ConcreteFileVersion;
 use lance_table::format::Fragment;
 
 use super::Dataset;
+#[cfg(feature = "write")]
 use super::fragment::FileFragment;
 use super::scanner::{PlannedFilteredScan, Scanner};
+#[cfg(feature = "write")]
 use super::schema_evolution::optimize::{
     ChainedNewColumnTransformOptimizer, SqlToAllNullsOptimizer,
 };
 use super::statistics::FieldStatistics;
+#[cfg(feature = "write")]
 use super::write::GenericWriter;
+#[cfg(feature = "write")]
 use crate::io::exec::filtered_read::{FilteredReadExec, FilteredReadOptions};
-use crate::io::exec::{
-    AddRowAddrExec, FilterPlan as ExprFilterPlan, LanceScanConfig, LanceStream, TakeExec,
-};
-pub use lance_table_runtime::write::{schema_compare_options, writes_blob_v2};
-
+#[cfg(feature = "write")]
+use crate::io::exec::{AddRowAddrExec, TakeExec};
+use crate::io::exec::{FilterPlan as ExprFilterPlan, LanceScanConfig, LanceStream};
+#[cfg(feature = "write")]
 pub use lance_table_runtime::fragment::validate_write_version;
+#[cfg(feature = "write")]
+pub use lance_table_runtime::write::{schema_compare_options, writes_blob_v2};
 
 #[allow(clippy::too_many_arguments)]
 pub fn create_scan_stream(
@@ -46,7 +55,7 @@ pub fn create_scan_stream(
     config: LanceScanConfig,
     metrics: &ExecutionPlanMetricsSet,
     partition: usize,
-) -> datafusion::error::Result<LanceStream> {
+) -> datafusion_common::Result<LanceStream> {
     match version {
         ConcreteFileVersion::V1 => LanceStream::try_new_v1(
             dataset, fragments, offsets, projection, config, metrics, partition,
@@ -60,6 +69,7 @@ pub fn create_scan_stream(
     }
 }
 
+#[cfg(feature = "write")]
 pub async fn open_update_writer(
     version: ConcreteFileVersion,
     dataset: &Dataset,
@@ -76,6 +86,7 @@ pub async fn open_update_writer(
     .await
 }
 
+#[cfg(feature = "write")]
 pub async fn create_fragment_from_file(
     file_version: ConcreteFileVersion,
     dataset_version: ConcreteFileVersion,
@@ -126,6 +137,7 @@ pub fn index_file_version(version: ConcreteFileVersion) -> ConcreteFileVersion {
     }
 }
 
+#[cfg(feature = "write")]
 pub async fn row_group_size_for_rewrite(
     version: ConcreteFileVersion,
     fragment: &FileFragment,
@@ -144,6 +156,7 @@ pub async fn row_group_size_for_rewrite(
     }
 }
 
+#[cfg(feature = "write")]
 pub fn is_upcast_downcast(
     version: ConcreteFileVersion,
     from_type: &DataType,
@@ -156,6 +169,7 @@ pub fn is_upcast_downcast(
     )
 }
 
+#[cfg(feature = "write")]
 fn is_upcast_downcast_impl(
     from_type: &DataType,
     to_type: &DataType,
@@ -195,6 +209,7 @@ fn is_upcast_downcast_impl(
     }
 }
 
+#[cfg(feature = "write")]
 pub fn validate_nulls(
     version: ConcreteFileVersion,
     column_name: &str,
@@ -223,6 +238,7 @@ pub fn validate_nulls(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 fn reject_nested_column_add(field: &ArrowField, version: ConcreteFileVersion) -> Result<()> {
     Err(Error::invalid_input(format!(
         "Column {} is a struct col, add sub column is not supported in Lance file version {}",
@@ -231,22 +247,27 @@ fn reject_nested_column_add(field: &ArrowField, version: ConcreteFileVersion) ->
     )))
 }
 
+#[cfg(feature = "write")]
 fn reject_nested_v1(field: &ArrowField) -> Result<()> {
     reject_nested_column_add(field, ConcreteFileVersion::V1)
 }
 
+#[cfg(feature = "write")]
 fn reject_nested_v2_0(field: &ArrowField) -> Result<()> {
     reject_nested_column_add(field, ConcreteFileVersion::V2_0)
 }
 
+#[cfg(feature = "write")]
 fn reject_nested_v2_1(field: &ArrowField) -> Result<()> {
     reject_nested_column_add(field, ConcreteFileVersion::V2_1)
 }
 
+#[cfg(feature = "write")]
 fn allow_nested(_field: &ArrowField) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "write")]
 pub fn check_field_conflict(
     version: ConcreteFileVersion,
     left: &ArrowField,
@@ -261,6 +282,7 @@ pub fn check_field_conflict(
     super::schema_evolution::check_field_conflict_with(left, right, validate)
 }
 
+#[cfg(feature = "write")]
 fn exclude_struct_field(field: &Field, other: &Field) -> Option<Field> {
     field
         .data_type()
@@ -269,6 +291,7 @@ fn exclude_struct_field(field: &Field, other: &Field) -> Option<Field> {
         .flatten()
 }
 
+#[cfg(feature = "write")]
 fn exclude_nested_field(field: &Field, other: &Field) -> Option<Field> {
     field
         .data_type()
@@ -277,6 +300,7 @@ fn exclude_nested_field(field: &Field, other: &Field) -> Option<Field> {
         .flatten()
 }
 
+#[cfg(feature = "write")]
 pub fn exclude_schema(
     version: ConcreteFileVersion,
     source: &Schema,
@@ -291,6 +315,7 @@ pub fn exclude_schema(
     super::schema_evolution::exclude_with(source, other, exclude)
 }
 
+#[cfg(feature = "write")]
 pub fn configure_new_column_optimizers(
     version: ConcreteFileVersion,
     optimizer: &mut ChainedNewColumnTransformOptimizer,
@@ -306,6 +331,7 @@ pub fn configure_new_column_optimizers(
     }
 }
 
+#[cfg(feature = "write")]
 pub fn validate_metadata_only_null_columns(version: ConcreteFileVersion) -> Result<()> {
     match version {
         ConcreteFileVersion::V1 => Err(Error::not_supported_source(
@@ -398,6 +424,7 @@ pub async fn collect_data_stats(
     }
 }
 
+#[cfg(feature = "write")]
 pub fn merge_insert_indexed_take(
     version: ConcreteFileVersion,
     dataset: Arc<Dataset>,

@@ -9,15 +9,30 @@
 //! - Serializing details as JSON for `describe_indices()`
 //! - Inferring details from index files on disk (fallback for legacy indices)
 
+#[cfg(any(test, feature = "write"))]
+use {
+    super::{StageParams, VectorIndexParams},
+    lance_index::{
+        pb::vector_index_details::FlatCompression,
+        vector::{
+            bq::{RQBuildParams, RQRotationType},
+            hnsw::builder::HnswBuildParams,
+            ivf::IvfBuildParams,
+            pq::PQBuildParams,
+            sq::builder::SQBuildParams,
+        },
+    },
+    std::str::FromStr,
+};
+
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 
 use lance_file::reader::FileReaderOptions;
 use lance_index::pb::VectorIndexDetails;
 use lance_index::pb::VectorMetricType;
 use lance_index::pb::index::Implementation;
-use lance_index::pb::vector_index_details::{Compression, FlatCompression, rabit_quantization};
+use lance_index::pb::vector_index_details::{Compression, rabit_quantization};
 use lance_index::{INDEX_FILE_NAME, INDEX_METADATA_SCHEMA_KEY, pb};
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 use lance_io::traits::Reader;
@@ -26,13 +41,6 @@ use lance_linalg::distance::DistanceType;
 use lance_table::format::IndexMetadata;
 use serde::Serialize;
 
-use lance_index::vector::bq::{RQBuildParams, RQRotationType};
-use lance_index::vector::hnsw::builder::HnswBuildParams;
-use lance_index::vector::ivf::IvfBuildParams;
-use lance_index::vector::pq::PQBuildParams;
-use lance_index::vector::sq::builder::SQBuildParams;
-
-use super::{StageParams, VectorIndexParams};
 use crate::dataset::Dataset;
 use crate::index::loading::open_index_proto;
 use crate::{Error, Result};
@@ -82,6 +90,7 @@ enum CompressionDetailsJson {
     },
 }
 
+#[cfg(any(test, feature = "write"))]
 /// Build a `VectorIndexDetails` proto from build params at index creation time.
 ///
 /// `built_target` is the vectors per partition the build settled on, which
@@ -178,6 +187,7 @@ pub fn vector_index_details_default() -> prost_types::Any {
     prost_types::Any::from_msg(&details).unwrap()
 }
 
+#[cfg(any(test, feature = "write"))]
 /// Apply stored runtime hints from `VectorIndexDetails` back into build params.
 ///
 /// Known `lance.*` keys are parsed and applied to the appropriate stage. Unknown
@@ -240,15 +250,18 @@ pub fn apply_runtime_hints(hints: &HashMap<String, String>, params: &mut VectorI
     }
 }
 
-/// Reconstruct `VectorIndexParams` from a stored `VectorIndexDetails` proto.
-///
-/// Returns `None` for legacy indices (empty details) or if the proto is malformed.
+#[cfg(feature = "write")]
 /// The rows-per-partition target the index was created with, if it was recorded.
 pub fn target_partition_size_from_details(details: &prost_types::Any) -> Option<usize> {
     let details = details.to_msg::<VectorIndexDetails>().ok()?;
     (details.target_partition_size > 0).then_some(details.target_partition_size as usize)
 }
 
+#[cfg(any(test, feature = "write"))]
+/// Reconstruct `VectorIndexParams` from a stored `VectorIndexDetails` proto.
+///
+/// Returns `None` for legacy indices (empty details) or if the proto is malformed.
+///
 /// Runtime hints are applied on top of the reconstructed spec.
 // TODO: wire into a general `Dataset::rebuild_index` method so users can
 // regenerate an index from its stored details (e.g. after file corruption).

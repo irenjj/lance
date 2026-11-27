@@ -20,66 +20,50 @@
 //! [Apache Arrow](https://arrow.apache.org/) and DuckDB compatible.
 //!
 //!
-//! # Create a Dataset
+//! # Open and scan a dataset
 //!
 //! ```rust
-//! # use std::sync::Arc;
-//! # use tokio::runtime::Runtime;
-//! # use arrow_array::{RecordBatch, RecordBatchIterator};
-//! # use arrow_schema::{Schema, Field, DataType};
-//! use lance::{dataset::WriteParams, Dataset};
+//! use lance::{Dataset, Result};
 //!
-//! # let mut rt = Runtime::new().unwrap();
-//! # rt.block_on(async {
-//! #
-//! # let test_dir = tempfile::tempdir().unwrap();
-//! # let uri = test_dir.path().to_str().unwrap().to_string();
-//! let schema = Arc::new(Schema::new(vec![Field::new("test", DataType::Int64, false)]));
-//! let batches = vec![RecordBatch::new_empty(schema.clone())];
-//! let reader = RecordBatchIterator::new(
-//!     batches.into_iter().map(Ok), schema
-//! );
-//!
-//! let write_params = WriteParams::default();
-//! Dataset::write(reader, &uri, Some(write_params)).await.unwrap();
-//! # })
+//! async fn inspect(uri: &str) -> Result<()> {
+//!     let dataset = Dataset::open(uri).await?;
+//!     let mut scan = dataset.scan();
+//!     scan.limit(Some(10), None)?;
+//!     let batch = scan.try_into_batch().await?;
+//!     assert!(batch.num_rows() <= 10);
+//!     Ok(())
+//! }
 //! ```
-//!
-//! # Scan a Dataset
-//!
-//! ```rust
-//! # use std::sync::Arc;
-//! # use arrow_array::{RecordBatch, Int32Array, RecordBatchIterator, ArrayRef};
-//! # use tokio::runtime::Runtime;
-//! use futures::StreamExt;
-//! use lance::Dataset;
-//! # use lance::dataset::WriteParams;
-//!
-//! # let array: ArrayRef = Arc::new(Int32Array::from(vec![1, 2]));
-//! # let batches = vec![RecordBatch::try_from_iter(vec![("test", array)]).unwrap()];
-//! # let test_dir = tempfile::tempdir().unwrap();
-//! # let path = test_dir.path().to_str().unwrap().to_string();
-//! # let schema = batches[0].schema();
-//! # let mut rt = Runtime::new().unwrap();
-//! # rt.block_on(async {
-//! #   let write_params = WriteParams::default();
-//! #   let reader = RecordBatchIterator::new(
-//! #       batches.into_iter().map(Ok), schema
-//! #   );
-//! #   Dataset::write(reader, &path, Some(write_params)).await.unwrap();
-//! let dataset = Dataset::open(&path).await.unwrap();
-//! let mut scanner = dataset.scan();
-//! let batches: Vec<RecordBatch> = scanner
-//!     .try_into_stream()
-//!     .await
-//!     .unwrap()
-//!     .map(|b| b.unwrap())
-//!     .collect::<Vec<RecordBatch>>()
-//!     .await;
-//! # })
-//!
-//! ```
-//!
+
+#![cfg_attr(
+    feature = "write",
+    doc = r#"
+# Create a Dataset
+
+```rust
+# use std::sync::Arc;
+# use tokio::runtime::Runtime;
+# use arrow_array::{RecordBatch, RecordBatchIterator};
+# use arrow_schema::{Schema, Field, DataType};
+use lance::{dataset::WriteParams, Dataset};
+
+# let mut rt = Runtime::new().unwrap();
+# rt.block_on(async {
+#
+# let test_dir = tempfile::tempdir().unwrap();
+# let uri = test_dir.path().to_str().unwrap().to_string();
+let schema = Arc::new(Schema::new(vec![Field::new("test", DataType::Int64, false)]));
+let batches = vec![RecordBatch::new_empty(schema.clone())];
+let reader = RecordBatchIterator::new(
+    batches.into_iter().map(Ok), schema
+);
+
+let write_params = WriteParams::default();
+Dataset::write(reader, &uri, Some(write_params)).await.unwrap();
+# })
+```
+"#
+)]
 
 use arrow_schema::DataType;
 use dataset::builder::DatasetBuilder;
@@ -139,5 +123,4 @@ pub static DIST_FIELD: LazyLock<arrow_schema::Field> =
 pub mod deps {
     pub use arrow_array;
     pub use arrow_schema;
-    pub use datafusion;
 }

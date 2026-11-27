@@ -7,10 +7,10 @@ use arrow_schema::DataType;
 
 use crate::expr::safe_coerce_scalar;
 use crate::numeric_coercion::rewrite as rewrite_numeric;
-use datafusion::logical_expr::{Between, ScalarUDFImpl};
-use datafusion::logical_expr::{BinaryExpr, Operator};
-use datafusion::prelude::*;
-use datafusion::scalar::ScalarValue;
+use datafusion_common::ScalarValue;
+use datafusion_expr::*;
+use datafusion_expr::{Between, ScalarUDFImpl};
+use datafusion_expr::{BinaryExpr, Operator};
 use datafusion_functions::core::expr_ext::FieldAccessor;
 use datafusion_functions::core::getfield::GetFieldFunc;
 use lance_arrow::DataTypeExt;
@@ -311,9 +311,7 @@ pub fn field_path_to_expr(field_path: &str) -> Result<Expr> {
     }
 
     // Build the column expression, handling nested fields.
-    let mut expr = Expr::Column(datafusion::common::Column::new_unqualified(
-        parts[0].clone(),
-    ));
+    let mut expr = Expr::Column(datafusion_common::Column::new_unqualified(parts[0].clone()));
     for part in &parts[1..] {
         expr = expr.field(part.as_str());
     }
@@ -328,7 +326,7 @@ mod tests {
     use super::*;
 
     use arrow_schema::{Field, Schema as ArrowSchema};
-    use datafusion::common::Column;
+    use datafusion_common::Column;
 
     #[test]
     fn test_field_path_to_expr_preserves_case_sensitive_root_column() {
@@ -355,7 +353,7 @@ mod tests {
         let expr = field_path_to_expr(path).unwrap();
         let mut expected = Expr::Column(Column::new_unqualified(root));
         for name in children {
-            expected = get_field(expected, name);
+            expected = expected.field(name);
         }
 
         assert_eq!(expr, expected);

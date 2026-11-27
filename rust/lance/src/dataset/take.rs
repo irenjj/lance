@@ -12,10 +12,10 @@ use std::time::{Duration, Instant};
 
 use arrow_array::{RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field as ArrowField};
-use datafusion::common::Column;
-use datafusion::error::DataFusionError;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_common::Column;
+use datafusion_common::DataFusionError;
 use datafusion_expr::Expr;
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use futures::{Stream, StreamExt};
 use lance_arrow::RecordBatchExt;
 use lance_arrow::json::convert_lance_json_to_arrow;
@@ -570,7 +570,7 @@ impl TakeBuilder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod test {
     use arrow_array::cast::AsArray;
     use arrow_array::types::Int64Type;

@@ -190,11 +190,12 @@ fn stream_copy_error(
 
 pub use providers::{ObjectStoreProvider, ObjectStoreRegistry};
 pub use read_dir::ReadDirOptions;
+#[cfg(feature = "write")]
+pub use storage_options::LanceNamespaceStorageOptionsProvider;
 pub use storage_options::{
     BASE_SCOPED_OPTION_PREFIX, BaseScopedStorageOptionsProvider, EXPIRES_AT_MILLIS_KEY,
-    LanceNamespaceStorageOptionsProvider, REFRESH_OFFSET_MILLIS_KEY, StorageOptionsAccessor,
-    StorageOptionsProvider, has_base_scoped_options, parse_base_scoped_key,
-    resolve_base_scoped_options,
+    REFRESH_OFFSET_MILLIS_KEY, StorageOptionsAccessor, StorageOptionsProvider,
+    has_base_scoped_options, parse_base_scoped_key, resolve_base_scoped_options,
 };
 
 #[async_trait]

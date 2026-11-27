@@ -1,41 +1,65 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-mod compaction;
-pub mod frag_reuse;
+#[cfg(feature = "write")]
 use compaction::rewrite_connected_segments;
+#[cfg(feature = "write")]
 pub(crate) use compaction::{
     constrain_candidate_windows, is_merge_candidate, vector_segment_merge_groups_for_compaction,
 };
+#[cfg(feature = "write")]
 use lance_core::utils::row_addr_remap::RowAddrRemap;
+use lance_file::version::ConcreteFileVersion;
+#[cfg(feature = "write")]
+use lance_index::is_system_index;
+#[cfg(feature = "write")]
+use lance_index::pb::VectorIndexDetails;
+#[cfg(feature = "write")]
 use lance_index::scalar::RowAddrTranslator;
+use lance_index::scalar::lance_format::LanceIndexStore;
+use lance_table::format::IndexMetadata;
+#[cfg(feature = "write")]
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::Dataset;
+#[cfg(feature = "write")]
 use crate::dataset::optimize::RemappedIndex;
+#[cfg(feature = "write")]
 use crate::dataset::optimize::remapping::RemapResult;
+#[cfg(feature = "write")]
 use crate::index::DatasetIndexExt;
+#[cfg(feature = "write")]
 use crate::index::remap::remap_index;
+#[cfg(feature = "write")]
 use crate::index::scalar::{IndexDetails, infer_scalar_index_details};
+#[cfg(feature = "write")]
 use arrow_schema::DataType;
 use async_trait::async_trait;
-use lance_core::{Error, Result};
-use lance_file::version::ConcreteFileVersion;
-use lance_index::is_system_index;
-use lance_index::pb::VectorIndexDetails;
-use lance_index::scalar::lance_format::LanceIndexStore;
-use lance_table::format::IndexMetadata;
-use lance_table::transaction::RewriteGroup;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
+#[cfg(feature = "write")]
 use super::optimize::{IndexRemapper, IndexRemapperOptions};
 use super::versions;
+use crate::{Dataset, Result};
+#[cfg(feature = "write")]
+use lance_core::Error;
+#[cfg(feature = "write")]
+use lance_table::transaction::RewriteGroup;
+#[cfg(feature = "write")]
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "write")]
+use uuid::Uuid;
 
+#[cfg(feature = "write")]
+mod compaction;
+
+#[cfg(feature = "write")]
+pub mod frag_reuse;
+
+#[cfg(feature = "write")]
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DatasetIndexRemapperOptions {}
 
+#[cfg(feature = "write")]
 /// Loads index metadata when compaction has at least one index to remap.
 ///
 /// Returns all usable index metadata, including system indices, so the remapper
@@ -53,6 +77,7 @@ pub(crate) async fn load_indices_for_remapping(
     Ok(has_remappable_index.then_some(indices))
 }
 
+#[cfg(feature = "write")]
 #[async_trait]
 impl IndexRemapperOptions for DatasetIndexRemapperOptions {
     fn supports_vector_segment_replacement(&self) -> bool {
@@ -74,6 +99,7 @@ impl IndexRemapperOptions for DatasetIndexRemapperOptions {
     }
 }
 
+#[cfg(feature = "write")]
 /// Whether any non-system index may need remapping, using metadata only.
 /// Check the whole table to avoid duplicating task coverage logic here.
 /// Unsupported indices retain their stored bitmap, as on the Drop path;
@@ -102,11 +128,13 @@ fn needs_index_remap(dataset: &Dataset, indices: &[IndexMetadata]) -> bool {
     false
 }
 
+#[cfg(feature = "write")]
 struct DatasetIndexRemapper {
     dataset: Arc<Dataset>,
     indices: Arc<Vec<IndexMetadata>>,
 }
 
+#[cfg(feature = "write")]
 impl DatasetIndexRemapper {
     async fn remap_index(
         &self,
@@ -276,6 +304,7 @@ impl DatasetIndexRemapper {
     }
 }
 
+#[cfg(feature = "write")]
 #[async_trait]
 impl IndexRemapper for DatasetIndexRemapper {
     async fn remap_indices(
@@ -375,6 +404,7 @@ impl IndexRemapper for DatasetIndexRemapper {
 
 #[async_trait]
 pub trait LanceIndexStoreExt {
+    #[cfg(feature = "write")]
     /// Create an index store for a new index (will always be absolute with no base id)
     fn from_dataset_for_new(dataset: &Dataset, uuid: &Uuid) -> Result<Self>
     where
@@ -396,6 +426,7 @@ pub(crate) fn dataset_format_version(dataset: &Dataset) -> ConcreteFileVersion {
 
 #[async_trait]
 impl LanceIndexStoreExt for LanceIndexStore {
+    #[cfg(feature = "write")]
     fn from_dataset_for_new(dataset: &Dataset, uuid: &Uuid) -> Result<Self> {
         let index_dir = dataset.indices_dir().join(uuid.to_string());
         let cache = dataset
@@ -427,7 +458,7 @@ impl LanceIndexStoreExt for LanceIndexStore {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use crate::dataset::WriteParams;

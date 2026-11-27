@@ -8,6 +8,7 @@ use lance_file::reader::FileReaderOptions;
 use lance_io::object_store::{
     ObjectStore, ObjectStoreParams, StorageOptionsAccessor, StorageOptionsProvider,
 };
+#[cfg(feature = "write")]
 use lance_namespace::LanceNamespace;
 use lance_table::{
     format::Manifest,
@@ -19,7 +20,9 @@ use object_store::aws::AwsCredentialProvider;
 use object_store::{DynObjectStore, path::Path};
 use url::Url;
 
-use super::{DEFAULT_INDEX_CACHE_SIZE, DEFAULT_METADATA_CACHE_SIZE, ReadParams, WriteParams};
+#[cfg(feature = "write")]
+use super::WriteParams;
+use super::{DEFAULT_INDEX_CACHE_SIZE, DEFAULT_METADATA_CACHE_SIZE, ReadParams};
 use crate::{Dataset, Result, session::Session};
 
 /// Configure and open a dataset snapshot.
@@ -59,6 +62,7 @@ impl DatasetBuilder {
         }
     }
 
+    #[cfg(feature = "write")]
     /// Create a DatasetBuilder from a LanceNamespace client
     ///
     /// This will automatically fetch the table location and storage options from the namespace
@@ -368,6 +372,7 @@ impl DatasetBuilder {
         self
     }
 
+    #[cfg(feature = "write")]
     /// Set options based on [WriteParams].
     pub fn with_write_params(mut self, write_params: WriteParams) -> Self {
         if let Some(options) = write_params.store_params {

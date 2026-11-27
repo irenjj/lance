@@ -87,15 +87,12 @@ pub struct ManifestScan {
     /// Number of manifests the walk will yield. Set once listing finishes, so a
     /// consumer reading it mid-walk may still see `None`.
     pub total: Arc<std::sync::OnceLock<usize>>,
-    /// Estimated in-memory bytes the reader has read and the consumer has not
-    /// yet dropped. Test-only: production consumers rely on the budget
-    /// implicitly, by dropping each manifest after use, so keeping this in
-    /// release builds would be a field nothing reads.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "write"))]
+    /// Estimated in-memory bytes the reader has in flight.
     inflight_bytes: Arc<AtomicUsize>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 impl ManifestScan {
     /// Estimated in-memory bytes currently charged against the budget.
     fn inflight_bytes(&self) -> usize {
@@ -147,7 +144,7 @@ pub fn scan_manifests(dataset: &Dataset, min_version: Option<u64>) -> ManifestSc
     ManifestScan {
         stream: tokio_stream::wrappers::ReceiverStream::new(rx_manifest).boxed(),
         total,
-        #[cfg(test)]
+        #[cfg(all(test, feature = "write"))]
         inflight_bytes: inflight_mem,
     }
 }
@@ -280,7 +277,7 @@ fn spawn_reader(
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use arrow_array::{Int32Array, RecordBatch, RecordBatchIterator};

@@ -10,15 +10,15 @@ use std::sync::{Arc, OnceLock};
 use arrow::array::AsArray;
 use arrow::datatypes::{Float32Type, UInt64Type};
 use arrow_array::{Array, Float32Array, RecordBatch, UInt64Array};
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_execution::SendableRecordBatchStream;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, Partitioning, PhysicalExpr};
 use datafusion_physical_plan::ExecutionPlanProperties;
+use datafusion_physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::future::try_join_all;
 use futures::stream::{self, FuturesUnordered};
 use futures::{StreamExt, TryStreamExt};
@@ -33,8 +33,8 @@ use lance_select::RowAddrMask;
 use lance_table::format::IndexMetadata;
 use rustc_hash::FxHashSet;
 
+use super::query_local::{QueryLocalFtsIndex, QueryLocalFtsStats};
 use crate::Dataset;
-use crate::dataset::mem_wal::index::{QueryLocalFtsIndex, QueryLocalFtsStats};
 use crate::index::scalar::inverted::load_segment_details;
 use crate::io::exec::PreFilterSource;
 use crate::io::exec::utils::{PreFilterMasks, build_prefilter};
@@ -567,14 +567,14 @@ impl HybridCompoundQueryExec {
     ///
     /// ```
     /// # use std::sync::Arc;
-    /// # use datafusion::physical_plan::ExecutionPlan;
+    /// # use datafusion_physical_plan::ExecutionPlan;
     /// # use lance::io::exec::fts::HybridCompoundQueryExec;
     /// # use lance_index::scalar::inverted::MemBM25Scorer;
     /// # fn replace_indexed_search(
     /// #     hybrid: &HybridCompoundQueryExec,
     /// #     merged: Arc<dyn ExecutionPlan>,
     /// #     scorer: Arc<MemBM25Scorer>,
-    /// # ) -> datafusion::error::Result<HybridCompoundQueryExec> {
+    /// # ) -> datafusion_common::Result<HybridCompoundQueryExec> {
     /// hybrid.with_indexed_input(merged, scorer)
     /// # }
     /// ```
@@ -617,7 +617,7 @@ impl HybridCompoundQueryExec {
     /// # use lance::io::exec::fts::HybridCompoundQueryExec;
     /// # use lance_index::scalar::inverted::MemBM25Scorer;
     /// # fn rebuild(exec: &HybridCompoundQueryExec)
-    /// #     -> datafusion::error::Result<HybridCompoundQueryExec> {
+    /// #     -> datafusion_common::Result<HybridCompoundQueryExec> {
     /// let rebuilt = HybridCompoundQueryExec::new(
     ///     exec.dataset().clone(), exec.query().clone(), exec.params().clone(),
     ///     exec.column().to_owned(), exec.segments().to_vec(),
@@ -716,7 +716,7 @@ impl ExecutionPlan for HybridCompoundQueryExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let dataset = self.dataset.clone();
         let query = self.query.clone();
@@ -750,11 +750,9 @@ impl ExecutionPlan for HybridCompoundQueryExec {
                     "FTS index for column {column} has no committed segments"
                 ))
             })?;
-            let field_id = dataset.schema().field_id(&column)?;
             let tokenizer = first_index.tokenizer();
             let doc_type = tokenizer.doc_type();
             let residual_seed = QueryLocalFtsIndex::try_with_loaded_tokenizer(
-                field_id,
                 column.clone(),
                 first_index.params().clone(),
                 tokenizer,
@@ -1079,7 +1077,7 @@ impl ExecutionPlan for CompoundQueryExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let dataset = self.dataset.clone();
         let query = self.query.clone();
@@ -1752,7 +1750,7 @@ impl ExecutionPlan for CrossColumnCompoundQueryExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<datafusion::execution::TaskContext>,
+        context: Arc<datafusion_execution::TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let dataset = self.dataset.clone();
         let query = self.query.clone();
@@ -1898,7 +1896,7 @@ impl ExecutionPlan for CrossColumnCompoundQueryExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use lance_index::scalar::inverted::builder::ScoredDoc;

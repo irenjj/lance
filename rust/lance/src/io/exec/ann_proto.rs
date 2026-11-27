@@ -267,8 +267,8 @@ pub async fn ann_ivf_sub_index_exec_to_proto(
 pub async fn ann_ivf_sub_index_exec_from_proto(
     proto: pb::AnnIvfSubIndexExecProto,
     dataset: Option<Arc<Dataset>>,
-    input: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
-    prefilter_input: Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+    input: Arc<dyn datafusion_physical_plan::ExecutionPlan>,
+    prefilter_input: Option<Arc<dyn datafusion_physical_plan::ExecutionPlan>>,
 ) -> Result<ANNIvfSubIndexExec> {
     let dataset = resolve_dataset(dataset, proto.table.as_ref()).await?;
 

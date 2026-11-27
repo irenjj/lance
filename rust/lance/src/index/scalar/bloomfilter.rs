@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-use datafusion::execution::SendableRecordBatchStream;
+use datafusion_execution::SendableRecordBatchStream;
 use lance_index::frag_reuse::CompactFragReuseIndex;
 use lance_index::scalar::CreatedIndex;
 use lance_index::scalar::bloomfilter::{

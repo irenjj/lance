@@ -38,7 +38,7 @@ impl FragmentSession {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use crate::Dataset;
     use crate::dataset::WriteParams;

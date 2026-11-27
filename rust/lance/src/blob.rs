@@ -21,7 +21,7 @@ pub use lance_table_runtime::blob::{
     ManagedBlobWriter, PackedBlobWriter, ReadBlobFile, ReadBlobFilesBuilder, ReadBlobFilesStream,
     blob_field, blob_field_with_options, read_blob_file_ranges, read_blob_files,
 };
-
+#[cfg(feature = "write")]
 pub(crate) use lance_table_runtime::blob::{
     BlobIdAllocator, blob_v2_layout, logical_to_prepared_blob_field,
     logical_to_prepared_blob_schema, prepared_to_descriptor_blob_schema,

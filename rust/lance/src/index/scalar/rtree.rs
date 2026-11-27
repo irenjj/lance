@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion_physical_plan::SendableRecordBatchStream;
 use lance_geo::rtree::RTreeIndex;
 use lance_index::progress::noop_progress;
 use lance_index::scalar::lance_format::LanceIndexStore;

@@ -25,18 +25,18 @@ use std::sync::Arc;
 use arrow_array::{Array, RecordBatch, UInt32Array, cast::AsArray, types::UInt64Type};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, SortOptions};
 use arrow_select::take::take_record_batch;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::TaskContext;
-use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::{
+use datafusion_common::ScalarValue;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_execution::TaskContext;
+use datafusion_physical_expr::PhysicalExpr;
+use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr, expressions::Column};
+use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
     execution_plan::{Boundedness, EmissionType},
     metrics::{Count, ExecutionPlanMetricsSet, MetricsSet},
 };
-use datafusion::scalar::ScalarValue;
-use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr, expressions::Column};
 use futures::{Stream, StreamExt, TryStreamExt, stream};
 use lance_core::{Error, ROW_ADDR_FIELD, Result, utils::address::RowAddress};
 use lance_datafusion::utils::{ExecutionPlanMetricsSetExt, ROWS_SCANNED_METRIC};
@@ -66,7 +66,7 @@ use crate::{Dataset, index::DatasetIndexInternalExt};
 /// ```
 /// # use std::sync::Arc;
 /// # use lance::deps::arrow_schema::SortOptions;
-/// # use lance::deps::datafusion::physical_plan::ExecutionPlan;
+/// # use datafusion_physical_plan::ExecutionPlan;
 /// # use lance::index::DatasetIndexExt;
 /// # use lance::io::exec::ordered_index_scan::OrderedIndexScanExec;
 /// # use lance::{Dataset, Result};
@@ -560,7 +560,7 @@ impl ExecutionPlan for OrderedIndexScanExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use std::cmp::Ordering;
     use std::collections::{HashMap, HashSet};

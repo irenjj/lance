@@ -1475,22 +1475,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_forced_sort_spill_is_collected() {
-        let batch = record_batch!(("x", Int32, (0..128).rev().collect::<Vec<i32>>())).unwrap();
-        let batches: Vec<_> = (0..128).map(|_| Ok(batch.clone())).collect();
+        let input_batches = 256;
+        let rows_per_batch = 128;
+        let batches: Vec<_> = (0..input_batches)
+            .map(|_| {
+                record_batch!((
+                    "x",
+                    Int32,
+                    (0..rows_per_batch as i32).rev().collect::<Vec<_>>()
+                ))
+            })
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let schema = batches[0].schema();
         let input = OneShotExec::new(Box::pin(RecordBatchStreamAdapter::new(
-            batch.schema(),
-            stream::iter(batches),
+            schema.clone(),
+            stream::iter(batches.into_iter().map(Ok)),
         )));
-        let ordering = LexOrdering::new([PhysicalSortExpr::new_default(
-            col("x", &batch.schema()).unwrap(),
-        )])
-        .unwrap();
+        let ordering =
+            LexOrdering::new([PhysicalSortExpr::new_default(col("x", &schema).unwrap())]).unwrap();
         let plan = Arc::new(SortExec::new(ordering, Arc::new(input)));
         let options = LanceExecutionOptions {
             use_spilling: true,
-            mem_pool_size: Some(64 * 1024),
+            mem_pool_size: Some(128 * 1024),
             target_partition: Some(1),
-            batch_size: Some(128),
+            batch_size: Some(rows_per_batch),
             ..Default::default()
         };
         let mut output = execute_plan(plan.clone(), options).unwrap();
@@ -1503,7 +1512,7 @@ mod tests {
             }
             rows += batch.num_rows();
         }
-        assert_eq!(rows, 128 * 128);
+        assert_eq!(rows, input_batches * rows_per_batch);
         let mut counts = ExecutionSummaryCounts::default();
         collect_execution_metrics(plan.as_ref(), &mut counts);
         assert!(counts.spill_count().unwrap() > 0);

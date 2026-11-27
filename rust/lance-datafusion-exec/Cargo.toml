@@ -26,7 +26,6 @@ futures.workspace = true
 half.workspace = true
 lance-arrow.workspace = true
 lance-core = { workspace = true, features = ["datafusion"] }
-lance-datagen = { workspace = true, optional = true }
 lance-io.workspace = true
 lance-jsonb.workspace = true
 log.workspace = true
@@ -36,11 +35,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 arrow-select.workspace = true
-lance-datagen.workspace = true
 rstest.workspace = true
-
-[features]
-datagen = ["dep:lance-datagen"]
 
 [lints]
 workspace = true

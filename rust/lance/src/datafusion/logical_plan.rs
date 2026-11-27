@@ -5,14 +5,12 @@ use std::{borrow::Cow, sync::Arc};
 
 use arrow_schema::Schema as ArrowSchema;
 use async_trait::async_trait;
-use datafusion::{
-    catalog::Session,
-    datasource::TableProvider,
-    error::Result as DatafusionResult,
-    logical_expr::{LogicalPlan, TableType},
-    physical_plan::ExecutionPlan,
-    prelude::Expr,
-};
+use datafusion_catalog::Session;
+use datafusion_catalog::TableProvider;
+use datafusion_common::Result as DatafusionResult;
+use datafusion_expr::Expr;
+use datafusion_expr::{LogicalPlan, TableType};
+use datafusion_physical_plan::ExecutionPlan;
 use lance_core::datatypes::{OnMissing, OnTypeMismatch};
 
 use crate::Dataset;
@@ -38,7 +36,7 @@ impl TableProvider for Dataset {
     async fn scan(
         &self,
         _: &dyn Session,
-        projection: Option<&Vec<usize>>,
+        projection: Option<&[usize]>,
         _: &[Expr],
         limit: Option<usize>,
     ) -> DatafusionResult<Arc<dyn ExecutionPlan>> {
@@ -68,7 +66,7 @@ impl TableProvider for Dataset {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use crate::{dataset::WriteParams, io::exec::LanceScanExec};

@@ -3,18 +3,26 @@
 
 //! Deletion vectors stored in the manifest instead of in `_deletions/` files.
 
+#[cfg(feature = "write")]
+use futures::{StreamExt, TryStreamExt};
+#[cfg(feature = "write")]
+use lance_core::Error;
+use lance_core::Result;
+#[cfg(feature = "write")]
 use std::sync::Arc;
 
-use futures::{StreamExt, TryStreamExt};
-use lance_core::{Error, Result};
-use lance_table::format::{DeletionFileType, Fragment};
-use lance_table::transaction::{Operation, Transaction};
-use roaring::RoaringBitmap;
-
+#[cfg(feature = "write")]
 use super::write::CommitBuilder;
 use crate::Dataset;
-use crate::io::deletion::read_dataset_deletion_file;
+#[cfg(feature = "write")]
+use lance_table::format::{DeletionFileType, Fragment};
+#[cfg(feature = "write")]
+use lance_table::transaction::{Operation, Transaction};
+#[cfg(feature = "write")]
+use roaring::RoaringBitmap;
 
+#[cfg(feature = "write")]
+use crate::io::deletion::read_dataset_deletion_file;
 pub use lance_table_runtime::io::deletion::INLINE_DELETIONS_MAX_BYTES_CONFIG_KEY;
 
 impl Dataset {
@@ -23,6 +31,7 @@ impl Dataset {
         lance_table_runtime::io::deletion::inline_deletions_max_bytes(&self.manifest)
     }
 
+    #[cfg(feature = "write")]
     /// Moves every deletion vector that fits the inline budget from its file
     /// into the manifest, in one commit, and returns how many fragments changed.
     ///
@@ -81,6 +90,7 @@ impl Dataset {
         Ok(changed)
     }
 
+    #[cfg(feature = "write")]
     /// `fragment` with its deletion vector moved inline when the bitmap
     /// encoding fits `max_bytes`, else `None`.
     async fn inline_fragment_deletions(
@@ -107,7 +117,7 @@ impl Dataset {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

@@ -10,25 +10,33 @@
 // These helpers stay crate-visible so callers do not depend on private parameter types.
 #![allow(clippy::redundant_pub_crate)]
 
-use std::collections::HashSet;
-
 use lance_index::registry::{
     plugin_name_from_details_url, scalar_index_details_are_known, scalar_index_version,
 };
+#[cfg(feature = "write")]
 use lance_index::scalar::btree::BTREE_LOOKUP_NAME;
 use lance_index::{INDEX_FILE_NAME, IndexType, pb::VectorIndexDetails};
-use lance_table::format::{IndexFile, IndexMetadata};
+#[cfg(feature = "write")]
+use lance_table::format::IndexFile;
+use lance_table::format::IndexMetadata;
 use lance_table::system_index::is_system_index;
 use prost::Name;
+#[cfg(feature = "write")]
+use std::collections::HashSet;
+
+#[cfg(feature = "write")]
+use crate::Error;
+use crate::Result;
+use crate::index::scalar::IndexDetails;
+#[cfg(feature = "write")]
 use roaring::RoaringBitmap;
 
-use crate::index::scalar::IndexDetails;
-use crate::{Error, Result};
-
+#[cfg(feature = "write")]
 pub(crate) fn retain_committed_inverted_files(files: &mut Vec<IndexFile>) {
     files.retain(|file| !lance_index::scalar::inverted::builder::is_staged_path(&file.path));
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn validate_segment_metadata(
     index_name: &str,
     segments: &[IndexMetadata],
@@ -98,6 +106,7 @@ pub(crate) fn validate_segment_params_compatible(
     plugin.validate_new_segments_against_existing(&existing_details, &incoming_details)
 }
 
+#[cfg(feature = "write")]
 /// Every segment of one commit must carry index details of the same type;
 /// whether their parameters are compatible is the plugin's call, see
 /// [`validate_segment_params_compatible`].
@@ -128,6 +137,7 @@ pub(crate) fn validate_segment_index_details(
     Ok(())
 }
 
+#[cfg(feature = "write")]
 /// Whether optimize can fold several segments of this kind into one without
 /// rescanning the table: the kinds the single-process optimize merges rather
 /// than rebuilds, vector, BTree, Bitmap, BloomFilter, NGram, MinHash LSH and RTree
@@ -142,7 +152,6 @@ pub(crate) fn segment_has_merge_primitive(segment: &IndexMetadata) -> bool {
         || segment_has_bloomfilter_details(segment)
         || segment_has_ngram_details(segment)
         || segment_has_minhashlsh_details(segment)
-        || (cfg!(feature = "geo") && segment_has_rtree_details(segment))
         || segment_has_inverted_details(segment)
         || segment_has_label_list_details(segment)
 }
@@ -189,13 +198,10 @@ pub(crate) fn index_details_have_reader(type_url: &str) -> bool {
     if scalar_index_details_are_known(type_url) {
         return true;
     }
-    #[cfg(feature = "geo")]
-    if details_type_name.eq_ignore_ascii_case(&lance_index::pb::RTreeIndexDetails::full_name()) {
-        return true;
-    }
     false
 }
 
+#[cfg(feature = "write")]
 /// Detect FTS / inverted segments from manifest details.
 ///
 /// Unlike vector, inverted segment support was added after index details were
@@ -207,6 +213,7 @@ pub(crate) fn segment_has_inverted_details(segment: &IndexMetadata) -> bool {
         .is_some_and(|details| details.type_url.ends_with("InvertedIndexDetails"))
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn segment_has_bitmap_details(segment: &IndexMetadata) -> bool {
     segment
         .index_details
@@ -214,6 +221,7 @@ pub(crate) fn segment_has_bitmap_details(segment: &IndexMetadata) -> bool {
         .is_some_and(|details| details.type_url.ends_with("BitmapIndexDetails"))
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn segment_has_bloomfilter_details(segment: &IndexMetadata) -> bool {
     segment
         .index_details
@@ -221,6 +229,7 @@ pub(crate) fn segment_has_bloomfilter_details(segment: &IndexMetadata) -> bool {
         .is_some_and(|details| details.type_url.ends_with("BloomFilterIndexDetails"))
 }
 
+#[cfg(feature = "write")]
 /// Detect BTree segments, preserving a legacy pre-details fallback.
 pub(crate) fn segment_has_btree_details(segment: &IndexMetadata) -> bool {
     segment.index_details.as_ref().map_or_else(
@@ -234,6 +243,7 @@ pub(crate) fn segment_has_btree_details(segment: &IndexMetadata) -> bool {
     )
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn segment_has_zonemap_details(segment: &IndexMetadata) -> bool {
     segment
         .index_details
@@ -241,6 +251,7 @@ pub(crate) fn segment_has_zonemap_details(segment: &IndexMetadata) -> bool {
         .is_some_and(|details| details.type_url.ends_with("ZoneMapIndexDetails"))
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn segment_has_fmindex_details(segment: &IndexMetadata) -> bool {
     segment
         .index_details
@@ -248,6 +259,7 @@ pub(crate) fn segment_has_fmindex_details(segment: &IndexMetadata) -> bool {
         .is_some_and(|details| details.type_url.ends_with("FMIndexDetails"))
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn segment_has_label_list_details(segment: &IndexMetadata) -> bool {
     segment
         .index_details
@@ -255,6 +267,7 @@ pub(crate) fn segment_has_label_list_details(segment: &IndexMetadata) -> bool {
         .is_some_and(|details| details.type_url.ends_with("LabelListIndexDetails"))
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn segment_has_rtree_details(segment: &IndexMetadata) -> bool {
     segment
         .index_details
@@ -262,6 +275,7 @@ pub(crate) fn segment_has_rtree_details(segment: &IndexMetadata) -> bool {
         .is_some_and(|details| details.type_url.ends_with("RTreeIndexDetails"))
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn segment_has_minhashlsh_details(segment: &IndexMetadata) -> bool {
     segment
         .index_details
@@ -269,6 +283,7 @@ pub(crate) fn segment_has_minhashlsh_details(segment: &IndexMetadata) -> bool {
         .is_some_and(|details| details.type_url.ends_with("MinHashLshIndexDetails"))
 }
 
+#[cfg(feature = "write")]
 pub(crate) fn segment_has_ngram_details(segment: &IndexMetadata) -> bool {
     segment
         .index_details
@@ -298,12 +313,7 @@ fn details_index_version(type_url: &str) -> Option<u32> {
         return Some(IndexType::max_vector_version());
     }
     let plugin_name = plugin_name_from_details_url(type_url);
-    let version = scalar_index_version(&plugin_name);
-    #[cfg(feature = "geo")]
-    if plugin_name == "rtree" {
-        return Some(lance_geo::rtree::RTREE_ROW_ADDR_DOMAIN_VERSION);
-    }
-    version
+    scalar_index_version(&plugin_name)
 }
 
 pub(crate) fn index_has_supported_field_dependencies(index: &IndexMetadata) -> bool {
@@ -364,10 +374,7 @@ mod tests {
     fn test_rtree_manifest_metadata_matches_registry() {
         let details = prost_types::Any::from_msg(&RTreeIndexDetails::default()).unwrap();
         let registry = &*SCALAR_INDEX_PLUGIN_REGISTRY;
-        assert_eq!(
-            index_details_have_reader(&details.type_url),
-            cfg!(feature = "geo")
-        );
+        assert!(!index_details_have_reader(&details.type_url));
         assert_eq!(
             details_index_version(&details.type_url),
             registry

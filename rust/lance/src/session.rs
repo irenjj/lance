@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
+#[cfg(feature = "write")]
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use datafusion::execution::context::SessionContext;
+use datafusion_session::Session as DataFusionSession;
 
+#[cfg(feature = "write")]
+use datafusion::execution::context::SessionContext;
 use lance_core::cache::{
     CacheBackend, CacheDiagnostics, CacheMetricsKind, CacheSnapshotMode, LanceCache,
     QuickCacheBackend, QuickCacheShardPolicy,
@@ -107,9 +110,7 @@ pub struct Session {
     /// Optional runtime strategy, rebound for each opened index.
     pub(crate) rabit_scan_factory: Option<Arc<dyn RabitScanFactory>>,
 
-    /// See [`Self::with_datafusion_session`]. Held type-erased so that proving
-    /// `Session: Send + Sync` does not walk DataFusion's plan types.
-    datafusion_session: Option<Arc<dyn Any + Send + Sync>>,
+    datafusion_session: Option<Arc<dyn DataFusionSession>>,
 }
 
 impl DeepSizeOf for Session {
@@ -346,17 +347,15 @@ impl Session {
 
     /// Attach a DataFusion session for planning expressions over this
     /// session's datasets, e.g. with
-    /// [`lance_datafusion::planner::Planner::new_with_session`].
-    pub fn with_datafusion_session(mut self, session: SessionContext) -> Self {
-        self.datafusion_session = Some(Arc::new(session));
+    /// [`lance_datafusion::planner::Planner::new_with_functions`].
+    pub fn with_datafusion_session(mut self, session: Arc<dyn DataFusionSession>) -> Self {
+        self.datafusion_session = Some(session);
         self
     }
 
     /// The session set by [`Self::with_datafusion_session`], if any.
-    pub fn datafusion_session(&self) -> Option<&SessionContext> {
-        self.datafusion_session
-            .as_ref()
-            .and_then(|session| session.downcast_ref())
+    pub fn datafusion_session(&self) -> Option<&dyn DataFusionSession> {
+        self.datafusion_session.as_deref()
     }
 
     /// Return a reference to the session's spill store.
@@ -641,7 +640,7 @@ impl Default for Session {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use lance_core::cache::{CacheKey, UnsizedCacheKey};

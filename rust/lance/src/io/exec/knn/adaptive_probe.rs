@@ -29,7 +29,7 @@
 
 use std::env;
 
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
 use lance_index::vector::{Query, VectorIndex};
 use lance_linalg::distance::DistanceType;
 

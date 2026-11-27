@@ -11,6 +11,14 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+async-trait = { workspace = true, optional = true }
+datafusion-catalog = { workspace = true, optional = true }
+datafusion-common = { workspace = true, optional = true }
+datafusion-execution = { workspace = true, optional = true }
+datafusion-expr = { workspace = true, optional = true }
+datafusion-physical-expr = { workspace = true, optional = true }
+datafusion-physical-plan = { workspace = true, optional = true }
+datafusion-session = { workspace = true, optional = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 rand = { workspace = true }
@@ -23,3 +31,15 @@ pprof = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+datafusion = [
+    "dep:async-trait",
+    "dep:datafusion-catalog",
+    "dep:datafusion-common",
+    "dep:datafusion-execution",
+    "dep:datafusion-expr",
+    "dep:datafusion-physical-expr",
+    "dep:datafusion-physical-plan",
+    "dep:datafusion-session",
+]

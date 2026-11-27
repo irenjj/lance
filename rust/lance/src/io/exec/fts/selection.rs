@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::physical_plan::metrics::{
+use datafusion_common::{DataFusionError, Result as DataFusionResult};
+use datafusion_physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, Gauge, Time,
 };
 use lance_datafusion::utils::{

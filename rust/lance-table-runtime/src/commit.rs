@@ -28,7 +28,7 @@ pub use create::{assign_new_table_field_ids, commit_new_dataset};
 #[doc(hidden)]
 pub use hooks::{CommitHooks, CommitLifecycleHook};
 #[doc(hidden)]
-pub use index::load_all_indices;
+pub use index::{LegacyIndexDetails, load_all_indices, load_indices_with_legacy_details};
 #[doc(hidden)]
 pub use migration::{
     BadFragmentBitmapError, detect_overlapping_fragments, fix_schema, manifest_needs_migration,

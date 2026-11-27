@@ -74,6 +74,7 @@ fn training_sample_readahead(
     Ok(io_parallelism.min((prefetch_budget / TRAINING_SAMPLE_BATCH_BYTES).max(1)))
 }
 
+#[cfg(feature = "write")]
 /// Sets how many consecutive rows each random draw of a FixedSizeList IVF
 /// training sample reads. Unset or `1` samples rows independently. A larger
 /// value reads the same number of rows as contiguous runs, which object storage
@@ -82,6 +83,7 @@ fn training_sample_readahead(
 /// runs, so they always draw independent rows.
 const IVF_TRAINING_SAMPLE_BLOCK_ROWS_ENV: &str = "LANCE_IVF_TRAINING_SAMPLE_BLOCK_ROWS";
 
+#[cfg(feature = "write")]
 /// Parse the value of [`IVF_TRAINING_SAMPLE_BLOCK_ROWS_ENV`]; `None` means unset.
 fn parse_ivf_training_sample_block_rows(raw: Option<&str>) -> Result<usize> {
     let Some(raw) = raw else {
@@ -97,6 +99,7 @@ fn parse_ivf_training_sample_block_rows(raw: Option<&str>) -> Result<usize> {
         })
 }
 
+#[cfg(feature = "write")]
 fn ivf_training_sample_block_rows() -> Result<usize> {
     parse_ivf_training_sample_block_rows(
         std::env::var(IVF_TRAINING_SAMPLE_BLOCK_ROWS_ENV)
@@ -363,6 +366,7 @@ pub async fn maybe_sample_training_data(
     sample_or_scan_training_data(dataset, column, sample_size_hint, fragment_ids, 1).await
 }
 
+#[cfg(feature = "write")]
 /// [`maybe_sample_training_data`] for the IVF centroid sample, which honors
 /// [`IVF_TRAINING_SAMPLE_BLOCK_ROWS_ENV`].
 pub(crate) async fn maybe_sample_ivf_training_data(
@@ -446,6 +450,7 @@ async fn sample_or_scan_training_data(
     }
 }
 
+#[cfg(feature = "write")]
 /// Sample `sample_size` non-null vectors from a FixedSizeList column, drawing
 /// only rows that no earlier call sharing `drawn_offsets` drew.
 ///
@@ -1454,7 +1459,7 @@ fn random_ranges(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

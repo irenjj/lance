@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion_physical_plan::SendableRecordBatchStream;
 use lance_index::frag_reuse::CompactFragReuseIndexHandle;
 use lance_index::metrics::NoOpMetricsCollector;
 use lance_index::progress::NoopIndexBuildProgress;

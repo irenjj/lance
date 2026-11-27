@@ -17,7 +17,6 @@ lance-core.workspace = true
 lance-encoding.workspace = true
 lance-file.workspace = true
 lance-io.workspace = true
-lance-namespace.workspace = true
 lance-select.workspace = true
 lance-table.workspace = true
 arrow-array.workspace = true
@@ -52,13 +51,13 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-lance-datagen.workspace = true
 lance-io = { workspace = true, features = ["test-util"] }
 rstest.workspace = true
 tempfile.workspace = true
 
 [features]
 default = []
+write = []
 test-util = []
 aws = ["lance-io/aws"]
 azure = ["lance-io/azure"]
