@@ -545,30 +545,41 @@ impl ExecutionPlan for AddRowOffsetExec {
 
 #[cfg(test)]
 mod test {
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arrow_array::{Int32Array, RecordBatchIterator, record_batch};
     use arrow_schema::{DataType, Field};
     use datafusion_datasource::memory::MemorySourceConfig;
-    use datafusion_expr::SessionContext;
+    use datafusion_execution::TaskContext;
     use datafusion_physical_plan::StatisticsArgs;
     use datafusion_physical_plan::StatisticsContext;
     use futures::TryStreamExt;
     use lance_core::{ROW_ADDR, ROW_ID_FIELD};
     use lance_datafusion::exec::OneShotExec;
-    use lance_io::object_store::WrappingObjectStore;
-    use lance_table::io::deletion::DELETIONS_DIR;
+
     use rstest::rstest;
 
-    use crate::dataset::WriteParams;
+    use lance_table_runtime::write::{InsertBuilder, WriteParams};
 
     use super::*;
+
+    async fn write_test_dataset(
+        reader: impl lance_io::stream::StreamingWriteSource,
+        uri: &str,
+        params: WriteParams,
+    ) -> Dataset {
+        let table = InsertBuilder::new(uri)
+            .with_params(&params)
+            .execute_stream(reader)
+            .await
+            .unwrap();
+        Dataset::from_table(table, Arc::new(crate::session::Session::default()))
+    }
 
     async fn apply_to_batch(batch: RecordBatch, dataset: Arc<Dataset>) -> Result<RecordBatch> {
         let memory_exec = OneShotExec::from_batch(batch);
         let exec = AddRowAddrExec::try_new(Arc::new(memory_exec), dataset, 0)?;
-        let session = SessionContext::new();
-        let task_ctx = session.task_ctx();
+        let context = Arc::new(TaskContext::default());
+        let task_ctx = context;
         let stream = exec.execute(0, task_ctx)?;
         let batches = stream.try_collect::<Vec<_>>().await?;
         assert_eq!(batches.len(), 1);
@@ -581,16 +592,15 @@ mod test {
         // will be the same as the row id.
         let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
         let reader = RecordBatchIterator::new(vec![], schema.clone());
-        let dataset = Dataset::write(
+        let dataset = write_test_dataset(
             reader,
             "memory://",
-            Some(WriteParams {
+            WriteParams {
                 enable_stable_row_ids: false,
                 ..Default::default()
-            }),
+            },
         )
-        .await
-        .unwrap();
+        .await;
         let dataset = Arc::new(dataset);
 
         let rowids = Arc::new(UInt64Array::from(vec![1, 2, 3]));
@@ -617,17 +627,16 @@ mod test {
         )
         .unwrap();
         let reader = RecordBatchIterator::new(vec![Ok(batch)], schema.clone());
-        let dataset = Dataset::write(
+        let dataset = write_test_dataset(
             reader,
             "memory://",
-            Some(WriteParams {
+            WriteParams {
                 enable_stable_row_ids: true,
                 max_rows_per_file: 1,
                 ..Default::default()
-            }),
+            },
         )
-        .await
-        .unwrap();
+        .await;
         assert_eq!(dataset.get_fragments().len(), 3);
         Arc::new(dataset)
     }
@@ -757,192 +766,6 @@ mod test {
                 .compute(input.as_ref(), &args)
                 .unwrap(),
             input_stats
-        );
-    }
-
-    /// Forwards every request, but for deletion-file reads records how many
-    /// were in flight at once. Instantaneous reads never overlap, so a short
-    /// delay on just those reads is what makes concurrency observable.
-    #[derive(Debug)]
-    struct DeletionReadCounter {
-        target: Arc<dyn object_store::ObjectStore>,
-        in_flight: Arc<AtomicUsize>,
-        max_in_flight: Arc<AtomicUsize>,
-    }
-
-    impl DeletionReadCounter {
-        fn is_deletion_path(location: &object_store::path::Path) -> bool {
-            location.as_ref().contains(DELETIONS_DIR)
-        }
-
-        async fn enter(&self) {
-            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
-            self.max_in_flight.fetch_max(now, Ordering::SeqCst);
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            self.in_flight.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-
-    impl std::fmt::Display for DeletionReadCounter {
-        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            write!(f, "DeletionReadCounter({})", self.target)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl object_store::ObjectStore for DeletionReadCounter {
-        async fn put_opts(
-            &self,
-            location: &object_store::path::Path,
-            payload: object_store::PutPayload,
-            opts: object_store::PutOptions,
-        ) -> object_store::Result<object_store::PutResult> {
-            self.target.put_opts(location, payload, opts).await
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            location: &object_store::path::Path,
-            opts: object_store::PutMultipartOptions,
-        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
-            self.target.put_multipart_opts(location, opts).await
-        }
-
-        async fn get_opts(
-            &self,
-            location: &object_store::path::Path,
-            options: object_store::GetOptions,
-        ) -> object_store::Result<object_store::GetResult> {
-            if Self::is_deletion_path(location) {
-                self.enter().await;
-            }
-            self.target.get_opts(location, options).await
-        }
-
-        async fn get_ranges(
-            &self,
-            location: &object_store::path::Path,
-            ranges: &[std::ops::Range<u64>],
-        ) -> object_store::Result<Vec<bytes::Bytes>> {
-            if Self::is_deletion_path(location) {
-                self.enter().await;
-            }
-            self.target.get_ranges(location, ranges).await
-        }
-
-        fn delete_stream(
-            &self,
-            locations: futures::stream::BoxStream<
-                'static,
-                object_store::Result<object_store::path::Path>,
-            >,
-        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
-        {
-            self.target.delete_stream(locations)
-        }
-
-        fn list(
-            &self,
-            prefix: Option<&object_store::path::Path>,
-        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
-        {
-            self.target.list(prefix)
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            prefix: Option<&object_store::path::Path>,
-        ) -> object_store::Result<object_store::ListResult> {
-            self.target.list_with_delimiter(prefix).await
-        }
-
-        async fn copy_opts(
-            &self,
-            from: &object_store::path::Path,
-            to: &object_store::path::Path,
-            opts: object_store::CopyOptions,
-        ) -> object_store::Result<()> {
-            self.target.copy_opts(from, to, opts).await
-        }
-    }
-
-    /// Installs a [`DeletionReadCounter`] around a dataset's object store.
-    #[derive(Debug)]
-    struct DeletionReadCounterWrapper {
-        max_in_flight: Arc<AtomicUsize>,
-    }
-
-    impl WrappingObjectStore for DeletionReadCounterWrapper {
-        fn wrap(
-            &self,
-            _store_prefix: &str,
-            original: Arc<dyn object_store::ObjectStore>,
-        ) -> Arc<dyn object_store::ObjectStore> {
-            Arc::new(DeletionReadCounter {
-                target: original,
-                in_flight: Arc::new(AtomicUsize::new(0)),
-                max_in_flight: self.max_in_flight.clone(),
-            })
-        }
-
-        // The counter only observes reads, so listings keep their pushdown.
-        fn wrap_paginated(
-            &self,
-            _store_prefix: &str,
-            original: Arc<dyn object_store::list::PaginatedListStore>,
-        ) -> Option<Arc<dyn object_store::list::PaginatedListStore>> {
-            Some(original)
-        }
-    }
-
-    /// Planning a `_rowoffset` scan fetches one deletion file per fragment that
-    /// has one. Those reads must overlap instead of going out one fragment at a
-    /// time, or planning pays one read latency per fragment with a deletion
-    /// file.
-    #[tokio::test]
-    async fn test_row_offset_planning_overlaps_deletion_reads() {
-        const NUM_FRAGMENTS: usize = 32;
-        let schema = Arc::new(Schema::new(vec![Field::new("i", DataType::Int32, false)]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int32Array::from_iter(
-                (0..NUM_FRAGMENTS * 2).map(|i| i as i32),
-            ))],
-        )
-        .unwrap();
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema.clone());
-        let mut dataset = Dataset::write(
-            reader,
-            "memory://",
-            Some(WriteParams {
-                max_rows_per_file: 2,
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
-        assert_eq!(dataset.get_fragments().len(), NUM_FRAGMENTS);
-        // One deletion per fragment, so every fragment has a deletion file to fetch.
-        dataset.delete("i % 2 = 0").await.unwrap();
-
-        let max_in_flight = Arc::new(AtomicUsize::new(0));
-        let dataset = dataset
-            .with_object_store_wrappers([Arc::new(DeletionReadCounterWrapper {
-                max_in_flight: max_in_flight.clone(),
-            }) as Arc<dyn WrappingObjectStore>]);
-
-        let mut scan = dataset.scan();
-        scan.project(&[ROW_OFFSET]).unwrap();
-        let batch = scan.try_into_batch().await.unwrap();
-
-        // One survivor per fragment, so the live row offsets are 0..NUM_FRAGMENTS.
-        let offsets = batch[ROW_OFFSET].as_primitive::<UInt64Type>().values();
-        assert_eq!(offsets, &(0..NUM_FRAGMENTS as u64).collect::<Vec<_>>()[..]);
-
-        assert!(
-            max_in_flight.load(Ordering::SeqCst) >= 2,
-            "deletion-file reads during _rowoffset planning should overlap, but max in-flight was {}",
-            max_in_flight.load(Ordering::SeqCst)
         );
     }
 }

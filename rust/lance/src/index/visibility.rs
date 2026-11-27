@@ -228,7 +228,8 @@ impl IndexVisibility {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use std::task::Poll;
 

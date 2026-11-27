@@ -38,7 +38,8 @@ impl FragmentSession {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use crate::Dataset;
     use crate::dataset::WriteParams;

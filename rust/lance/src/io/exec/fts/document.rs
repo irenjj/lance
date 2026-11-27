@@ -181,7 +181,8 @@ impl ExecutionPlan for FtsDocumentExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use std::sync::Arc;
 

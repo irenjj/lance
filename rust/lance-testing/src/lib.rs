@@ -5,3 +5,6 @@ pub mod datagen;
 #[cfg(target_os = "linux")]
 pub mod pprof;
 pub mod progress;
+
+#[cfg(feature = "datafusion")]
+pub mod datafusion;

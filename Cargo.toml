@@ -133,22 +133,22 @@ criterion = { version = "0.8.2", features = [
 crossbeam-queue = "0.3"
 crossbeam-skiplist = "0.1"
 dashmap = "6"
-datafusion-common = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/common", default-features = false }
-datafusion-common-runtime = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/common-runtime", default-features = false }
-datafusion-expr = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/expr", default-features = false }
-datafusion-execution = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/execution", default-features = false }
-datafusion-session = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/session", default-features = false }
-datafusion-catalog = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/catalog", default-features = false }
-datafusion-datasource = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/datasource", default-features = false }
-datafusion-functions = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/functions", default-features = false, features = ["crypto_expressions", "datetime_expressions", "encoding_expressions", "math_expressions", "regex_expressions", "string_expressions", "unicode_expressions"] }
-datafusion-functions-nested = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/functions-nested", default-features = false }
-datafusion-functions-aggregate = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/functions-aggregate", default-features = false }
-datafusion-functions-window = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/functions-window", default-features = false }
-datafusion-physical-expr = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/physical-expr", default-features = false }
-datafusion-physical-optimizer = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/physical-optimizer", default-features = false }
-datafusion-physical-plan = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/physical-plan", default-features = false }
-datafusion-optimizer = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/optimizer", default-features = false }
-datafusion-sql = { path = "/home/renjj/.paseo/worktrees/0k1e574a/df-lake-plan/datafusion/sql", default-features = false }
+datafusion-common = { version = "57.0.0-dev", default-features = false }
+datafusion-common-runtime = { version = "57.0.0-dev", default-features = false }
+datafusion-expr = { version = "57.0.0-dev", default-features = false }
+datafusion-execution = { version = "57.0.0-dev", default-features = false }
+datafusion-session = { version = "57.0.0-dev", default-features = false }
+datafusion-catalog = { version = "57.0.0-dev", default-features = false }
+datafusion-datasource = { version = "57.0.0-dev", default-features = false }
+datafusion-functions = { version = "57.0.0-dev", default-features = false, features = ["crypto_expressions", "datetime_expressions", "encoding_expressions", "math_expressions", "regex_expressions", "string_expressions", "unicode_expressions"] }
+datafusion-functions-nested = { version = "57.0.0-dev", default-features = false }
+datafusion-functions-aggregate = { version = "57.0.0-dev", default-features = false }
+datafusion-functions-window = { version = "57.0.0-dev", default-features = false }
+datafusion-physical-expr = { version = "57.0.0-dev", default-features = false }
+datafusion-physical-optimizer = { version = "57.0.0-dev", default-features = false }
+datafusion-physical-plan = { version = "57.0.0-dev", default-features = false }
+datafusion-optimizer = { version = "57.0.0-dev", default-features = false }
+datafusion-sql = { version = "57.0.0-dev", default-features = false }
 dirs = "6.0.0"
 either = "1.0"
 env_logger = "0.11.7"

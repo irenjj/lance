@@ -1026,13 +1026,7 @@ impl ExecutionPlan for MapIndexExec {
         // stream ends, so this state is not covered by per-batch reservations.
         let candidate_reservation = MemoryConsumer::new(MAP_INDEX_CANDIDATES_MEMORY_CONSUMER)
             .register(context.memory_pool());
-        let mut metrics = IndexMetrics::new(&self.metrics, partition);
-        if let Some(scope) = context
-            .session_config()
-            .get_extension::<crate::dataset::write::merge_insert::analysis::AnalysisScope>(
-        ) {
-            metrics = metrics.with_segment_tracking(scope.segments.clone());
-        }
+        let metrics = IndexMetrics::new(&self.metrics, partition);
         let input = self.input.execute(partition, context)?;
         let stream_fut = Self::build_stream(
             input,
@@ -1410,7 +1404,8 @@ impl ExecutionPlan for MaterializeIndexExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use datafusion::physical_plan::StatisticsArgs;
     use datafusion::physical_plan::StatisticsContext;

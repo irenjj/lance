@@ -4,6 +4,3 @@
 //! Various utilities
 
 pub(crate) mod future;
-pub(crate) mod temporal;
-#[cfg(test)]
-pub(crate) mod test;

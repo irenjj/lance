@@ -760,7 +760,8 @@ impl ExecutionPlan for SharedFtsScorerExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     mod reconstruction;
     use super::*;

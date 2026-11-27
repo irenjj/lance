@@ -6,9 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion_execution::SendableRecordBatchStream;
-use lance_index::{
-    FtsPrewarmResult, IndexParams, IndexType, PrewarmOptions, optimize::OptimizeOptions,
-};
+use lance_index::{FtsPrewarmResult, PrewarmOptions};
 use lance_table::format::IndexMetadata;
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
@@ -134,10 +132,6 @@ impl IndexSegment {
         &self.fragment_bitmap
     }
 
-    pub(crate) fn fragment_bitmap_mut(&mut self) -> &mut RoaringBitmap {
-        &mut self.fragment_bitmap
-    }
-
     /// Return the field IDs whose values are encoded in this segment, besides any
     /// that only [`Self::covering_fields`] lists.
     pub fn fields(&self) -> &[i32] {
@@ -164,12 +158,6 @@ impl IndexSegment {
             [only] => Some(*only),
             _ => None,
         }
-    }
-
-    pub(crate) fn declares_same_fields(&self, other: &Self) -> bool {
-        IndexMetadata::keyed_fields_of(&self.fields, &self.covering_fields)
-            == IndexMetadata::keyed_fields_of(&other.fields, &other.covering_fields)
-            && self.covering_fields == other.covering_fields
     }
 
     /// Return the serialized index details for this segment.
@@ -218,6 +206,7 @@ pub trait IntoIndexSegment {
 }
 
 impl IndexSegment {
+    #[cfg(test)]
     /// The segment as index metadata under `name`, for machinery that works
     /// on manifest entries (the commit-time replay). Files are not carried:
     /// the commit collects them from the index directory.
@@ -277,38 +266,6 @@ impl IntoIndexSegment for IndexMetadata {
 /// Extends [`crate::Dataset`] with secondary index APIs.
 #[async_trait]
 pub trait DatasetIndexExt {
-    type IndexBuilder<'a>
-    where
-        Self: 'a;
-
-    /// Create a builder for creating an index on columns.
-    ///
-    /// This returns a builder that can be configured with additional options
-    /// like `name()`, `replace()`, and `train()` before awaiting to execute.
-    fn create_index_builder<'a>(
-        &'a mut self,
-        columns: &'a [&'a str],
-        index_type: IndexType,
-        params: &'a dyn IndexParams,
-    ) -> Self::IndexBuilder<'a>;
-
-    /// Create indices on columns.
-    ///
-    /// Upon finish, a new dataset version is generated.
-    async fn create_index(
-        &mut self,
-        columns: &[&str],
-        index_type: IndexType,
-        name: Option<String>,
-        params: &dyn IndexParams,
-        replace: bool,
-    ) -> Result<IndexMetadata>;
-
-    /// Drop indices by name.
-    ///
-    /// Upon finish, a new dataset version is generated.
-    async fn drop_index(&mut self, name: &str) -> Result<()>;
-
     /// Prewarm an index by name.
     ///
     /// This will load the index into memory and cache it.
@@ -434,9 +391,6 @@ pub trait DatasetIndexExt {
         criteria: lance_index::IndexCriteria<'b>,
     ) -> Result<Option<IndexMetadata>>;
 
-    /// Optimize indices.
-    async fn optimize_indices(&mut self, options: &OptimizeOptions) -> Result<()>;
-
     /// Find an index with the given name and return its serialized statistics.
     async fn index_statistics(&self, index_name: &str) -> Result<String>;
 
@@ -495,46 +449,6 @@ pub trait DatasetIndexExt {
                 .to_owned(),
         ))
     }
-
-    /// Merge one or more existing uncommitted index segments into a single uncommitted segment.
-    async fn merge_existing_index_segments(
-        &self,
-        source_segments: Vec<IndexMetadata>,
-    ) -> Result<IndexMetadata>;
-
-    /// Commit one or more existing physical index segments as a logical index.
-    ///
-    /// `column` names the first field in each segment. Built-in indices require
-    /// exactly one keyed field. A registered scalar plugin that returns `false`
-    /// from [`ScalarIndexPlugin::supports_optimization`](lance_index::scalar::registry::ScalarIndexPlugin::supports_optimization) may declare multiple
-    /// distinct field IDs if its fragment bitmap and covering fields are empty.
-    /// The plugin builds and refreshes its own payload; this does not enable
-    /// multi-column training through [`Self::create_index_builder`].
-    ///
-    /// For such plugins, declare every input, grouping, and predicate dependency
-    /// in `fields`, in a stable order with `column` first. This order is persisted unchanged
-    /// and must match across all segments and replacements of the same name.
-    /// Deleting any declared field removes the index; changing its type requires
-    /// dropping the index first. Renaming a field preserves its ID and the index.
-    /// Scope semantics and payload coverage remain the plugin's responsibility.
-    /// Discover these indices by name or with unfiltered [`Self::describe_indices`];
-    /// single-column query lookup does not select them.
-    ///
-    /// ```
-    /// # use lance::{Dataset, Result, index::{DatasetIndexExt, IndexSegment}};
-    /// # async fn commit(dataset: &mut Dataset, segment: IndexSegment) -> Result<()> {
-    /// // An externally built segment can declare [user_id, country] field IDs
-    /// // for a profile of user_id grouped by country, with an empty bitmap.
-    /// dataset.commit_existing_index_segments("users_by_country", "user_id", vec![segment]).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    async fn commit_existing_index_segments(
-        &mut self,
-        index_name: &str,
-        column: &str,
-        segments: Vec<impl IntoIndexSegment + Send>,
-    ) -> Result<()>;
 
     async fn read_index_partition(
         &self,

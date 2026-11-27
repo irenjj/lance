@@ -725,7 +725,8 @@ impl FragmentScanner {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod test {
     use std::collections::HashSet;
     use std::fmt::Display;

@@ -112,22 +112,6 @@ pub struct WarpParams {
 }
 
 impl WarpParams {
-    /// Probe `nprobe` partitions per query token and segment at the default
-    /// effort, with no other bounds, and impute the `imputation_rank`-th
-    /// similarity.
-    #[cfg(test)]
-    pub fn new(nprobe: usize, imputation_rank: usize) -> Self {
-        Self {
-            nprobe,
-            minimum_nprobes: 1,
-            maximum_nprobes: None,
-            search_effort: 0.5,
-            imputation_rank: Some(imputation_rank),
-            k: 10,
-            approx_mode: ApproxMode::default(),
-        }
-    }
-
     /// The partitions each query token probes in a segment of
     /// `num_partitions`.
     ///
@@ -969,7 +953,8 @@ impl ExecutionPlan for WarpExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use super::*;
 

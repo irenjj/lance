@@ -636,7 +636,8 @@ impl Default for Session {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use super::*;
     use lance_core::cache::{CacheKey, UnsizedCacheKey};

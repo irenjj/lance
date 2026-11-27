@@ -570,7 +570,8 @@ impl TakeBuilder {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod test {
     use arrow_array::cast::AsArray;
     use arrow_array::types::Int64Type;

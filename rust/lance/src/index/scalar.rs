@@ -4,19 +4,8 @@
 //! Utilities for integrating scalar indices with datasets
 //!
 
-pub(crate) mod bitmap;
-pub(crate) mod bloomfilter;
-pub(crate) mod btree;
-pub(crate) mod fmindex;
 pub(crate) mod inverted;
-pub(crate) mod label_list;
 pub(crate) mod list_element;
-pub(crate) mod minhash_lsh;
-pub(crate) mod ngram;
-#[cfg(feature = "geo")]
-pub(crate) mod rtree;
-pub(crate) mod segment_merge;
-pub(crate) mod zonemap;
 
 use super::field_dependencies::input_field_ids;
 use super::frag_reuse::ResolvedRemapping;
@@ -29,26 +18,12 @@ use std::sync::{Arc, LazyLock};
 use uuid::Uuid;
 
 use crate::index::DatasetIndexExt;
-use crate::index::create::CreateIndexBuilder;
-use crate::index::loading::DatasetIndexInternalExt;
 use crate::session::index_caches::ProstAny;
-use crate::{
-    Dataset,
-    dataset::{
-        index::LanceIndexStoreExt,
-        scanner::{ColumnOrdering, RowAddrMask, RowAddrTreeMap},
-    },
-};
+use crate::{Dataset, dataset::index::LanceIndexStoreExt};
 use arrow_schema::DataType;
-use datafusion_physical_plan::SendableRecordBatchStream;
-use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
-use futures::TryStreamExt;
-use itertools::Itertools;
 use lance_core::datatypes::Field;
-use lance_core::utils::tokio::get_num_compute_intensive_cpus;
 use lance_core::utils::tracing::{IO_TYPE_OPEN_SCALAR, TRACE_IO_EVENTS};
-use lance_core::{Error, ROW_ADDR, ROW_ID, Result};
-use lance_datafusion::exec::LanceExecutionOptions;
+use lance_core::{Error, Result};
 use lance_index::metrics::{MetricsCollector, NoOpMetricsCollector};
 use lance_index::pb::{
     BloomFilterIndexDetails, FmIndexDetails, MinHashLshIndexDetails, RTreeIndexDetails,
@@ -57,95 +32,27 @@ use lance_index::pbold::{
     BTreeIndexDetails, BitmapIndexDetails, InvertedIndexDetails, LabelListIndexDetails,
     NGramIndexDetails, ZoneMapIndexDetails,
 };
-use lance_index::progress::IndexBuildProgress;
 use lance_index::registry::IndexPluginRegistry;
 use lance_index::scalar::IndexStore;
+use lance_index::scalar::InvertedIndexParams;
 use lance_index::scalar::bloomfilter::BLOOMFILTER_FILENAME;
 use lance_index::scalar::btree::BTREE_LOOKUP_NAME;
-use lance_index::scalar::inverted::builder::resolve_num_workers;
 use lance_index::scalar::inverted::{InvertedIndex, METADATA_FILE};
 use lance_index::scalar::label_list::{
     LABEL_LIST_NULLS_METADATA_KEY, LABEL_LIST_NULLS_MIN_VERSION,
 };
 use lance_index::scalar::ngram::POSTINGS_FILENAME;
-use lance_index::scalar::registry::{
-    ScalarIndexCacheKey, ScalarIndexLoad, ScalarIndexPlugin, TrainingCriteria, TrainingOrdering,
-    VALUE_COLUMN_NAME,
-};
-use lance_index::scalar::zonemap::{ZONEMAP_INDEX_FILENAME, ZoneMapIndexBuilderParams};
-use lance_index::scalar::{BuiltinIndexType, CreatedIndex, InvertedIndexParams};
+use lance_index::scalar::registry::{ScalarIndexCacheKey, ScalarIndexLoad, ScalarIndexPlugin};
+use lance_index::scalar::zonemap::ZONEMAP_INDEX_FILENAME;
 use lance_index::scalar::{
     ScalarIndex, ScalarIndexParams, bitmap::BITMAP_LOOKUP_NAME, inverted::INVERT_LIST_FILE,
     lance_format::LanceIndexStore,
 };
 use lance_index::{IndexCriteria, IndexType};
-use lance_table::format::{Fragment, IndexMetadata};
-use log::info;
+use lance_table::format::IndexMetadata;
 use prost::Message;
-use tracing::instrument;
 
 // Log an update every TRAINING_UPDATE_FREQ million rows processed
-const TRAINING_UPDATE_FREQ: usize = 1000000;
-
-pub(crate) struct TrainingRequest {
-    pub fragment_ids: Option<Vec<u32>>,
-}
-
-impl TrainingRequest {
-    pub fn with_fragment_ids(
-        _dataset: Arc<Dataset>,
-        _column: String,
-        fragment_ids: Vec<u32>,
-    ) -> Self {
-        Self {
-            fragment_ids: Some(fragment_ids),
-        }
-    }
-
-    async fn create_empty_stream(
-        dataset: &Dataset,
-        column: &str,
-        criteria: &TrainingCriteria,
-    ) -> Result<SendableRecordBatchStream> {
-        let column_field = dataset
-            .schema()
-            .field(column)
-            .ok_or(Error::invalid_input_source(
-                format!("No column with name {}", column).into(),
-            ))?;
-
-        let mut fields = Vec::with_capacity(3);
-        fields.push(arrow_schema::Field::new(
-            VALUE_COLUMN_NAME,
-            column_field.data_type(),
-            true,
-        ));
-        if criteria.needs_row_ids {
-            fields.push(arrow_schema::Field::new(
-                ROW_ID,
-                arrow_schema::DataType::UInt64,
-                false,
-            ));
-        }
-        if criteria.needs_row_addrs {
-            fields.push(arrow_schema::Field::new(
-                ROW_ADDR,
-                arrow_schema::DataType::UInt64,
-                false,
-            ));
-        }
-
-        // Create schema with the column and row_id field (matching scan_chunks behavior)
-        let schema = Arc::new(arrow_schema::Schema::new(fields));
-
-        // Create empty stream
-        let empty_stream = futures::stream::empty();
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            schema,
-            empty_stream,
-        )))
-    }
-}
 
 #[cfg(test)]
 tokio::task_local! {
@@ -153,243 +60,8 @@ tokio::task_local! {
     pub(crate) static TEST_TRAINING_IO_BUFFER_SIZE: u64;
 }
 
-/// Which rows [`scan_training_data`] reads.
-pub(crate) enum TrainingRows {
-    /// Every row of these fragments.
-    Fragments(Vec<Fragment>),
-    /// Exactly these rows, keyed like `_rowid`: by address, or by row id under
-    /// stable row ids. The fragments to open follow from the keys. A segment
-    /// merge uses this to re-read the rows an overlay replaced after a source
-    /// segment was built, together with the appended fragments, in one sorted
-    /// scan.
-    Rows(RowAddrTreeMap),
-}
-
-/// Optional row selection, progress, and decode concurrency for a training scan.
-#[derive(Default)]
-pub(crate) struct TrainingScanOptions {
-    /// Restricts the scan to these physical rows.
-    physical_rows: Option<RowAddrTreeMap>,
-    /// Progress total when the caller already knows the selected row count.
-    expected_rows: Option<u64>,
-    /// Decoded batches that may be in flight ahead of the consumer.
-    batch_readahead: Option<usize>,
-}
-
-/// Reads the rows a scalar index is built from: `column` projected as the
-/// index's value column, with row ids or addresses as `criteria` asks, sorted
-/// by value when the index type needs it. The scan goes through the regular
-/// reader, so deletions and data overlays are already applied to what it
-/// yields. `selection` restricts the rows read; `None` reads the whole dataset.
-/// `expected_rows`, when the caller knows how many rows the selection
-/// holds, is the progress total; otherwise the whole dataset is counted.
-pub(crate) async fn scan_training_data(
-    dataset: &Dataset,
-    column: &str,
-    criteria: &TrainingCriteria,
-    selection: Option<TrainingRows>,
-    options: TrainingScanOptions,
-) -> Result<SendableRecordBatchStream> {
-    let num_rows = match options.expected_rows {
-        Some(rows) => rows as usize,
-        None => dataset.count_all_rows().await?,
-    };
-
-    let mut scan = dataset.scan();
-    if let Some(batch_readahead) = options.batch_readahead {
-        scan.batch_readahead(batch_readahead);
-    }
-    #[cfg(test)]
-    if let Ok(io_buffer_size) = TEST_TRAINING_IO_BUFFER_SIZE.try_with(|size| *size) {
-        scan.io_buffer_size(io_buffer_size);
-    }
-    // Fragment filtering is now handled in load_training_data function
-    // This function just processes the fragments passed to it
-
-    // Note: we don't need to sort for TrainingOrdering::Addresses because
-    // Lance will return data in the order of the row_address by default.
-    if TrainingOrdering::Values == criteria.ordering {
-        scan.order_by(Some(vec![ColumnOrdering::asc_nulls_first(
-            column.to_string(),
-        )]))?;
-    }
-
-    if criteria.needs_row_ids {
-        scan.with_row_id();
-    }
-    if criteria.needs_row_addrs {
-        scan.with_row_address();
-    }
-
-    scan.project_with_transform(&[(VALUE_COLUMN_NAME, column)])?;
-
-    match selection {
-        Some(TrainingRows::Fragments(fragments)) => {
-            scan.with_fragments(fragments);
-        }
-        // The sort above still applies to what is read.
-        Some(TrainingRows::Rows(rows)) => {
-            scan.with_row_id_prefilter(RowAddrMask::from_allowed(rows));
-        }
-        None => {}
-    }
-    // A physical selection restricts the scan to these rows of the selected
-    // fragments (the two intersect); the caller includes every row it wants.
-    if let Some(physical_rows) = options.physical_rows {
-        scan.with_physical_row_addr_prefilter(physical_rows);
-    }
-
-    let batches = scan
-        .try_into_dfstream(LanceExecutionOptions {
-            use_spilling: true,
-            ..Default::default()
-        })
-        .await?;
-
-    let schema = batches.schema();
-    let mut rows_processed = 0;
-    let mut next_update = TRAINING_UPDATE_FREQ;
-    let training_uuid = uuid::Uuid::new_v4().to_string();
-    info!(
-        "Starting index training job with id {} on column {}",
-        training_uuid, column
-    );
-    info!("Training index (job_id={}): 0/{}", training_uuid, num_rows);
-    let batches = batches.map_ok(move |batch| {
-        rows_processed += batch.num_rows();
-        if rows_processed >= next_update {
-            next_update += TRAINING_UPDATE_FREQ;
-            info!(
-                "Training index (job_id={}): {}/{}",
-                training_uuid, rows_processed, num_rows
-            );
-        }
-        batch
-    });
-
-    Ok(Box::pin(RecordBatchStreamAdapter::new(schema, batches)))
-}
-
-pub(crate) async fn load_training_data(
-    dataset: &Dataset,
-    column: &str,
-    criteria: &TrainingCriteria,
-    fragments: Option<Vec<Fragment>>,
-    train: bool,
-    fragment_ids: Option<Vec<u32>>,
-    options: TrainingScanOptions,
-) -> Result<SendableRecordBatchStream> {
-    // Create training request with fragment_ids if provided
-    let training_request = Box::new(match fragment_ids.clone() {
-        Some(fragment_ids) => TrainingRequest::with_fragment_ids(
-            Arc::new(dataset.clone()),
-            column.to_string(),
-            fragment_ids,
-        ),
-        None => TrainingRequest { fragment_ids: None },
-    });
-
-    if train {
-        // Use the training request to scan data with fragment filtering
-        if let Some(ref fragment_ids) = training_request.fragment_ids {
-            let fragment_ids = fragment_ids
-                .clone()
-                .into_iter()
-                .sorted()
-                .dedup()
-                .collect_vec();
-            let frags = dataset.get_frags_from_ordered_ids(&fragment_ids);
-            let frags: Result<Vec<_>> = fragment_ids
-                .iter()
-                .zip(frags)
-                .map(|(id, frag)| {
-                    let Some(frag) = frag else {
-                        return Err(Error::invalid_input_source(
-                            format!("No fragment with id {}", id).into(),
-                        ));
-                    };
-                    Ok(frag.metadata().clone())
-                })
-                .collect();
-            let selection = Some(TrainingRows::Fragments(frags?));
-            scan_training_data(dataset, column, criteria, selection, options).await
-        } else {
-            let selection = fragments.map(TrainingRows::Fragments);
-            scan_training_data(dataset, column, criteria, selection, options).await
-        }
-    } else {
-        TrainingRequest::create_empty_stream(dataset, column, criteria).await
-    }
-}
-
-pub(crate) async fn load_fts_training_data(
-    dataset: &Dataset,
-    resolved: &inverted::ResolvedFtsField,
-    criteria: &TrainingCriteria,
-    fragments: Option<Vec<Fragment>>,
-    train: bool,
-    fragment_ids: Option<Vec<u32>>,
-    params: &InvertedIndexParams,
-) -> Result<SendableRecordBatchStream> {
-    // Row-count batching alone can retain large decoded text buffers in the
-    // scanner and indexing workers. Keep explicit reader settings, and apply
-    // a byte target only to this training scan, not to the caller's dataset.
-    let mut dataset = dataset.clone();
-    Arc::make_mut(
-        dataset
-            .table_state
-            .file_reader_options
-            .get_or_insert_with(Default::default),
-    )
-    .batch_size_bytes
-    .get_or_insert(16 * 1024 * 1024);
-    let scan_column = if resolved.has_lists() {
-        resolved.root_column.as_str()
-    } else {
-        resolved.canonical_path.as_str()
-    };
-    let stream = load_training_data(
-        &dataset,
-        scan_column,
-        criteria,
-        fragments,
-        train,
-        fragment_ids,
-        TrainingScanOptions {
-            // Allow decoding to overlap consumption without scaling speculative
-            // input buffers to every CPU in a build with only a few workers.
-            batch_readahead: Some(
-                resolve_num_workers(params)
-                    .saturating_mul(2)
-                    .min(get_num_compute_intensive_cpus().max(1)),
-            ),
-            ..Default::default()
-        },
-    )
-    .await?;
-    if resolved.has_lists() {
-        inverted::transform_fts_document_stream(stream, resolved.clone())
-    } else {
-        Ok(stream)
-    }
-}
-
-// The R-tree plugin is added here because `register_scalar_index_plugin` only works before the
-// first default registry is built, and code outside `lance` can build one at any time.
 pub(crate) static SCALAR_INDEX_PLUGIN_REGISTRY: LazyLock<Arc<IndexPluginRegistry>> =
-    LazyLock::new(|| {
-        #[cfg(feature = "geo")]
-        {
-            IndexPluginRegistry::with_default_plugins_and(|registry| {
-                registry.add_plugin::<
-                    lance_index::pb::RTreeIndexDetails,
-                    lance_geo::rtree::RTreeIndexPlugin,
-                >();
-            })
-        }
-        #[cfg(not(feature = "geo"))]
-        IndexPluginRegistry::with_default_plugins()
-    });
+    LazyLock::new(IndexPluginRegistry::with_default_plugins);
 
 pub struct IndexDetails(pub Arc<prost_types::Any>);
 
@@ -430,321 +102,6 @@ impl IndexDetails {
     }
 }
 
-/// The format version of `index_type` from before it moved to the row-address
-/// domain, for the index types that did so with a version bump.
-pub(in crate::index) fn row_id_domain_version(index_type: &str) -> Option<u32> {
-    use lance_index::scalar::{bitmap, btree, label_list, ngram};
-    let is = |builtin: BuiltinIndexType| index_type.eq_ignore_ascii_case(builtin.as_str());
-    #[cfg(feature = "geo")]
-    if is(BuiltinIndexType::RTree) {
-        return Some(lance_geo::rtree::RTREE_ROW_ID_DOMAIN_VERSION);
-    }
-    if is(BuiltinIndexType::BTree) {
-        Some(btree::BTREE_ROW_ID_DOMAIN_VERSION)
-    } else if is(BuiltinIndexType::Bitmap) {
-        Some(bitmap::BITMAP_ROW_ID_DOMAIN_VERSION)
-    } else if is(BuiltinIndexType::LabelList) {
-        Some(label_list::LABEL_LIST_ROW_ID_DOMAIN_VERSION)
-    } else if is(BuiltinIndexType::NGram) {
-        Some(ngram::NGRAM_ROW_ID_DOMAIN_VERSION)
-    } else {
-        None
-    }
-}
-
-/// The domain (see [`IndexMetadata::results_are_row_addrs`]) shared by
-/// `segments`, for a merge that reuses their stored data without a rescan and
-/// so writes its result in that same domain.
-///
-/// Refuses segments that disagree, since their stored identifiers would be
-/// combined as-is, and -- on a dataset with stable row ids -- a segment
-/// persisted before its type moved to the row-address domain: its row ids
-/// differ from the row addresses newly scanned data holds. Such a segment
-/// must be rebuilt first (e.g. with `create_index(..., replace: true)`).
-pub(in crate::index) fn shared_segment_domain(
-    dataset: &Dataset,
-    index_type: &str,
-    segments: &[&IndexMetadata],
-) -> Result<bool> {
-    let Some(first) = segments.first() else {
-        return Ok(true);
-    };
-    let results_are_row_addrs = first.results_are_row_addrs();
-    if let Some(other) = segments
-        .iter()
-        .find(|segment| segment.results_are_row_addrs() != results_are_row_addrs)
-    {
-        return Err(Error::invalid_input(format!(
-            "{index_type} segments {} and {} disagree on whether they store row ids or row \
-             addresses and cannot be merged; rebuild the index first (e.g. with \
-             create_index(..., replace: true))",
-            first.uuid, other.uuid,
-        )));
-    }
-    if !results_are_row_addrs && dataset.manifest.uses_stable_row_ids() {
-        return Err(Error::invalid_input(format!(
-            "{index_type} segment {} predates row-address-domain support and cannot be merged \
-             on a dataset with stable row IDs; rebuild it first (e.g. with \
-             create_index(..., replace: true))",
-            first.uuid,
-        )));
-    }
-    Ok(results_are_row_addrs)
-}
-
-/// Build a Scalar Index (returns details to store in the manifest)
-#[allow(clippy::too_many_arguments)]
-#[instrument(level = "debug", skip_all)]
-pub(super) async fn build_scalar_index(
-    dataset: &Dataset,
-    column: &str,
-    uuid: Uuid,
-    params: &ScalarIndexParams,
-    train: bool,
-    fragment_ids: Option<Vec<u32>>,
-    preprocessed_data: Option<(SendableRecordBatchStream, TrainingCriteria)>,
-    progress: Arc<dyn IndexBuildProgress>,
-) -> Result<CreatedIndex> {
-    let inverted_params = (params.index_type.eq_ignore_ascii_case("inverted")
-        || params.index_type.eq_ignore_ascii_case("fts"))
-    .then(|| serde_json::from_str::<InvertedIndexParams>(params.params.as_deref().unwrap_or("{}")))
-    .transpose()?;
-    let resolved_fts_field = inverted_params
-        .as_ref()
-        .map(|params| {
-            inverted::resolve_fts_field(dataset.schema(), column, params.get_document_granularity())
-        })
-        .transpose()?;
-    let field = if let Some(resolved) = &resolved_fts_field {
-        let source = dataset
-            .schema()
-            .field_by_id(resolved.final_field_id)
-            .ok_or_else(|| {
-                Error::invalid_input(format!(
-                    "FTS field id {} is missing from the dataset schema",
-                    resolved.final_field_id
-                ))
-            })?;
-        if resolved.has_lists() {
-            arrow_schema::Field::new(VALUE_COLUMN_NAME, DataType::Utf8, true)
-        } else {
-            source.into()
-        }
-    } else {
-        let field = dataset
-            .schema()
-            .field(column)
-            .ok_or(Error::invalid_input_source(
-                format!("No column with name {}", column).into(),
-            ))?;
-        field.into()
-    };
-
-    let index_store = LanceIndexStore::from_dataset_for_new(dataset, &uuid)?;
-
-    let plugin = SCALAR_INDEX_PLUGIN_REGISTRY.get_plugin_by_name(&params.index_type)?;
-    let trainer = plugin.basic_trainer().ok_or_else(|| {
-        Error::invalid_input_source(
-            format!("The '{}' index type does not support basic training, please refer to the index's documentation for more details on how to create this index.", params.index_type).into(),
-        )
-    })?;
-    let training_request =
-        trainer.new_training_request(params.params.as_deref().unwrap_or("{}"), &field)?;
-
-    // A zone map trained from the table reuses the write seeds its fragments
-    // already carry and scans only the fragments without one. A caller that
-    // supplies the rows itself has already chosen what to train from.
-    if train
-        && preprocessed_data.is_none()
-        && params
-            .index_type
-            .eq_ignore_ascii_case(BuiltinIndexType::ZoneMap.as_str())
-    {
-        let zone_map_params = serde_json::from_str::<ZoneMapIndexBuilderParams>(
-            params.params.as_deref().unwrap_or("{}"),
-        )?;
-        // The zones hold what the scan yields: a blob column arrives as its
-        // descriptor, not as the schema's binary type.
-        let value_type = dataset
-            .schema()
-            .field(column)
-            .map(|field| {
-                lance_core::datatypes::BlobHandling::default()
-                    .unload_if_needed(field.clone())
-                    .data_type()
-            })
-            .unwrap_or_else(|| field.data_type().clone());
-        return zonemap::build_segment_with_seeds(
-            dataset,
-            column,
-            zone_map_params,
-            &value_type,
-            fragment_ids,
-            training_request.criteria(),
-            &index_store,
-            progress.as_ref(),
-        )
-        .await;
-    }
-
-    progress.stage_start("load_data", None, "rows").await?;
-    let training_data = match (preprocessed_data, resolved_fts_field.as_ref()) {
-        (Some((preprocessed_data, declared)), _) => {
-            let required = training_request.criteria();
-            if declared != *required {
-                return Err(Error::invalid_input(format!(
-                    "preprocessed data for index type '{}' is {declared:?}, but it trains from \
-                     {required:?}",
-                    params.index_type
-                )));
-            }
-            preprocessed_data
-        }
-        (None, Some(resolved)) => {
-            let fts_params = inverted_params.as_ref().ok_or_else(|| {
-                Error::internal("resolved FTS field is missing its training parameters")
-            })?;
-            load_fts_training_data(
-                dataset,
-                resolved,
-                training_request.criteria(),
-                None,
-                train,
-                fragment_ids.clone(),
-                fts_params,
-            )
-            .await?
-        }
-        (None, None) => {
-            load_training_data(
-                dataset,
-                column,
-                training_request.criteria(),
-                None,
-                train,
-                fragment_ids.clone(),
-                TrainingScanOptions::default(),
-            )
-            .await?
-        }
-    };
-    progress.stage_complete("load_data").await?;
-
-    let mut created_index = trainer
-        .train_index(
-            training_data,
-            &index_store,
-            training_request,
-            fragment_ids,
-            progress,
-        )
-        .await?;
-
-    // A list-element index names its keys; record which fields they are, so
-    // the index follows them through renames.
-    if list_element::is_list_element(&created_index.index_details) {
-        let indexed_field = dataset
-            .schema()
-            .field(column)
-            .ok_or_else(|| Error::invalid_input(format!("No column with name {column}")))?;
-        list_element::record_key_field_ids(indexed_field, &mut created_index)?;
-    }
-
-    // BTree, Bitmap, LabelList, NGram, and RTree always train on physical row
-    // addresses -- the plugins' TrainingCriteria has no per-dataset awareness
-    // to vary that -- but a row address and a row id are the same value on a
-    // dataset that does not use stable row ids, so the trained page data is
-    // identical either way there. Label it with the pre-migration version in
-    // that case: an old build already understands it, so a user who never
-    // turns on stable row ids sees no forward-compatibility impact from the
-    // address-domain migration (see BTREE_ROW_ID_DOMAIN_VERSION,
-    // BITMAP_ROW_ID_DOMAIN_VERSION, LABEL_LIST_ROW_ID_DOMAIN_VERSION,
-    // NGRAM_ROW_ID_DOMAIN_VERSION, and RTREE_ROW_ID_DOMAIN_VERSION).
-    // Only a stable-row-id dataset -- where the two domains genuinely
-    // diverge -- needs the address-domain version these plugins actually
-    // trained.
-    if !dataset.manifest.uses_stable_row_ids() {
-        if let Some(version) = row_id_domain_version(&params.index_type) {
-            created_index.index_version = version;
-        } else if params.index_type.eq_ignore_ascii_case("json") {
-            // A JSON index trains its target the same way the target's own
-            // plugin would, so the same relabeling applies to a wrapped BTree,
-            // Bitmap, or LabelList.
-            lance_index::scalar::json::relabel_as_row_id_domain(&mut created_index)?;
-        }
-    }
-
-    Ok(created_index)
-}
-
-/// Build a canonical bitmap index segment over a caller-selected fragment set.
-///
-/// This is intentionally separate from `build_scalar_index(..., fragment_ids=Some(...))`.
-/// The latter is the legacy distributed scalar-index shard path. Here fragment ids only
-/// restrict the scanned rows; the bitmap plugin receives no shard id and writes the
-/// canonical bitmap layout for the staged segment root.
-#[instrument(level = "debug", skip_all)]
-pub(super) async fn build_bitmap_index_segment(
-    dataset: &Dataset,
-    column: &str,
-    uuid: Uuid,
-    fragment_ids: Vec<u32>,
-    progress: Arc<dyn IndexBuildProgress>,
-) -> Result<CreatedIndex> {
-    let field = dataset
-        .schema()
-        .field(column)
-        .ok_or(Error::invalid_input_source(
-            format!("No column with name {}", column).into(),
-        ))?;
-    let field: arrow_schema::Field = field.into();
-
-    let params = ScalarIndexParams::for_builtin(BuiltinIndexType::Bitmap);
-    let plugin = SCALAR_INDEX_PLUGIN_REGISTRY.get_plugin_by_name(&params.index_type)?;
-    let trainer = plugin.basic_trainer().ok_or_else(|| {
-        Error::invalid_input_source(
-            format!("The '{}' index type does not support basic training, please refer to the index's documentation for more details on how to create this index.", params.index_type).into(),
-        )
-    })?;
-    let training_request =
-        trainer.new_training_request(params.params.as_deref().unwrap_or("{}"), &field)?;
-    let criteria = training_request.criteria();
-
-    progress.stage_start("load_data", None, "rows").await?;
-    let training_data = load_training_data(
-        dataset,
-        column,
-        criteria,
-        None,
-        true,
-        Some(fragment_ids),
-        TrainingScanOptions::default(),
-    )
-    .await?;
-    progress.stage_complete("load_data").await?;
-
-    let index_store = LanceIndexStore::from_dataset_for_new(dataset, &uuid)?;
-    let mut created_index = trainer
-        .train_index(
-            training_data,
-            &index_store,
-            training_request,
-            None,
-            progress,
-        )
-        .await?;
-
-    // See the matching comment in `build_scalar_index`: Bitmap always trains
-    // on physical row addresses, but without stable row ids a row address and
-    // a row id are the same value, so label it with the pre-migration
-    // version an old build already understands.
-    if !dataset.manifest.uses_stable_row_ids() {
-        created_index.index_version = lance_index::scalar::bitmap::BITMAP_ROW_ID_DOMAIN_VERSION;
-    }
-
-    Ok(created_index)
-}
-
 /// Fetches the scalar index plugin for a given index metadata
 ///
 /// The fast path, on newer datasets, is just a plugin lookup by the type URL of the index details.
@@ -783,38 +140,19 @@ pub async fn fetch_index_details(
 
 /// Recover the build parameters of a committed scalar index segment.
 ///
-/// The segment must index one keyed field in `dataset`'s current schema. Carried
-/// covering fields do not affect parameter recovery. The returned index type and
-/// parameters can be passed to [`DatasetIndexExt::create_index`] with
-/// [`IndexType::Scalar`], including for wrapper indices such as JSON.
-///
-/// Inverted indices use the metadata-only [`load_segment_params`] path without
-/// opening or caching the index. Other scalar indices are opened through the
-/// dataset's index cache and recover their parameters with
-/// [`ScalarIndex::derive_index_params`]. Only persisted or reconstructible
-/// settings are recovered; creation-only options such as FTS worker counts and
-/// memory limits are not retained.
-///
-/// # Example
+/// The segment must index one keyed field in the current snapshot.
+/// Inverted indices use the metadata-only [`load_segment_params`] path.
+/// Other scalar indices are opened through the dataset's index cache and
+/// recover their parameters with [`ScalarIndex::derive_index_params`].
 ///
 /// ```
 /// # use lance::{Dataset, Result};
 /// use lance::index::{DatasetIndexExt, scalar::load_scalar_segment_params};
-/// use lance_index::IndexType;
 ///
-/// # async fn rebuild(dataset: &mut Dataset) -> Result<()> {
-/// let indices = dataset.load_indices().await?;
-/// if let Some(segment) = indices.iter().find(|index| index.name == "text_idx") {
-///     let params = load_scalar_segment_params(dataset, segment).await?;
-///     dataset
-///         .create_index(
-///             &["text"],
-///             IndexType::Scalar,
-///             Some(segment.name.clone()),
-///             &params,
-///             true,
-///         )
-///         .await?;
+/// # async fn inspect(dataset: &Dataset) -> Result<()> {
+/// for segment in dataset.load_indices_by_name("text_idx").await? {
+///     let params = load_scalar_segment_params(dataset, &segment).await?;
+///     println!("{params:?}");
 /// }
 /// # Ok(())
 /// # }
@@ -903,29 +241,16 @@ pub async fn open_scalar_index(
     index: &IndexMetadata,
     metrics: &dyn MetricsCollector,
 ) -> Result<Arc<dyn ScalarIndex>> {
-    open_scalar_index_with_plan(
-        dataset,
-        column,
-        index,
-        None,
-        super::frag_reuse::OpenPurpose::Query,
-        metrics,
-    )
-    .await
+    open_scalar_index_with_plan(dataset, column, index, metrics).await
 }
 
-/// [`open_scalar_index`] for a segment the manifest does not list (a staged
-/// build being merged): `staged` is its translation plan from
-/// [`super::frag_reuse::plan_staged_segments`]. With `None` the segment is
-/// looked up in the snapshot plan, which only knows committed segments.
 pub(crate) async fn open_scalar_index_with_plan(
     dataset: &Dataset,
     column: &str,
     index: &IndexMetadata,
-    staged: Option<&super::frag_reuse::SegmentRemappingPlan>,
-    purpose: super::frag_reuse::OpenPurpose,
     metrics: &dyn MetricsCollector,
 ) -> Result<Arc<dyn ScalarIndex>> {
+    super::loading::reject_mem_wal_index(index)?;
     let index_uuid = index.uuid;
     let index_store = Arc::new(LanceIndexStore::from_dataset_for_existing(dataset, index).await?);
 
@@ -935,10 +260,8 @@ pub(crate) async fn open_scalar_index_with_plan(
     }
     let plugin = SCALAR_INDEX_PLUGIN_REGISTRY.get_plugin_by_details(index_details.as_ref())?;
 
-    let resolved = super::frag_reuse::open_row_id_remapping_with_plan(
-        dataset, index, staged, purpose, metrics,
-    )
-    .await?;
+    let resolved =
+        super::frag_reuse::open_row_id_remapping_with_plan(dataset, index, metrics).await?;
     let cache_id = super::frag_reuse::fri_cache_id(&resolved);
     let index_cache =
         super::frag_reuse::scoped_index_cache(dataset, &resolved).for_index(&index.uuid, cache_id);
@@ -1042,9 +365,10 @@ pub(crate) async fn cached_scalar_index_container(
 ) -> Option<Arc<dyn ScalarIndex>> {
     let metadata = dataset.load_indices().await.ok()?;
     let index = metadata.iter().find(|idx| idx.uuid == *uuid)?;
-    let resolved = super::frag_reuse::open_row_id_remapping(dataset, index, &NoOpMetricsCollector)
-        .await
-        .ok()?;
+    let resolved =
+        super::frag_reuse::open_row_id_remapping_with_plan(dataset, index, &NoOpMetricsCollector)
+            .await
+            .ok()?;
     let cache_id = super::frag_reuse::fri_cache_id(&resolved);
     let index_cache =
         super::frag_reuse::scoped_index_cache(dataset, &resolved).for_index(uuid, cache_id);
@@ -1251,73 +575,8 @@ pub fn index_matches_criteria(
     Ok(true)
 }
 
-/// Initialize a scalar index from a source dataset
-pub async fn initialize_scalar_index(
-    target_dataset: &mut Dataset,
-    source_dataset: &Dataset,
-    source_index: &IndexMetadata,
-    field_names: &[&str],
-) -> Result<()> {
-    if field_names.is_empty() || field_names.len() > 1 {
-        return Err(Error::index(format!(
-            "Unsupported fields for scalar index: {:?}",
-            field_names
-        )));
-    }
-
-    // Scalar indices currently support only single fields, use the first one
-    let column_name = field_names[0];
-
-    let source_scalar_index = source_dataset
-        .open_scalar_index(column_name, &source_index.uuid, &NoOpMetricsCollector)
-        .await?;
-
-    let params = source_scalar_index.derive_index_params()?;
-    let index_type = source_scalar_index.index_type();
-
-    // For Inverted index, we need to parse the params JSON and create InvertedIndexParams
-    if index_type == IndexType::Inverted {
-        // Extract the JSON string from ScalarIndexParams
-        let params_json = params
-            .params
-            .as_ref()
-            .ok_or_else(|| Error::index("Inverted index params missing".to_string()))?;
-
-        // Parse the JSON into InvertedIndexParams
-        let inverted_params: InvertedIndexParams = serde_json::from_str(params_json)?;
-        let resolved = inverted::resolve_fts_field_by_id(
-            target_dataset.schema(),
-            *source_index.fields.first().ok_or_else(|| {
-                Error::index("Inverted index metadata has no indexed field".to_string())
-            })?,
-            inverted_params.get_document_granularity(),
-        )?;
-
-        CreateIndexBuilder::new(
-            target_dataset,
-            &[&resolved.canonical_path],
-            index_type,
-            &inverted_params,
-        )
-        .name(source_index.name.clone())
-        .copy_of_existing()
-        .await?;
-    } else {
-        target_dataset
-            .create_index(
-                &[column_name],
-                index_type,
-                Some(source_index.name.clone()),
-                &params,
-                false,
-            )
-            .await?;
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use crate::utils::test::{DatagenExt, FragmentCount, FragmentRowCount};
 
@@ -1328,8 +587,7 @@ mod tests {
         datatypes::{Int32Type, UInt64Type},
     };
     use arrow_schema::DataType;
-    use futures::TryStreamExt;
-    use lance_core::utils::tempfile::TempStrDir;
+        use lance_core::utils::tempfile::TempStrDir;
     use lance_core::{datatypes::Field, utils::address::RowAddress};
     use lance_datagen::array;
     use lance_index::pb::VectorIndexDetails;

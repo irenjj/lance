@@ -18,7 +18,7 @@ use object_store::aws::AwsCredentialProvider;
 use object_store::{DynObjectStore, path::Path};
 use url::Url;
 
-use super::{DEFAULT_INDEX_CACHE_SIZE, DEFAULT_METADATA_CACHE_SIZE, ReadParams, WriteParams};
+use super::{DEFAULT_INDEX_CACHE_SIZE, DEFAULT_METADATA_CACHE_SIZE, ReadParams};
 use crate::{Dataset, Result, session::Session};
 
 /// Configure and open a dataset snapshot.
@@ -322,17 +322,6 @@ impl DatasetBuilder {
         }
         if let Some(file_reader_options) = read_params.file_reader_options {
             self.table = self.table.with_file_reader_options(file_reader_options);
-        }
-        self
-    }
-
-    /// Set options based on [WriteParams].
-    pub fn with_write_params(mut self, write_params: WriteParams) -> Self {
-        if let Some(options) = write_params.store_params {
-            self.table = self.table.with_store_params(options);
-        }
-        if let Some(commit_handler) = write_params.commit_handler {
-            self.table = self.table.with_commit_handler(commit_handler);
         }
         self
     }

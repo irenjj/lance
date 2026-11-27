@@ -215,9 +215,7 @@ fn supports_compound_scorer(query: &FtsQuery) -> bool {
 fn supports_indexed_stats_residual_compound(query: &FtsQuery) -> bool {
     match query {
         FtsQuery::Match(query) => query.fuzziness == Some(0),
-        // MemWAL phrase matching currently collapses tokenizer position gaps.
-        // Keep phrase queries on the established fallback until it can retain
-        // those gaps exactly (notably when stop words are configured).
+        // Keep phrase leaves on the position-aware indexed and flat readers.
         FtsQuery::Phrase(_) => false,
         FtsQuery::Boost(query) => {
             supports_indexed_stats_residual_compound(&query.positive)

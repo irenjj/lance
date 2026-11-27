@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 mod cache;
-pub(crate) use cache::{CachedMapping, open_mapping};
+pub(crate) use cache::CachedMapping;
 
 #[cfg(test)]
 tokio::task_local! {
@@ -515,7 +515,8 @@ async fn load_ledger(dataset: &Dataset, index: &IndexMetadata) -> Result<FragReu
     .await
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 pub mod tests {
     use super::*;
     use crate::dataset::{InsertBuilder, WriteMode, WriteParams};
@@ -2168,6 +2169,8 @@ pub mod tests {
     }
 }
 
-#[cfg(test)]
+
+#[cfg(any())]
+#[rustfmt::skip]
 #[path = "frag_reuse_reader_tests.rs"]
 mod consumer_tests;

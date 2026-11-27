@@ -1470,6 +1470,7 @@ mod tests {
         TimestampNanosecondArray, TimestampSecondArray, UInt64Array,
     };
     use arrow_schema::{DataType, Fields, Schema};
+    use datafusion_execution::FunctionRegistry;
     use datafusion_expr::{Cast, col, lit};
     use datafusion_functions::core::expr_ext::FieldAccessor;
     use datafusion_functions::core::expr_fn::get_field;
@@ -3625,41 +3626,25 @@ mod tests {
 
     #[test]
     fn test_lance_context_provider_resolves_session_functions() {
-        let session = crate::exec::new_session_context(&LanceExecutionOptions::default());
-        let ctx_provider = LanceContextProvider::new(session.clone());
-        assert!(ctx_provider.get_function_meta("contains_tokens").is_some());
-        assert!(ctx_provider.get_function_meta("lower").is_some());
-        assert!(ctx_provider.get_aggregate_meta("sum").is_some());
-        assert!(ctx_provider.get_window_meta("row_number").is_some());
-        assert!(ctx_provider.get_function_meta("registered_later").is_none());
-
-        // The provider reads the session's functions instead of a copy, so a
-        // function registered on the session afterwards resolves as well.
-        session.register_udf(datafusion_expr::create_udf(
-            "registered_later",
-            vec![DataType::Utf8],
-            DataType::Utf8,
-            Volatility::Immutable,
-            Arc::new(|args: &[ColumnarValue]| Ok(args[0].clone())),
-        ));
-        assert!(ctx_provider.get_function_meta("registered_later").is_some());
-        assert!(
-            ctx_provider
-                .udf_names()
-                .contains(&"registered_later".to_string())
-        );
+        let provider = LanceContextProvider::default();
+        assert!(provider.get_function_meta("contains_tokens").is_some());
+        assert!(provider.get_function_meta("lower").is_some());
+        assert!(provider.get_aggregate_meta("sum").is_some());
+        assert!(provider.get_window_meta("row_number").is_some());
+        assert!(provider.get_function_meta("echo").is_none());
     }
 
     #[test]
-    fn test_planner_with_session_plans_session_functions() {
-        let session = crate::exec::new_session_context(&LanceExecutionOptions::default());
-        session.register_udf(datafusion_expr::create_udf(
+    fn test_planner_with_task_context_plans_registered_functions() {
+        let mut task = TaskContext::default();
+        task.register_udf(Arc::new(datafusion_expr::create_udf(
             "echo",
             vec![DataType::Utf8],
             DataType::Utf8,
             Volatility::Immutable,
             Arc::new(|args: &[ColumnarValue]| Ok(args[0].clone())),
-        ));
+        )))
+        .unwrap();
         let batch = arrow_array::record_batch!(("s", Utf8, ["a", "b"])).unwrap();
 
         let err = Planner::new(batch.schema())
@@ -3667,7 +3652,7 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("Invalid function 'echo'"), "{err}");
 
-        let planner = Planner::new_with_session(batch.schema(), session);
+        let planner = Planner::new_with_functions(batch.schema(), Arc::new(task));
         let expr = planner.parse_expr("echo(s)").unwrap();
         let physical = planner.create_physical_expr(&expr).unwrap();
         let result = physical.evaluate(&batch).unwrap().into_array(2).unwrap();

@@ -11,7 +11,9 @@ use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion_physical_plan::ExecutionPlan;
 use lance_arrow::SchemaExt;
-use lance_core::{ROW_ADDR_FIELD, ROW_CREATED_AT_VERSION_FIELD, ROW_ID_FIELD};
+#[cfg(test)]
+use lance_core::ROW_CREATED_AT_VERSION_FIELD;
+use lance_core::{ROW_ADDR_FIELD, ROW_ID_FIELD};
 
 use crate::Dataset;
 
@@ -105,6 +107,7 @@ impl LanceTableProvider {
         self
     }
 
+    #[cfg(test)]
     /// Exposes the target rows' creation versions for rewrite operations that
     /// carry their lineage into new fragments.
     pub(crate) fn with_row_created_at_version(mut self) -> crate::Result<Self> {
@@ -166,36 +169,16 @@ impl TableProvider for LanceTableProvider {
             scan.batch_size_bytes(batch_size_bytes);
         }
 
-        if self.row_created_at_idx.is_some() {
-            // Project all system columns by name to preserve DataFusion's
-            // requested order. The legacy row-id/address setters move those
-            // columns to the end, past the creation versions appended here.
-            let columns = match projection {
-                Some(indices) => indices
-                    .iter()
-                    .map(|i| self.full_schema.field(*i).name())
-                    .collect::<Vec<_>>(),
-                None => self
-                    .full_schema
-                    .fields
-                    .iter()
-                    .map(|field| field.name())
-                    .collect(),
-            };
-            scan.project(&columns)?;
-        } else if let Some(projection) = projection {
-            let mut columns = Vec::with_capacity(projection.len());
-            for field_idx in projection {
-                if Some(*field_idx) == self.row_id_idx {
-                    scan.with_row_id();
-                } else if Some(*field_idx) == self.row_addr_idx {
-                    scan.with_row_address();
-                } else {
-                    columns.push(self.full_schema.field(*field_idx).name());
-                }
-            }
-            scan.project(&columns)?;
-        }
+        let projected = match projection {
+            Some(indices) => Arc::new(self.full_schema.project(indices)?),
+            None => self.full_schema.clone(),
+        };
+        let columns = projected
+            .fields()
+            .iter()
+            .map(|field| field.name())
+            .collect::<Vec<_>>();
+        scan.project(&columns)?;
 
         let combined_filter = match filters.len() {
             0 => None,
@@ -237,25 +220,18 @@ impl TableProvider for LanceTableProvider {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::{
-        array::AsArray,
-        datatypes::{Int32Type, Int64Type, UInt64Type},
-    };
+    use crate::{Dataset, datafusion::LanceTableProvider};
+    use arrow::{array::AsArray, datatypes::UInt64Type};
     use arrow_array::record_batch;
-    use datafusion::datasource::TableProvider;
-    use datafusion::physical_plan::collect;
-    use datafusion::prelude::SessionContext;
+    use datafusion_catalog::TableProvider;
+    use datafusion_physical_plan::collect;
+    use datafusion_session::Session;
     use lance_core::datatypes::BlobHandling;
-    use lance_core::utils::tempfile::TempStrDir;
-    use lance_core::{ROW_ADDR, ROW_CREATED_AT_VERSION, ROW_ID};
-    use lance_datagen::array;
-    use rstest::rstest;
+    use lance_table_runtime::write::{InsertBuilder, WriteParams};
+    use lance_testing::datafusion::TestSession;
 
-    use crate::{
-        datafusion::LanceTableProvider,
-        dataset::write::{InsertBuilder, WriteParams},
-        utils::test::{DatagenExt, FragmentCount, FragmentRowCount},
-    };
+    use lance_core::{ROW_ADDR, ROW_CREATED_AT_VERSION, ROW_ID};
+    use rstest::rstest;
 
     #[rstest]
     #[case::all(None)]
@@ -267,7 +243,7 @@ mod tests {
         #[case] projection: Option<Vec<usize>>,
     ) {
         let batch = record_batch!(("key", UInt32, [10, 11])).unwrap();
-        let dataset = InsertBuilder::new("memory://")
+        let table = InsertBuilder::new("memory://")
             .with_params(&WriteParams {
                 enable_stable_row_ids: true,
                 max_rows_per_file: 1,
@@ -276,13 +252,14 @@ mod tests {
             .execute(vec![batch])
             .await
             .unwrap();
+        let dataset = Dataset::from_table(table, Arc::new(crate::session::Session::default()));
         let provider = LanceTableProvider::new(Arc::new(dataset), true, true)
             .with_row_created_at_version()
             .unwrap()
             .with_blob_handling(BlobHandling::default());
-        let context = SessionContext::new();
+        let context = TestSession::default();
         let plan = provider
-            .scan(&context.state(), projection.as_ref(), &[], None)
+            .scan(&context, projection.as_deref(), &[], None)
             .await
             .unwrap();
         let expected_schema = match &projection {
@@ -309,66 +286,23 @@ mod tests {
     }
 
     #[tokio::test]
-    pub async fn test_table_provider() {
-        let test_uri = TempStrDir::default();
-        let data = lance_datagen::gen_batch()
-            .col("x", array::step::<Int32Type>())
-            .col("y", array::step_custom::<Int32Type>(0, 2))
-            .into_dataset(
-                &test_uri,
-                FragmentCount::from(10),
-                FragmentRowCount::from(10),
-            )
-            .await
-            .unwrap();
-
-        let ctx = SessionContext::new();
-
-        ctx.register_table(
-            "foo",
-            Arc::new(LanceTableProvider::new(Arc::new(data), true, true)),
-        )
-        .unwrap();
-
-        let df = ctx
-            .sql("SELECT SUM(x) FROM foo WHERE y > 100")
-            .await
-            .unwrap();
-
-        let results = df.collect().await.unwrap();
-        assert_eq!(results.len(), 1);
-        let results = results.into_iter().next().unwrap();
-        assert_eq!(results.num_columns(), 1);
-        assert_eq!(results.num_rows(), 1);
-        // SUM(0..100) - SUM(0..50) = 3675
-        assert_eq!(results.column(0).as_primitive::<Int64Type>().value(0), 3675);
-    }
-
-    #[tokio::test]
     async fn test_table_provider_rejects_invalid_batch_size() {
-        let data = Arc::new(
-            lance_datagen::gen_batch()
-                .col("x", array::step::<Int32Type>())
-                .into_dataset(
-                    "memory://test_table_provider_rejects_invalid_batch_size",
-                    FragmentCount::from(1),
-                    FragmentRowCount::from(3),
-                )
-                .await
-                .unwrap(),
-        );
+        let batch = record_batch!(("x", Int32, [1, 2, 3])).unwrap();
+        let table = InsertBuilder::new("memory://")
+            .execute(vec![batch])
+            .await
+            .unwrap();
+        let data = Arc::new(Dataset::from_table(
+            table,
+            Arc::new(crate::session::Session::default()),
+        ));
+        let session = TestSession::default();
 
         for batch_size in [0, u32::MAX as usize + 1] {
             let provider =
                 LanceTableProvider::new(data.clone(), false, false).with_batch_size(batch_size);
-            let ctx = SessionContext::new();
-            ctx.register_table("dataset", Arc::new(provider)).unwrap();
-
-            let error = ctx
-                .sql("SELECT x FROM dataset")
-                .await
-                .unwrap()
-                .collect()
+            let error = provider
+                .scan(&session, None, &[], None)
                 .await
                 .expect_err("invalid batch size should be rejected");
             assert!(

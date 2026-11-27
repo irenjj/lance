@@ -32,8 +32,6 @@ use super::Scanner;
 /// Aggregate expression from Substrait or DataFusion.
 #[derive(Debug, Clone)]
 pub enum AggregateExpr {
-    #[cfg(feature = "substrait")]
-    Substrait(Vec<u8>),
     Datafusion {
         group_by: Vec<Expr>,
         aggregates: Vec<Expr>,
@@ -57,12 +55,6 @@ impl AggregateExpr {
         AggregateExprBuilder::new()
     }
 
-    /// Create from Substrait Plan bytes.
-    #[cfg(feature = "substrait")]
-    pub fn substrait(bytes: impl Into<Vec<u8>>) -> Self {
-        Self::Substrait(bytes.into())
-    }
-
     /// Create from DataFusion expressions.
     /// Use `.alias()` on expressions to set output column names.
     pub fn datafusion(group_by: Vec<Expr>, aggregates: Vec<Expr>) -> Self {
@@ -83,16 +75,6 @@ impl AggregateExpr {
         #[allow(unused_variables)] schema: Arc<ArrowSchema>,
     ) -> Result<Aggregate> {
         match self {
-            #[cfg(feature = "substrait")]
-            Self::Substrait(bytes) => {
-                use lance_datafusion::exec::{LanceExecutionOptions, get_session_context};
-                use lance_datafusion::substrait::parse_substrait_aggregate;
-
-                let ctx = get_session_context(&LanceExecutionOptions::default());
-                parse_substrait_aggregate(&bytes, schema, &ctx.state())
-                    .now_or_never()
-                    .expect("could not parse the Substrait aggregate in a synchronous fashion")
-            }
             Self::Datafusion {
                 group_by,
                 aggregates,

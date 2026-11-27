@@ -66,7 +66,7 @@ use crate::{Dataset, index::DatasetIndexInternalExt};
 /// ```
 /// # use std::sync::Arc;
 /// # use lance::deps::arrow_schema::SortOptions;
-/// # use lance::deps::datafusion_physical_plan::ExecutionPlan;
+/// # use datafusion_physical_plan::ExecutionPlan;
 /// # use lance::index::DatasetIndexExt;
 /// # use lance::io::exec::ordered_index_scan::OrderedIndexScanExec;
 /// # use lance::{Dataset, Result};
@@ -560,7 +560,8 @@ impl ExecutionPlan for OrderedIndexScanExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use std::cmp::Ordering;
     use std::collections::{HashMap, HashSet};

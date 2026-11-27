@@ -1,25 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-//! Secondary index APIs, lifecycle coordination, loading, and maintenance.
+//! Read-only secondary index APIs for Lance snapshots.
 //!
-//! Index algorithms and storage remain in `lance-index`. This module coordinates
-//! Dataset metadata: `lifecycle` publishes and maintains logical index
-//! segments, `provenance` decides whether stored coverage is still fresh,
-//! `loading` opens index implementations and owns their cache identity, and
-//! `statistics` reports persisted metadata, including the existing legacy
-//! auto-migration needed to recompute incomplete fragment statistics.
+//! Index algorithms and storage live in `lance-index`. This module resolves
+//! snapshot coverage, opens physical segments, and reports index statistics.
 
-use lance_index::{IndexType, scalar::registry::ScalarIndexPlugin};
+use lance_index::scalar::registry::ScalarIndexPlugin;
 
 mod api;
 pub(crate) mod field_dependencies;
+#[path = "index/frag_reuse_open.rs"]
+pub(crate) mod frag_reuse;
 pub mod frag_reuse_reader;
+mod frag_reuse_remapping;
+mod frag_reuse_v0_cache;
+#[path = "index/frag_reuse_visibility.rs"]
+mod frag_reuse_with_stable_row_ids;
+mod legacy_details;
 pub(crate) mod loading;
-pub(crate) mod memory_progress;
 pub mod prefilter;
 mod prewarm;
-pub(crate) mod provenance;
+mod read;
 pub mod scalar;
 pub(crate) mod scalar_logical;
 pub(crate) mod segment;
@@ -61,16 +63,3 @@ pub fn register_scalar_index_plugin<
         Some(|| &scalar::SCALAR_INDEX_PLUGIN_REGISTRY),
     )
 }
-
-/// Builds an index.
-#[async_trait::async_trait]
-pub trait IndexBuilder {
-    /// Return the concrete index type.
-    fn index_type() -> IndexType;
-
-    /// Build the index.
-    async fn build(&self) -> crate::Result<()>;
-}
-
-#[cfg(test)]
-mod tests;

@@ -14,7 +14,6 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use lance_core::datatypes::Schema;
 use lance_index::scalar::registry::ScalarIndexPlugin;
 use lance_table::format::IndexMetadata;
 
@@ -89,34 +88,6 @@ fn resolve_input_field_ids<'a>(
     ))
 }
 
-/// Persist additional dependencies after the input columns for a newly built index.
-/// The plugin must already have recorded any dataset field IDs in its details.
-pub fn fields_with_dependencies(
-    schema: &Schema,
-    inputs: &[i32],
-    details: &prost_types::Any,
-) -> Result<Vec<i32>> {
-    let additional = match SCALAR_INDEX_PLUGIN_REGISTRY.get_plugin_by_details(details) {
-        Ok(plugin) => plugin.additional_field_ids(details)?,
-        // Vector extensions and unknown types retain their existing declaration.
-        Err(_) => Vec::new(),
-    };
-    let mut fields = Vec::with_capacity(inputs.len() + additional.len());
-    fields.extend_from_slice(inputs);
-    fields.extend_from_slice(&additional);
-    if !additional.is_empty() {
-        validate_additional_fields(&fields, &additional)?;
-        for id in &additional {
-            if schema.field_by_id(*id).is_none() {
-                return Err(Error::invalid_input(format!(
-                    "index additional field {id} does not exist in the dataset schema"
-                )));
-            }
-        }
-    }
-    Ok(fields)
-}
-
 fn validate_additional_fields(fields: &[i32], additional: &[i32]) -> Result<()> {
     let mut seen = HashSet::with_capacity(fields.len());
     if let Some(id) = fields.iter().find(|id| !seen.insert(**id)) {
@@ -143,6 +114,38 @@ fn validate_additional_fields(fields: &[i32], additional: &[i32]) -> Result<()> 
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+use lance_core::datatypes::Schema;
+
+#[cfg(test)]
+/// Persist additional dependencies after the input columns for a newly built index.
+/// The plugin must already have recorded any dataset field IDs in its details.
+pub fn fields_with_dependencies(
+    schema: &Schema,
+    inputs: &[i32],
+    details: &prost_types::Any,
+) -> Result<Vec<i32>> {
+    let additional = match SCALAR_INDEX_PLUGIN_REGISTRY.get_plugin_by_details(details) {
+        Ok(plugin) => plugin.additional_field_ids(details)?,
+        // Vector extensions and unknown types retain their existing declaration.
+        Err(_) => Vec::new(),
+    };
+    let mut fields = Vec::with_capacity(inputs.len() + additional.len());
+    fields.extend_from_slice(inputs);
+    fields.extend_from_slice(&additional);
+    if !additional.is_empty() {
+        validate_additional_fields(&fields, &additional)?;
+        for id in &additional {
+            if schema.field_by_id(*id).is_none() {
+                return Err(Error::invalid_input(format!(
+                    "index additional field {id} does not exist in the dataset schema"
+                )));
+            }
+        }
+    }
+    Ok(fields)
 }
 
 #[cfg(test)]

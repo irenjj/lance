@@ -628,6 +628,7 @@ pub async fn provider_to_stream(
 mod tests {
     use super::*;
     use arrow_array::record_batch;
+    use arrow_schema::Schema as ArrowSchema;
     use datafusion_common::DataFusionError;
     use datafusion_execution::memory_pool::{MemoryConsumer, PeakRecordingPool};
 
@@ -764,8 +765,7 @@ mod tests {
 
         // Each reservation fits its own pool, but any two exceed a shared pool.
         for context in &contexts {
-            let task_context = context.task_ctx();
-            let pool = task_context.memory_pool();
+            let pool = context.memory_pool();
             let reservation = MemoryConsumer::new("ExternalSorterMerge[0]").register(pool);
             reservation.try_grow(100 * 1024 * 1024).unwrap();
             assert_eq!(pool.reserved(), 100 * 1024 * 1024);
@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(task_ctx.session_id(), session_ctx.session_id());
         assert_eq!(
             task_ctx.session_config().batch_size(),
-            session_ctx.copied_config().batch_size()
+            session_ctx.session_config().batch_size()
         );
         assert!(task_ctx.scalar_functions().contains_key("contains_tokens"));
         // Each execution records the peak of its own reservations, although all
@@ -888,7 +888,7 @@ mod tests {
         );
         // The batch size override applies to this execution only, and the
         // execution still reserves from the session's memory pool.
-        assert_ne!(spill_session_ctx.copied_config().batch_size(), 17);
+        assert_ne!(spill_session_ctx.session_config().batch_size(), 17);
         assert!(matches!(
             spill_task_ctx.memory_pool().memory_limit(),
             MemoryLimit::Finite(limit) if limit == 64 * 1024 * 1024
@@ -1042,20 +1042,18 @@ mod tests {
         let options = LanceExecutionOptions::default();
         let session_ctx = get_execution_template(&options);
         let config = session_ctx
-            .task_ctx()
             .session_config()
             .clone()
             .with_extension(Arc::new(RequiredExtension));
-        let task_ctx = session_ctx.task_ctx();
         let task_ctx = Arc::new(TaskContext::new(
-            task_ctx.task_id(),
-            task_ctx.session_id(),
+            session_ctx.task_id(),
+            session_ctx.session_id(),
             config,
-            task_ctx.scalar_functions().clone(),
-            task_ctx.higher_order_functions().clone(),
-            task_ctx.aggregate_functions().clone(),
-            task_ctx.window_functions().clone(),
-            task_ctx.runtime_env(),
+            session_ctx.scalar_functions().clone(),
+            session_ctx.higher_order_functions().clone(),
+            session_ctx.aggregate_functions().clone(),
+            session_ctx.window_functions().clone(),
+            session_ctx.runtime_env(),
         ));
         let report = analyze_plan_with_context(plan, options, Some(task_ctx))
             .await

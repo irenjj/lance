@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-//! Lance extensions for [DataFrame].
+//! Group consecutive rows in a sorted record batch stream.
 
 use std::ops::Range;
 use std::pin::Pin;
@@ -202,9 +202,9 @@ impl Stream for BatchStreamGrouper {
 mod tests {
     use arrow_array::Int32Array;
     use arrow_schema::{DataType, Field};
-    use datafusion_datasource::MemTable;
-    use datafusion_execution::context::SessionContext;
+    use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
     use futures::TryStreamExt;
+    use futures::stream;
 
     use super::*;
 
@@ -228,13 +228,9 @@ mod tests {
             batch.slice(5, 3), // a = [6, 7, 8], b = [3, 3, 4]
         ];
 
-        let table = MemTable::try_new(schema, vec![batches]).unwrap();
-        let ctx = SessionContext::new();
-        let df = ctx.read_table(Arc::new(table)).unwrap();
-        let actual = df
-            .group_by_stream(&["b"])
-            .await
-            .unwrap()
+        let input =
+            RecordBatchStreamAdapter::new(schema, stream::iter(batches.into_iter().map(Ok)));
+        let actual = BatchStreamGrouper::new(Box::pin(input), "b".to_owned())
             .try_collect::<Vec<_>>()
             .await
             .unwrap();

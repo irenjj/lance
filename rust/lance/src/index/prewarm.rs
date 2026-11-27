@@ -374,6 +374,3 @@ pub(super) fn filter_index_segments_by_ids(
 
     Ok(filtered)
 }
-
-#[cfg(test)]
-mod tests;

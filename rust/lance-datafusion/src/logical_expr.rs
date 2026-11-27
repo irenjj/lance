@@ -353,7 +353,7 @@ mod tests {
         let expr = field_path_to_expr(path).unwrap();
         let mut expected = Expr::Column(Column::new_unqualified(root));
         for name in children {
-            expected = get_field(expected, name);
+            expected = expected.field(name);
         }
 
         assert_eq!(expr, expected);

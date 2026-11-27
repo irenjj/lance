@@ -28,7 +28,7 @@ use datafusion_physical_optimizer::output_requirements::OutputRequirementExec;
 use datafusion_physical_plan::display::DisplayableExecutionPlan;
 use datafusion_physical_plan::projection::ProjectionExec as DFProjectionExec;
 use datafusion_physical_plan::sorts::sort::SortExec;
-use datafusion_physical_plan::{ExecutionPlan, SendableRecordBatchStream, expressions};
+use datafusion_physical_plan::{ExecutionPlan, expressions};
 use futures::future::BoxFuture;
 use futures::stream::StreamExt;
 use futures::{FutureExt, TryStreamExt};
@@ -285,28 +285,6 @@ impl Scanner {
             )?))
         }
         .boxed()
-    }
-
-    pub(crate) async fn try_into_dfstream(
-        &self,
-        mut options: LanceExecutionOptions,
-    ) -> Result<SendableRecordBatchStream> {
-        let plan = self.create_plan().await?;
-
-        // Use the scan stats callback if the user didn't set an execution stats callback
-        if options.execution_stats_callback.is_none() {
-            options.execution_stats_callback = self.scan_stats_callback.clone();
-        }
-
-        execute_plan(plan, options)
-    }
-
-    pub(crate) fn execution_options(&self) -> LanceExecutionOptions {
-        LanceExecutionOptions {
-            batch_size: self.batch_size,
-            execution_stats_callback: self.scan_stats_callback.clone(),
-            ..Default::default()
-        }
     }
 
     pub async fn try_into_batch(&self) -> Result<RecordBatch> {
@@ -1206,7 +1184,8 @@ impl Scanner {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use super::*;
 

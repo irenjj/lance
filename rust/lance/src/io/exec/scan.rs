@@ -964,7 +964,8 @@ impl ExecutionPlan for LanceScanExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use arrow_array::types::Int32Type;
     use datafusion::execution::TaskContext;

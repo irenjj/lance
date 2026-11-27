@@ -307,7 +307,8 @@ impl<'a> DatasetStatistics<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;

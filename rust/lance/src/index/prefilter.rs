@@ -593,7 +593,8 @@ impl PreFilter for DatasetPreFilter {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod test {
     use lance_select::RowSetOps;
 

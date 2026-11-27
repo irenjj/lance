@@ -8,8 +8,6 @@ use datafusion_physical_plan::SendableRecordBatchStream as DataFusionRecordBatch
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter as DataFusionStreamAdapter;
 use futures::StreamExt;
 use lance_arrow::json::{convert_lance_json_to_arrow, has_json_fields, lance_json_to_arrow_json};
-pub use lance_table_runtime::rowids::{CapturedRowIds, make_rowid_capture_stream};
-pub use lance_table_runtime::write::SchemaAdapter;
 
 fn requires_logical_conversion(schema: &ArrowSchemaRef) -> bool {
     schema.fields().iter().any(|field| has_json_fields(field))

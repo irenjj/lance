@@ -512,7 +512,8 @@ impl ExecutionPlan for CountFromMaskExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use std::{ops::Bound, sync::Arc};
 

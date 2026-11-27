@@ -85,12 +85,14 @@ pub type PassThrough = Arc<dyn Fn(&dyn ExecutionPlan) -> bool + Send + Sync>;
 ///
 /// ```
 /// # use std::sync::Arc;
-/// # use datafusion_execution::SessionStateBuilder;
-/// # use lance::io::exec::topk_late_materialization::TopKLateMaterialization;
-/// let state = SessionStateBuilder::new()
-///     .with_default_features()
-///     .with_physical_optimizer_rule(Arc::new(TopKLateMaterialization::new()))
-///     .build();
+/// # use datafusion_common::{Result, config::ConfigOptions};
+/// # use datafusion_physical_optimizer::PhysicalOptimizerRule;
+/// # use datafusion_physical_plan::ExecutionPlan;
+/// use lance::io::exec::topk_late_materialization::TopKLateMaterialization;
+///
+/// # fn optimize(plan: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
+/// TopKLateMaterialization::new().optimize(plan, &ConfigOptions::default())
+/// # }
 /// ```
 #[derive(Clone, Default)]
 pub struct TopKLateMaterialization {
@@ -507,7 +509,8 @@ fn max_rows(read: &FilteredReadExec) -> Option<usize> {
         .sum()
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::{

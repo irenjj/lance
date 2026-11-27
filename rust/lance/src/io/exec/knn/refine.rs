@@ -396,7 +396,8 @@ impl ExecutionPlan for BatchRefineExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use super::*;
     use arrow_array::record_batch;

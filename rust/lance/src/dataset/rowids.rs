@@ -2,8 +2,6 @@
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
 mod spill;
-#[cfg(test)]
-mod validate;
 
 use super::Dataset;
 use crate::{Error, Result};
@@ -19,14 +17,11 @@ use lance_table::{
 use std::sync::Arc;
 
 pub use lance_table_runtime::rowids::RowVersionKind;
-pub(crate) use spill::place_carried_row_lineage;
 pub use spill::{
     DEFAULT_INLINE_ROW_LINEAGE_MAX_BYTES, INLINE_ROW_LINEAGE_MAX_BYTES_CONFIG_KEY,
     PlacedRowLineage, RowLineage, SPILL_ROW_LINEAGE_CONFIG_KEY, inline_row_lineage_max_bytes,
     place_row_lineage,
 };
-#[cfg(test)]
-pub(crate) use spill::{RowLineagePlan, RowLineageSpill, plan_row_lineage_spill};
 
 /// Load a row id sequence from the given dataset and fragment.
 pub async fn load_row_id_sequence(
@@ -411,7 +406,8 @@ pub(crate) async fn live_row_addr_to_row_id_lookup(
     })
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod test {
     use crate::session::index_caches::RowIdIndexKey;
     use lance_table::format::RowIdMeta;

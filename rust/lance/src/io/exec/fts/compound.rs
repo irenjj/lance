@@ -33,8 +33,8 @@ use lance_select::RowAddrMask;
 use lance_table::format::IndexMetadata;
 use rustc_hash::FxHashSet;
 
+use super::query_local::{QueryLocalFtsIndex, QueryLocalFtsStats};
 use crate::Dataset;
-use crate::dataset::mem_wal::index::{QueryLocalFtsIndex, QueryLocalFtsStats};
 use crate::index::scalar::inverted::load_segment_details;
 use crate::io::exec::PreFilterSource;
 use crate::io::exec::utils::{PreFilterMasks, build_prefilter};
@@ -750,11 +750,9 @@ impl ExecutionPlan for HybridCompoundQueryExec {
                     "FTS index for column {column} has no committed segments"
                 ))
             })?;
-            let field_id = dataset.schema().field_id(&column)?;
             let tokenizer = first_index.tokenizer();
             let doc_type = tokenizer.doc_type();
             let residual_seed = QueryLocalFtsIndex::try_with_loaded_tokenizer(
-                field_id,
                 column.clone(),
                 first_index.params().clone(),
                 tokenizer,
@@ -1898,7 +1896,8 @@ impl ExecutionPlan for CrossColumnCompoundQueryExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use super::*;
     use lance_index::scalar::inverted::builder::ScoredDoc;

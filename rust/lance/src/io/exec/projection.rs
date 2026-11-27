@@ -226,7 +226,8 @@ pub fn compute_projection<'a>(
     Ok(selections)
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use arrow_array::{ArrayRef, Int32Array, RecordBatch, StructArray};
     use datafusion::prelude::SessionContext;

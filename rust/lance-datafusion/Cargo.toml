@@ -45,6 +45,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+lance-testing = { workspace = true, features = ["datafusion"] }
 geo-types.workspace = true
 rstest.workspace = true
 

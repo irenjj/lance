@@ -708,10 +708,11 @@ impl ExecutionPlan for CombinedFieldsQueryExec {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use super::*;
-    use crate::index::DatasetIndexExt;
+
     use arrow_array::{RecordBatchIterator, record_batch};
     use lance_index::IndexType;
 

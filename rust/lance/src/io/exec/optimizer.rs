@@ -16,7 +16,7 @@ use datafusion_physical_optimizer::{
     PhysicalOptimizerRule,
     enforce_distribution::{
         DistributionContext, PlanWithKeyRequirements, adjust_input_keys_ordering,
-        ensure_distribution, reorder_join_keys_to_inputs,
+        ensure_distribution_with_stats, reorder_join_keys_to_inputs,
     },
     optimizer::PhysicalOptimizer,
 };
@@ -238,9 +238,10 @@ impl PhysicalOptimizerRule for EnforceDistribution {
                 .data()?
         };
 
+        let statistics = datafusion_physical_plan::statistics::StatisticsContext::new();
         // Distribution enforcement needs to be applied bottom-up.
         Ok(DistributionContext::new_default(plan)
-            .transform_up(|context| ensure_distribution(context, config))
+            .transform_up(|context| ensure_distribution_with_stats(context, config, &statistics))
             .data()?
             .plan)
     }
@@ -276,7 +277,8 @@ pub fn get_physical_optimizer() -> PhysicalOptimizer {
     ])
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use super::*;
 

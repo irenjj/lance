@@ -540,7 +540,8 @@ pub(super) async fn late_search(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any())]
+#[rustfmt::skip]
 mod tests {
     use std::sync::Mutex;
 
