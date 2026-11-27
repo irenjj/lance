@@ -8,6 +8,8 @@ use std::sync::Arc;
 use super::TakeExec;
 use super::filtered_read::FilteredReadExec;
 use arrow_schema::Schema as ArrowSchema;
+#[cfg(feature = "write")]
+use datafusion::physical_optimizer::enforce_distribution::ensure_distribution;
 use datafusion_common::Result as DFResult;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -277,8 +279,7 @@ pub fn get_physical_optimizer() -> PhysicalOptimizer {
     ])
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

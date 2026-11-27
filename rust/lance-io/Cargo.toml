@@ -78,6 +78,7 @@ harness = false
 
 [features]
 default = ["aws", "azure", "gcp"]
+write = []
 metrics = ["dep:metrics"]
 gcs-test = []
 goosefs-test = []

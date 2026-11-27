@@ -12,6 +12,10 @@ pub mod commit;
 pub mod frag_reuse;
 pub mod fragment;
 pub mod io;
+
+#[cfg(feature = "write")]
+pub mod namespace_manifest;
+
 pub mod optimize;
 pub mod overlay;
 pub mod refs;

@@ -1896,8 +1896,7 @@ impl ExecutionPlan for CrossColumnCompoundQueryExec {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use lance_index::scalar::inverted::builder::ScoredDoc;

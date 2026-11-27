@@ -8,6 +8,8 @@ use lance_file::reader::FileReaderOptions;
 use lance_io::object_store::{
     ObjectStore, ObjectStoreParams, StorageOptionsAccessor, StorageOptionsProvider,
 };
+#[cfg(feature = "write")]
+use lance_namespace::LanceNamespace;
 use lance_table::{
     format::Manifest,
     io::commit::{CommitHandler, ManifestLocation},
@@ -18,6 +20,8 @@ use object_store::aws::AwsCredentialProvider;
 use object_store::{DynObjectStore, path::Path};
 use url::Url;
 
+#[cfg(feature = "write")]
+use super::WriteParams;
 use super::{DEFAULT_INDEX_CACHE_SIZE, DEFAULT_METADATA_CACHE_SIZE, ReadParams};
 use crate::{Dataset, Result, session::Session};
 
@@ -56,6 +60,48 @@ impl DatasetBuilder {
             index_cache_backend: None,
             session: None,
         }
+    }
+
+    #[cfg(feature = "write")]
+    /// Create a DatasetBuilder from a LanceNamespace client
+    ///
+    /// This will automatically fetch the table location and storage options from the namespace
+    /// client via `describe_table()`.
+    ///
+    /// Storage options from the namespace client will override any user-provided storage options
+    /// set via `.with_storage_options()`. This ensures the namespace client is always the source
+    /// of truth for storage options.
+    ///
+    /// # Arguments
+    /// * `namespace_client` - The namespace client implementation to fetch table info from
+    /// * `table_id` - The table identifier (e.g., vec!["my_table"])
+    ///
+    /// # Example
+    /// ```ignore
+    /// use lance_namespace_impls::ConnectBuilder;
+    /// use lance::dataset::DatasetBuilder;
+    ///
+    /// // Connect to a REST namespace
+    /// let namespace_client = ConnectBuilder::new("rest")
+    ///     .property("uri", "http://localhost:8080")
+    ///     .connect()
+    ///     .await?;
+    ///
+    /// // Load a dataset using storage options from namespace client
+    /// let dataset = DatasetBuilder::from_namespace(
+    ///     namespace_client,
+    ///     vec!["my_table".to_string()],
+    /// )
+    /// .await?
+    /// .load()
+    /// .await?;
+    /// ```
+    pub async fn from_namespace(
+        namespace_client: Arc<dyn LanceNamespace>,
+        table_id: Vec<String>,
+    ) -> Result<Self> {
+        let builder = TableBuilder::from_namespace(namespace_client, table_id).await?;
+        Ok(Self::from_table_builder(builder))
     }
 
     /// Set the cache size for indices. Set to zero, to disable the cache.
@@ -322,6 +368,18 @@ impl DatasetBuilder {
         }
         if let Some(file_reader_options) = read_params.file_reader_options {
             self.table = self.table.with_file_reader_options(file_reader_options);
+        }
+        self
+    }
+
+    #[cfg(feature = "write")]
+    /// Set options based on [WriteParams].
+    pub fn with_write_params(mut self, write_params: WriteParams) -> Self {
+        if let Some(options) = write_params.store_params {
+            self.table = self.table.with_store_params(options);
+        }
+        if let Some(commit_handler) = write_params.commit_handler {
+            self.table = self.table.with_commit_handler(commit_handler);
         }
         self
     }

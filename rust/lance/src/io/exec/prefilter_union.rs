@@ -353,8 +353,7 @@ impl ExecutionPlan for PrefilterUnionExec {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use crate::utils::test::{DatagenExt, FragmentCount, FragmentRowCount};

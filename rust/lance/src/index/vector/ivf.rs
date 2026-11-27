@@ -3,11 +3,44 @@
 
 //! IVF - Inverted File index.
 
+#[cfg(feature = "write")]
+use super::builder::{ExistingIndex, IvfIndexBuilder, index_type_string};
+#[cfg(feature = "write")]
+use super::details::target_partition_size_from_details;
 use super::pq::PQIndex;
 use super::utils::PartitionLoadLock;
+#[cfg(feature = "write")]
+use super::{
+    LogicalIvfView, derive_hnsw_params,
+    pq::build_pq_model,
+    utils::{
+        filter_finite_training_data, maybe_sample_ivf_training_data, sample_unseen_training_data,
+    },
+};
+#[cfg(feature = "write")]
+use crate::{
+    dataset::Dataset,
+    index::vector::ivf::io::{write_pq_partition_payload, write_pq_partitions},
+};
 use lance_index::prefilter::PreFilter;
 
+#[cfg(feature = "write")]
+use crate::dataset::builder::DatasetBuilder;
+#[cfg(feature = "write")]
+use crate::dataset::index::dataset_format_version;
+#[cfg(feature = "write")]
+use crate::index::DatasetIndexExt;
+#[cfg(feature = "write")]
+use crate::index::loading::DatasetIndexInternalExt;
 use crate::index::vector::IndexFileVersion;
+#[cfg(feature = "write")]
+use crate::index::vector::open_index_file;
+#[cfg(feature = "write")]
+use crate::index::vector::utils::{get_vector_dim, get_vector_type};
+#[cfg(feature = "write")]
+use arrow::array::ArrayData;
+#[cfg(feature = "write")]
+use arrow::compute::concat_batches;
 use arrow::datatypes::UInt8Type;
 use arrow_arith::numeric::sub;
 use arrow_array::Float32Array;
@@ -16,11 +49,26 @@ use arrow_array::{
     cast::AsArray,
     types::{Float16Type, Float32Type, Float64Type},
 };
+#[cfg(feature = "write")]
+use arrow_array::{ArrayRef, PrimitiveArray, types::ArrowPrimitiveType};
+#[cfg(feature = "write")]
+use arrow_buffer::MutableBuffer;
 use arrow_schema::DataType;
+#[cfg(feature = "write")]
+use arrow_schema::Schema;
 use async_trait::async_trait;
 use datafusion_execution::SendableRecordBatchStream;
 use futures::TryFutureExt;
+#[cfg(feature = "write")]
+use futures::{
+    Stream,
+    stream::{self},
+};
 use futures::{TryStreamExt, stream::StreamExt};
+#[cfg(feature = "write")]
+use lance_arrow::*;
+#[cfg(feature = "write")]
+use lance_core::ROW_ID_FIELD;
 use lance_core::deepsize::DeepSizeOf;
 use lance_core::utils::row_addr_remap::RowAddrRemap;
 use lance_core::{
@@ -29,13 +77,72 @@ use lance_core::{
     utils::parse::parse_env_as_bool,
     utils::tracing::{IO_TYPE_LOAD_VECTOR_PART, TRACE_IO_EVENTS},
 };
+#[cfg(feature = "write")]
+use lance_encoding::decoder::FilterExpression;
+#[cfg(feature = "write")]
+use lance_file::{
+    format::MAGIC,
+    reader::{FileReader as V2Reader, FileReaderOptions as V2ReaderOptions},
+    versions as file_versions,
+    versions::v1::writer::{FileWriter as V1FileWriter, FileWriterOptions as V1FileWriterOptions},
+    writer::{FileWriter as V2Writer, FileWriterOptions as V2WriterOptions},
+};
 use lance_index::metrics::MetricsCollector;
 use lance_index::metrics::NoOpMetricsCollector;
 use lance_index::prefilter::NoFilter;
 use lance_index::scalar::RowAddrTranslator;
+#[cfg(feature = "write")]
+use lance_index::vector::DISTANCE_TYPE_KEY;
+#[cfg(feature = "write")]
+use lance_index::vector::bq::builder::RabitQuantizer;
+#[cfg(feature = "write")]
+use lance_index::vector::bq::storage::{
+    RABIT_METADATA_KEY, RabitQuantizationMetadata, RabitQuantizationStorage,
+};
+#[cfg(feature = "write")]
+use lance_index::vector::flat::index::{FlatBinQuantizer, FlatIndex, FlatMetadata, FlatQuantizer};
+#[cfg(feature = "write")]
+use lance_index::vector::flat::storage::{FLAT_COLUMN, FlatBinStorage, FlatFloatStorage};
+#[cfg(feature = "write")]
+use lance_index::vector::hnsw::HnswMetadata;
+#[cfg(feature = "write")]
+use lance_index::vector::hnsw::builder::HNSW_METADATA_KEY;
+#[cfg(feature = "write")]
+use lance_index::vector::ivf::storage::IVF_METADATA_KEY;
 use lance_index::vector::ivf::storage::IvfModel;
+#[cfg(feature = "write")]
+use lance_index::vector::kmeans::{KMeans, KMeansParams};
+#[cfg(feature = "write")]
+use lance_index::vector::pq::storage::{
+    PQ_METADATA_KEY, ProductQuantizationMetadata, ProductQuantizationStorage, transpose,
+};
 use lance_index::vector::quantizer::QuantizationType;
+#[cfg(feature = "write")]
+use lance_index::vector::quantizer::QuantizerMetadata as _;
+#[cfg(feature = "write")]
+use lance_index::vector::storage::{STORAGE_METADATA_KEY, VectorStore};
+#[cfg(feature = "write")]
+use lance_index::vector::v3::shuffler::create_owned_ivf_shuffler;
+#[cfg(feature = "write")]
+use lance_index::vector::v3::subindex::IvfSubIndex;
 use lance_index::vector::v3::subindex::SubIndexType;
+#[cfg(feature = "write")]
+use lance_index::{
+    INDEX_AUXILIARY_FILE_NAME, INDEX_FILE_NAME, INDEX_METADATA_SCHEMA_KEY, IndexMetadata,
+    MAX_PARTITION_SIZE_FACTOR, MIN_PARTITION_SIZE_PERCENT,
+    optimize::OptimizeOptions,
+    pb,
+    vector::{
+        hnsw::{HNSW, builder::HnswBuildParams},
+        ivf::{
+            IvfBuildParams, builder::load_precomputed_partitions, shuffler::shuffle_dataset,
+            storage::IVF_PARTITION_KEY,
+        },
+        pq::PQBuildParams,
+        quantizer::{Quantization, QuantizationMetadata, QuantizerStorage},
+        sq::storage::{SQ_METADATA_KEY, ScalarQuantizationMetadata, ScalarQuantizationStorage},
+    },
+};
 use lance_index::{
     Index, IndexType,
     vector::{
@@ -43,25 +150,85 @@ use lance_index::{
         sq::ScalarQuantizer,
     },
 };
+#[cfg(feature = "write")]
+use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
+#[cfg(feature = "write")]
+use lance_io::utils::CachedFileSize;
+#[cfg(feature = "write")]
+use lance_io::{
+    ReadBatchParams,
+    object_store::ObjectStore,
+    stream::RecordBatchStream,
+    traits::{WriteExt, Writer},
+};
 use lance_io::{local::to_local_path, traits::Reader};
 use lance_linalg::distance::MetricType;
+#[cfg(feature = "write")]
+use lance_linalg::distance::{DistanceType, Dot, L2};
+#[cfg(feature = "write")]
+use lance_linalg::{distance::Normalize, kernels::normalize_fsl_owned};
 use lance_select::RowAddrTreeMap;
+#[cfg(feature = "write")]
+use lance_table::format::{IndexFile, IndexMetadata as TableIndexMetadata};
+#[cfg(feature = "write")]
+use log::info;
 use log::warn;
+#[cfg(feature = "write")]
+use num_traits::{AsPrimitive, Float, FromPrimitive};
+#[cfg(feature = "write")]
+use object_store::path::Path;
+#[cfg(feature = "write")]
+use prost::Message;
+#[cfg(feature = "write")]
+use rand::rngs::SmallRng;
+#[cfg(feature = "write")]
+use rand::{Rng, SeedableRng};
 use roaring::RoaringBitmap;
+#[cfg(feature = "write")]
+use roaring::RoaringTreemap;
 use serde::Serialize;
+#[cfg(feature = "write")]
+use serde_json::json;
 use std::{
     any::Any,
     sync::{Arc, OnceLock},
 };
+#[cfg(feature = "write")]
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    ops::Range,
+    pin::Pin,
+};
+#[cfg(feature = "write")]
+use tokio::sync::{Mutex, mpsc};
 use tracing::instrument;
 use uuid::Uuid;
 
+#[cfg(feature = "write")]
+pub mod builder;
+
 mod compatibility;
+
+#[cfg(feature = "write")]
+mod coreset_algo;
+
+#[cfg(feature = "write")]
+pub mod io;
+
 mod partition_serde;
 mod shape;
+
+#[cfg(feature = "write")]
+mod streaming_hamming;
+
 pub mod v2;
 
 pub(crate) use compatibility::VectorQueryContract;
+#[cfg(feature = "write")]
+pub(crate) use compatibility::validate_committed_vector_segments;
+#[cfg(feature = "write")]
+use coreset_algo::{FloatCoresetAlgorithm, HammingCoresetAlgorithm, StreamingCoresetAlgorithm};
 
 // Cache wrapper for vector index trait objects
 // Cache key for IVF partitions in the legacy IVF index
@@ -277,6 +444,899 @@ impl std::fmt::Debug for IVFIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Ivf({}) -> {:?}", self.metric_type, self.sub_index)
     }
+}
+
+#[cfg(feature = "write")]
+#[derive(Clone, Copy, Debug)]
+struct SegmentRebalanceCandidate {
+    segment_id: Uuid,
+    score: usize,
+    created_at_ms: i64,
+}
+
+#[cfg(feature = "write")]
+fn candidate_is_better(
+    candidate: SegmentRebalanceCandidate,
+    current_best: Option<SegmentRebalanceCandidate>,
+) -> bool {
+    match current_best {
+        None => true,
+        Some(current_best) => {
+            candidate.score > current_best.score
+                || (candidate.score == current_best.score
+                    && (candidate.created_at_ms, candidate.segment_id.as_bytes())
+                        < (
+                            current_best.created_at_ms,
+                            current_best.segment_id.as_bytes(),
+                        ))
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn index_type_for_segmented_optimize(index: &dyn VectorIndex) -> Result<IndexType> {
+    let (sub_index_type, quantization_type) = index.sub_index_type();
+    IndexType::try_from(index_type_string(sub_index_type, quantization_type).as_str())
+}
+
+#[cfg(feature = "write")]
+/// What a steady-state optimize (no new rows) should do to a logical IVF index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SteadyStateRebalance {
+    /// Rewrite this one segment alone: it holds oversized partitions.
+    Segment(Uuid),
+    /// Merge every segment: some partitions are undersized across the whole
+    /// logical index, which only a merge can repair.
+    MergeAll,
+}
+
+#[cfg(feature = "write")]
+/// Pick the steady-state rebalance for a logical IVF index.
+///
+/// Splits are decided per segment, since an oversized partition lives in one
+/// segment's file. Joins are decided on the partition sizes summed over all
+/// segments: a delta segment's partitions are small on their own but normal
+/// once merged with the base segment, so joining them per segment would
+/// collapse every delta into a handful of partitions. That merge needs the
+/// segments to share one model, so segments with different centroids (whose
+/// partition ids do not even correspond) are never joined.
+pub(crate) fn select_steady_state_rebalance(
+    logical_index: &LogicalIvfView<'_>,
+    compatibility: VectorSegmentCompatibility,
+) -> Result<Option<SteadyStateRebalance>> {
+    let mut best_split = None;
+    let mut summed_sizes: Vec<usize> = Vec::new();
+    let mut join_threshold = None;
+
+    for (metadata, index) in logical_index.segments() {
+        // The legacy writer keeps the partitions it is given, so rebalancing a
+        // legacy segment would rewrite the same file on every optimize.
+        // An index with a legacy segment never joins either: its segments do
+        // not share a storage format, or all are legacy and leave no join
+        // threshold.
+        if index.as_any().is::<IVFIndex>() {
+            continue;
+        }
+        let index_type = index_type_for_segmented_optimize(index.as_ref())?;
+        let target_partition_size = metadata
+            .index_details
+            .as_deref()
+            .and_then(target_partition_size_from_details)
+            .unwrap_or_else(|| index_type.target_partition_size());
+        let split_threshold = MAX_PARTITION_SIZE_FACTOR * target_partition_size;
+        // The builder derives its thresholds from the first segment's target.
+        join_threshold.get_or_insert(MIN_PARTITION_SIZE_PERCENT * target_partition_size / 100);
+        let num_partitions = index.ivf_model().num_partitions();
+        if num_partitions == 0 {
+            continue;
+        }
+        if summed_sizes.len() < num_partitions {
+            summed_sizes.resize(num_partitions, 0);
+        }
+
+        let mut split_partition_count = 0usize;
+        for (partition_id, summed_size) in summed_sizes.iter_mut().enumerate().take(num_partitions)
+        {
+            let partition_size = index.partition_size(partition_id);
+            *summed_size += partition_size;
+            if partition_size > split_threshold {
+                split_partition_count += 1;
+            }
+        }
+
+        let created_at_ms = metadata
+            .created_at
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(i64::MIN);
+
+        let split_candidate = (split_partition_count > 0).then_some(SegmentRebalanceCandidate {
+            segment_id: metadata.uuid,
+            score: split_partition_count,
+            created_at_ms,
+        });
+        if let Some(candidate) = split_candidate
+            && candidate_is_better(candidate, best_split)
+        {
+            best_split = Some(candidate);
+        }
+    }
+
+    if let Some(candidate) = best_split {
+        return Ok(Some(SteadyStateRebalance::Segment(candidate.segment_id)));
+    }
+    if compatibility != VectorSegmentCompatibility::SharedModel {
+        return Ok(None);
+    }
+    let Some(join_threshold) = join_threshold else {
+        return Ok(None);
+    };
+    let has_join_candidate =
+        summed_sizes.len() > 1 && summed_sizes.iter().any(|&size| size < join_threshold);
+    Ok(has_join_candidate.then_some(SteadyStateRebalance::MergeAll))
+}
+
+#[cfg(feature = "write")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VectorSegmentCompatibility {
+    SharedModel,
+    QueryCompatibleModelsDiffer,
+}
+
+#[cfg(feature = "write")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VectorModelMismatch {
+    StorageFormat,
+    IvfCentroids,
+    QuantizerMetadata,
+}
+
+#[cfg(feature = "write")]
+fn vector_index_dimension(index: &dyn VectorIndex) -> usize {
+    let ivf_dimension = index.ivf_model().dimension();
+    if ivf_dimension != 0 {
+        return ivf_dimension;
+    }
+
+    match index.quantizer() {
+        Quantizer::Flat(quantizer) => quantizer.metadata(None).dim,
+        Quantizer::FlatBin(quantizer) => quantizer.metadata(None).dim,
+        Quantizer::Product(quantizer) => quantizer.dimension,
+        Quantizer::Scalar(quantizer) => quantizer.metadata(None).dim,
+        Quantizer::Rabit(quantizer) => quantizer.metadata(None).rotated_dim(),
+    }
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn validate_vector_query_compatibility(
+    indices: &[Arc<dyn VectorIndex>],
+    operation: &str,
+) -> Result<()> {
+    let Some(first) = indices.first() else {
+        return Ok(());
+    };
+
+    let first_metric = first.metric_type();
+    let first_dimension = vector_index_dimension(first.as_ref());
+    let first_index_type = first.sub_index_type();
+    let first_quantizer = first.quantizer();
+    let first_quantizer_type = first_quantizer.quantization_type();
+
+    for (idx, index) in indices.iter().enumerate().skip(1) {
+        if index.metric_type() != first_metric {
+            return Err(Error::index(format!(
+                "{operation}: vector index segment {idx} has metric {:?}, expected {:?}",
+                index.metric_type(),
+                first_metric
+            )));
+        }
+        let dimension = vector_index_dimension(index.as_ref());
+        if dimension != first_dimension {
+            return Err(Error::index(format!(
+                "{operation}: vector index segment {idx} has dimension {dimension}, expected {first_dimension}"
+            )));
+        }
+        let index_type = index.sub_index_type();
+        if std::mem::discriminant(&index_type.0) != std::mem::discriminant(&first_index_type.0)
+            || index_type.1 != first_index_type.1
+        {
+            return Err(Error::index(format!(
+                "{operation}: vector index segment {idx} has type {:?}, expected {:?}",
+                index_type, first_index_type
+            )));
+        }
+
+        let quantizer = index.quantizer();
+        if quantizer.quantization_type() != first_quantizer_type {
+            return Err(Error::index(format!(
+                "{operation}: vector index segment {idx} has quantizer {:?}, expected {:?}",
+                quantizer.quantization_type(),
+                first_quantizer_type
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+fn vector_model_mismatch(indices: &[Arc<dyn VectorIndex>]) -> Option<VectorModelMismatch> {
+    let first = indices.first()?;
+    let first_centroids = first.ivf_model().centroids_array();
+    let first_quantizer = first.quantizer();
+
+    for index in indices.iter().skip(1) {
+        if first.as_any().type_id() != index.as_any().type_id() {
+            return Some(VectorModelMismatch::StorageFormat);
+        }
+        match (first_centroids, index.ivf_model().centroids_array()) {
+            (Some(expected), Some(actual)) if expected.to_data() != actual.to_data() => {
+                return Some(VectorModelMismatch::IvfCentroids);
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                return Some(VectorModelMismatch::IvfCentroids);
+            }
+            _ => {}
+        }
+
+        if !shared_quantizer_model(&first_quantizer, &index.quantizer()) {
+            return Some(VectorModelMismatch::QuantizerMetadata);
+        }
+    }
+
+    None
+}
+
+#[cfg(feature = "write")]
+fn vector_segments_share_merge_model(
+    left: (&TableIndexMetadata, &Arc<dyn VectorIndex>),
+    right: (&TableIndexMetadata, &Arc<dyn VectorIndex>),
+) -> bool {
+    if left.0.index_version != right.0.index_version {
+        return false;
+    }
+
+    let indices = [left.1.clone(), right.1.clone()];
+    validate_vector_query_compatibility(&indices, "merging vector index segments").is_ok()
+        && vector_model_mismatch(&indices).is_none()
+}
+
+#[cfg(feature = "write")]
+/// Partition a logical vector index into groups that remain acceptable to the
+/// distributed merger after compaction remaps their row addresses.
+pub(crate) fn compaction_vector_segment_merge_groups(
+    logical_index: &LogicalIvfView<'_>,
+) -> Vec<Vec<Uuid>> {
+    let can_merge_after_remap = |index: &dyn VectorIndex| {
+        // Legacy readers have no v2 model inspection. HNSW remapping preserves
+        // graphs, whereas merging would rebuild them. PQ/RQ remaps write query
+        // layouts that the row-major distributed merger cannot consume.
+        !index.as_any().is::<IVFIndex>()
+            && matches!(
+                index.sub_index_type(),
+                (
+                    SubIndexType::Flat,
+                    QuantizationType::Flat | QuantizationType::Scalar
+                )
+            )
+    };
+    let segments = logical_index.segments().collect::<Vec<_>>();
+    let mut groups = Vec::<Vec<usize>>::new();
+
+    for segment_idx in 0..segments.len() {
+        if !can_merge_after_remap(segments[segment_idx].1.as_ref()) {
+            groups.push(vec![segment_idx]);
+            continue;
+        }
+        if let Some(group) = groups.iter_mut().find(|group| {
+            can_merge_after_remap(segments[group[0]].1.as_ref())
+                && vector_segments_share_merge_model(segments[group[0]], segments[segment_idx])
+        }) {
+            group.push(segment_idx);
+        } else {
+            groups.push(vec![segment_idx]);
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|group| {
+            group
+                .into_iter()
+                .map(|segment_idx| segments[segment_idx].0.uuid)
+                .collect()
+        })
+        .collect()
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn vector_segment_compatibility(
+    logical_index: &LogicalIvfView<'_>,
+    operation: &str,
+) -> Result<VectorSegmentCompatibility> {
+    let indices = logical_index.indices().cloned().collect::<Vec<_>>();
+    validate_vector_query_compatibility(&indices, operation)?;
+
+    Ok(if vector_model_mismatch(&indices).is_none() {
+        VectorSegmentCompatibility::SharedModel
+    } else {
+        VectorSegmentCompatibility::QueryCompatibleModelsDiffer
+    })
+}
+
+#[cfg(feature = "write")]
+fn validate_shared_vector_model(indices: &[Arc<dyn VectorIndex>], operation: &str) -> Result<()> {
+    validate_vector_query_compatibility(indices, operation)?;
+    match vector_model_mismatch(indices) {
+        Some(VectorModelMismatch::StorageFormat) => Err(Error::index(format!(
+            "{operation}: vector index segments do not share a storage format"
+        ))),
+        Some(VectorModelMismatch::IvfCentroids) => Err(Error::index(format!(
+            "{operation}: vector index segments do not share IVF centroids"
+        ))),
+        Some(VectorModelMismatch::QuantizerMetadata) => Err(Error::index(format!(
+            "{operation}: vector index segments do not share quantizer metadata"
+        ))),
+        None => Ok(()),
+    }
+}
+
+#[cfg(feature = "write")]
+fn shared_quantizer_model(left: &Quantizer, right: &Quantizer) -> bool {
+    match (left, right) {
+        (Quantizer::Flat(left), Quantizer::Flat(right)) => {
+            left.metadata(None).dim == right.metadata(None).dim
+        }
+        (Quantizer::FlatBin(left), Quantizer::FlatBin(right)) => {
+            left.metadata(None).dim == right.metadata(None).dim
+        }
+        (Quantizer::Product(left), Quantizer::Product(right)) => {
+            left.num_sub_vectors == right.num_sub_vectors
+                && left.num_bits == right.num_bits
+                && left.dimension == right.dimension
+                && left.distance_type == right.distance_type
+                && left.codebook.to_data() == right.codebook.to_data()
+        }
+        (Quantizer::Scalar(left), Quantizer::Scalar(right)) => {
+            left.metadata(None) == right.metadata(None)
+        }
+        (Quantizer::Rabit(left), Quantizer::Rabit(right)) => {
+            let left = left.metadata(None);
+            let right = right.metadata(None);
+            left.rotation_type == right.rotation_type
+                && left.code_dim == right.code_dim
+                && left.num_bits == right.num_bits
+                && left.packed == right.packed
+                && left.query_estimator == right.query_estimator
+                && left.fast_rotation_signs == right.fast_rotation_signs
+                && match (&left.rotate_mat, &right.rotate_mat) {
+                    (Some(left), Some(right)) => left.to_data() == right.to_data(),
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+        _ => false,
+    }
+}
+
+#[cfg(feature = "write")]
+/// Pair every segment with the coverage that decides which of its rows this optimize
+/// pass may still copy into the new index.
+///
+/// A segment that predates fragment bitmaps has unknown coverage, so it keeps every
+/// row it holds. Turning coverage into a filter is deferred to the first partition
+/// that actually reads the segment, because under stable row ids it costs a row-id
+/// sequence load per covered fragment and most passes only append a delta.
+fn existing_index_sources(
+    dataset: &Dataset,
+    logical_index: &LogicalIvfView<'_>,
+) -> Vec<ExistingIndex> {
+    logical_index
+        .segments()
+        .map(|(metadata, index)| {
+            let (Some(effective), Some(deleted)) = (
+                metadata.effective_fragment_bitmap(&dataset.table_state.fragment_bitmap),
+                metadata.deleted_fragment_bitmap(&dataset.table_state.fragment_bitmap),
+            ) else {
+                return ExistingIndex::unfiltered(index.clone());
+            };
+            ExistingIndex::with_coverage(index.clone(), dataset.clone(), effective, deleted)
+        })
+        .collect()
+}
+
+#[cfg(feature = "write")]
+// TODO: move to `lance-index` crate.
+///
+/// Returns (new_uuid, num_indices_merged, files)
+pub(crate) async fn optimize_vector_indices(
+    dataset: Dataset,
+    unindexed: Option<impl RecordBatchStream + Unpin + 'static>,
+    vector_column: &str,
+    logical_index: &LogicalIvfView<'_>,
+    options: &OptimizeOptions,
+) -> Result<(Uuid, usize, Vec<IndexFile>)> {
+    let existing_indices = logical_index.indices().cloned().collect::<Vec<_>>();
+    // Sanity check the indices
+    if existing_indices.is_empty() {
+        return Err(Error::index(
+            "optimizing vector index: no existing index found".to_string(),
+        ));
+    }
+    validate_shared_vector_model(&existing_indices, "optimizing vector index")?;
+
+    // try cast to v1 IVFIndex,
+    // fallback to v2 IVFIndex if it's not v1 IVFIndex
+    if !existing_indices[0].as_any().is::<IVFIndex>() {
+        let sources = existing_index_sources(&dataset, logical_index);
+        let target_partition_size = logical_index
+            .segments()
+            .next()
+            .and_then(|(metadata, _)| metadata.index_details.as_deref())
+            .and_then(target_partition_size_from_details);
+        return optimize_vector_indices_v2(
+            &dataset,
+            unindexed,
+            vector_column,
+            &sources,
+            options,
+            target_partition_size,
+        )
+        .await;
+    }
+
+    let first_idx = existing_indices[0]
+        .as_any()
+        .downcast_ref::<IVFIndex>()
+        .ok_or(Error::index(
+            "optimizing vector index: the first index isn't IVF".to_string(),
+        ))?;
+    // Only the legacy IVF_PQ writer exists. Reject every other legacy
+    // sub-index before creating any output file: the HNSW partition writer
+    // rejects scalar quantization, so allowing it here would create empty
+    // index and auxiliary writers before failing.
+    if !first_idx.sub_index.as_any().is::<PQIndex>() {
+        let (sub_index_type, quantization_type) = first_idx.sub_index.sub_index_type();
+        // Retraining a released 0.11 HNSW_SQ segment fails while it scans the
+        // vector column: without index details, the planner mistakes the legacy
+        // vector index for a scalar one and looks for page_lookup.lance.
+        let rebuild = if matches!(
+            (sub_index_type, quantization_type),
+            (SubIndexType::Hnsw, QuantizationType::Scalar)
+        ) {
+            "drop it with drop_index and rebuild it from the data with create_index"
+        } else {
+            "set retrain to rebuild it in the current format"
+        };
+        return Err(Error::not_supported(format!(
+            "optimizing vector index: a legacy-format {} index cannot be optimized \
+             incrementally; {rebuild}",
+            index_type_string(sub_index_type, quantization_type)
+        )));
+    }
+    // The legacy writers keep every posting of the segments they merge. With
+    // stable row ids an updated row keeps its id in its new fragment, so its
+    // old entry would stay in the index next to the new one.
+    if dataset.manifest.uses_stable_row_ids() && options.num_indices_to_merge != Some(0) {
+        return Err(Error::not_supported(
+            "optimizing vector index: a legacy-format vector index cannot merge segments on a \
+             table with stable row ids; set num_indices_to_merge to 0 to append a segment, or \
+             set retrain to rebuild the index in the current format"
+                .to_string(),
+        ));
+    }
+
+    let new_uuid = Uuid::new_v4();
+    let object_store = dataset.table_state.object_store.as_ref();
+    let index_file = dataset
+        .indices_dir()
+        .join(new_uuid.to_string())
+        .join(INDEX_FILE_NAME);
+    let writer = object_store.create(&index_file).await?;
+
+    let pq_index = first_idx
+        .sub_index
+        .as_any()
+        .downcast_ref::<PQIndex>()
+        .ok_or_else(|| {
+            Error::internal(
+                "optimizing vector index: the legacy sub index was checked above".to_string(),
+            )
+        })?;
+    let (merged, file) = optimize_ivf_pq_indices(
+        first_idx,
+        pq_index,
+        vector_column,
+        unindexed,
+        &existing_indices,
+        options,
+        writer,
+        dataset.version().version,
+    )
+    .await?;
+
+    // never change the index version,
+    // because we won't update the legacy vector index format
+    Ok((new_uuid, merged, vec![file]))
+}
+
+#[cfg(feature = "write")]
+pub(crate) async fn optimize_vector_indices_v2(
+    dataset: &Dataset,
+    unindexed: Option<impl RecordBatchStream + Unpin + 'static>,
+    vector_column: &str,
+    existing_indices: &[ExistingIndex],
+    options: &OptimizeOptions,
+    target_partition_size: Option<usize>,
+) -> Result<(Uuid, usize, Vec<IndexFile>)> {
+    // Sanity check the indices
+    if existing_indices.is_empty() {
+        return Err(Error::index(
+            "optimizing vector index: no existing index found".to_string(),
+        ));
+    }
+    let existing_indices = existing_indices.to_vec();
+
+    let new_uuid = Uuid::new_v4();
+    let index_dir = dataset.indices_dir().join(new_uuid.to_string());
+    let reference_index = &existing_indices[0].index;
+    let ivf_model = reference_index.ivf_model();
+    let quantizer = reference_index.quantizer();
+    let distance_type = reference_index.metric_type();
+    let num_partitions = ivf_model.num_partitions();
+    let index_type = reference_index.sub_index_type();
+    let frag_reuse_index = dataset.open_frag_reuse_index(&NoOpMetricsCollector).await?;
+
+    let format_version = dataset_format_version(dataset);
+
+    let shuffler = create_owned_ivf_shuffler(num_partitions, format_version, None)?;
+
+    let (_, element_type) = get_vector_type(dataset.schema(), vector_column)?;
+    let summary = match index_type {
+        // IVF_FLAT
+        (SubIndexType::Flat, QuantizationType::Flat) => {
+            if element_type == DataType::UInt8 {
+                IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new_incremental(
+                    dataset.clone(),
+                    vector_column.to_owned(),
+                    index_dir,
+                    distance_type,
+                    shuffler,
+                    (),
+                    frag_reuse_index,
+                    options.clone(),
+                )?
+                .with_ivf(ivf_model.clone())
+                .with_quantizer(quantizer.try_into()?)
+                .with_existing_index_sources(existing_indices.clone())
+                .with_progress(options.progress.clone())
+                .with_target_partition_size(target_partition_size)
+                .shuffle_data_input(unindexed)
+                .build()
+                .await?
+            } else {
+                IvfIndexBuilder::<FlatIndex, FlatQuantizer>::new_incremental(
+                    dataset.clone(),
+                    vector_column.to_owned(),
+                    index_dir,
+                    distance_type,
+                    shuffler,
+                    (),
+                    frag_reuse_index,
+                    options.clone(),
+                )?
+                .with_ivf(ivf_model.clone())
+                .with_quantizer(quantizer.try_into()?)
+                .with_existing_index_sources(existing_indices.clone())
+                .with_progress(options.progress.clone())
+                .with_target_partition_size(target_partition_size)
+                .shuffle_data_input(unindexed)
+                .build()
+                .await?
+            }
+        }
+        // IVF_FLAT (binary vectors)
+        (SubIndexType::Flat, QuantizationType::FlatBin) => {
+            IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new_incremental(
+                dataset.clone(),
+                vector_column.to_owned(),
+                index_dir,
+                distance_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                options.clone(),
+            )?
+            .with_ivf(ivf_model.clone())
+            .with_quantizer(quantizer.try_into()?)
+            .with_existing_index_sources(existing_indices.clone())
+            .with_progress(options.progress.clone())
+            .with_target_partition_size(target_partition_size)
+            .shuffle_data_input(unindexed)
+            .build()
+            .await?
+        }
+        // IVF_PQ
+        (SubIndexType::Flat, QuantizationType::Product) => {
+            IvfIndexBuilder::<FlatIndex, ProductQuantizer>::new_incremental(
+                dataset.clone(),
+                vector_column.to_owned(),
+                index_dir,
+                distance_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                options.clone(),
+            )?
+            .with_ivf(ivf_model.clone())
+            .with_quantizer(quantizer.try_into()?)
+            .with_existing_index_sources(existing_indices.clone())
+            .with_progress(options.progress.clone())
+            .with_target_partition_size(target_partition_size)
+            .shuffle_data_input(unindexed)
+            .build()
+            .await?
+        }
+        // IVF_SQ
+        (SubIndexType::Flat, QuantizationType::Scalar) => {
+            IvfIndexBuilder::<FlatIndex, ScalarQuantizer>::new_incremental(
+                dataset.clone(),
+                vector_column.to_owned(),
+                index_dir,
+                distance_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                options.clone(),
+            )?
+            .with_ivf(ivf_model.clone())
+            .with_quantizer(quantizer.try_into()?)
+            .with_existing_index_sources(existing_indices.clone())
+            .with_progress(options.progress.clone())
+            .with_target_partition_size(target_partition_size)
+            .shuffle_data_input(unindexed)
+            .build()
+            .await?
+        }
+        (SubIndexType::Flat, QuantizationType::Rabit) => {
+            IvfIndexBuilder::<FlatIndex, RabitQuantizer>::new_incremental(
+                dataset.clone(),
+                vector_column.to_owned(),
+                index_dir,
+                distance_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                options.clone(),
+            )?
+            .with_ivf(ivf_model.clone())
+            .with_quantizer(quantizer.try_into()?)
+            .with_existing_index_sources(existing_indices.clone())
+            .with_progress(options.progress.clone())
+            .with_target_partition_size(target_partition_size)
+            .shuffle_data_input(unindexed)
+            .build()
+            .await?
+        }
+        // IVF_HNSW_FLAT
+        (SubIndexType::Hnsw, QuantizationType::Flat) => {
+            if element_type == DataType::UInt8 {
+                IvfIndexBuilder::<HNSW, FlatBinQuantizer>::new_incremental(
+                    dataset.clone(),
+                    vector_column.to_owned(),
+                    index_dir,
+                    distance_type,
+                    shuffler,
+                    derive_hnsw_params(reference_index.as_ref()),
+                    frag_reuse_index,
+                    options.clone(),
+                )?
+                .with_ivf(ivf_model.clone())
+                .with_quantizer(quantizer.try_into()?)
+                .with_existing_index_sources(existing_indices.clone())
+                .with_progress(options.progress.clone())
+                .with_target_partition_size(target_partition_size)
+                .shuffle_data_input(unindexed)
+                .build()
+                .await?
+            } else {
+                IvfIndexBuilder::<HNSW, FlatQuantizer>::new_incremental(
+                    dataset.clone(),
+                    vector_column.to_owned(),
+                    index_dir,
+                    distance_type,
+                    shuffler,
+                    derive_hnsw_params(reference_index.as_ref()),
+                    frag_reuse_index,
+                    options.clone(),
+                )?
+                .with_ivf(ivf_model.clone())
+                .with_quantizer(quantizer.try_into()?)
+                .with_existing_index_sources(existing_indices.clone())
+                .with_progress(options.progress.clone())
+                .with_target_partition_size(target_partition_size)
+                .shuffle_data_input(unindexed)
+                .build()
+                .await?
+            }
+        }
+        // IVF_HNSW_FLAT (binary vectors)
+        (SubIndexType::Hnsw, QuantizationType::FlatBin) => {
+            IvfIndexBuilder::<HNSW, FlatBinQuantizer>::new_incremental(
+                dataset.clone(),
+                vector_column.to_owned(),
+                index_dir,
+                distance_type,
+                shuffler,
+                derive_hnsw_params(reference_index.as_ref()),
+                frag_reuse_index,
+                options.clone(),
+            )?
+            .with_ivf(ivf_model.clone())
+            .with_quantizer(quantizer.try_into()?)
+            .with_existing_index_sources(existing_indices.clone())
+            .with_progress(options.progress.clone())
+            .with_target_partition_size(target_partition_size)
+            .shuffle_data_input(unindexed)
+            .build()
+            .await?
+        }
+        // IVF_HNSW_SQ
+        (SubIndexType::Hnsw, QuantizationType::Scalar) => {
+            IvfIndexBuilder::<HNSW, ScalarQuantizer>::new_incremental(
+                dataset.clone(),
+                vector_column.to_owned(),
+                index_dir,
+                distance_type,
+                shuffler,
+                derive_hnsw_params(reference_index.as_ref()),
+                frag_reuse_index,
+                options.clone(),
+            )?
+            .with_ivf(ivf_model.clone())
+            .with_quantizer(quantizer.try_into()?)
+            .with_existing_index_sources(existing_indices.clone())
+            .with_progress(options.progress.clone())
+            .with_target_partition_size(target_partition_size)
+            .shuffle_data_input(unindexed)
+            .build()
+            .await?
+        }
+        // IVF_HNSW_PQ
+        (SubIndexType::Hnsw, QuantizationType::Product) => {
+            IvfIndexBuilder::<HNSW, ProductQuantizer>::new_incremental(
+                dataset.clone(),
+                vector_column.to_owned(),
+                index_dir,
+                distance_type,
+                shuffler,
+                derive_hnsw_params(reference_index.as_ref()),
+                frag_reuse_index,
+                options.clone(),
+            )?
+            .with_ivf(ivf_model.clone())
+            .with_quantizer(quantizer.try_into()?)
+            .with_existing_index_sources(existing_indices.clone())
+            .with_progress(options.progress.clone())
+            .with_target_partition_size(target_partition_size)
+            .shuffle_data_input(unindexed)
+            .build()
+            .await?
+        }
+        // IVF_HNSW_RQ
+        (SubIndexType::Hnsw, QuantizationType::Rabit) => {
+            IvfIndexBuilder::<HNSW, RabitQuantizer>::new_incremental(
+                dataset.clone(),
+                vector_column.to_owned(),
+                index_dir,
+                distance_type,
+                shuffler,
+                derive_hnsw_params(reference_index.as_ref()),
+                frag_reuse_index,
+                options.clone(),
+            )?
+            .with_ivf(ivf_model.clone())
+            .with_quantizer(quantizer.try_into()?)
+            .with_existing_index_sources(existing_indices.clone())
+            .with_progress(options.progress.clone())
+            .with_target_partition_size(target_partition_size)
+            .shuffle_data_input(unindexed)
+            .build()
+            .await?
+        }
+    };
+
+    Ok((new_uuid, summary.indices_merged, summary.files))
+}
+
+#[cfg(feature = "write")]
+#[allow(clippy::too_many_arguments)]
+async fn optimize_ivf_pq_indices(
+    first_idx: &IVFIndex,
+    pq_index: &PQIndex,
+    vector_column: &str,
+    unindexed: Option<impl RecordBatchStream + Unpin + 'static>,
+    existing_indices: &[Arc<dyn VectorIndex>],
+    options: &OptimizeOptions,
+    mut writer: Box<dyn Writer>,
+    dataset_version: u64,
+) -> Result<(usize, IndexFile)> {
+    let metric_type = first_idx.metric_type;
+    let dim = first_idx.ivf.dimension();
+
+    // TODO: merge `lance::vector::ivf::IVF` and `lance-index::vector::ivf::Ivf`` implementations.
+    let ivf = lance_index::vector::ivf::IvfTransformer::with_pq(
+        first_idx.ivf.centroids.clone().unwrap(),
+        metric_type,
+        vector_column,
+        pq_index.pq.clone(),
+        None,
+    );
+
+    // Shuffled un-indexed data with partition.
+    let shuffled = match unindexed {
+        Some(unindexed) => Some(
+            shuffle_dataset(
+                unindexed,
+                ivf.into(),
+                None,
+                first_idx.ivf.num_partitions() as u32,
+                10000,
+                2,
+                None,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+
+    let mut ivf_mut = IvfModel::new(first_idx.ivf.centroids.clone().unwrap(), first_idx.ivf.loss);
+
+    let start_pos = existing_indices
+        .len()
+        .saturating_sub(options.num_indices_to_merge.unwrap_or(1));
+
+    let indices_to_merge = existing_indices[start_pos..]
+        .iter()
+        .map(|idx| {
+            idx.as_any().downcast_ref::<IVFIndex>().ok_or(Error::index(
+                "optimizing vector index: it is not a IVF index".to_string(),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    write_pq_partitions(
+        writer.as_mut(),
+        &mut ivf_mut,
+        shuffled,
+        Some(&indices_to_merge),
+    )
+    .await?;
+    let metadata = IvfPQIndexMetadata {
+        name: format!("_{}_idx", vector_column),
+        column: vector_column.to_string(),
+        dimension: dim as u32,
+        dataset_version,
+        metric_type,
+        ivf: ivf_mut,
+        pq: pq_index.pq.clone(),
+        transforms: vec![],
+    };
+
+    let metadata = pb::Index::try_from(&metadata)?;
+    let pos = writer.write_protobuf(&metadata).await?;
+    // TODO: for now the IVF_PQ index file format hasn't been updated, so keep the old version,
+    // change it to latest version value after refactoring the IVF_PQ
+    writer.write_magics(pos, 0, 1, MAGIC).await?;
+    let size_bytes = writer.tell().await? as u64;
+    Writer::shutdown(writer.as_mut()).await?;
+
+    Ok((
+        existing_indices.len() - start_pos,
+        IndexFile {
+            path: INDEX_FILE_NAME.to_string(),
+            size_bytes,
+            file_metadata_size_bytes: None,
+        },
+    ))
 }
 
 #[derive(Serialize)]
@@ -588,8 +1648,4554 @@ impl VectorIndex for IVFIndex {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(feature = "write")]
+/// Ivf PQ index metadata.
+///
+/// It contains the on-disk data for a IVF PQ index.
+#[derive(Debug)]
+pub struct IvfPQIndexMetadata {
+    /// Index name
+    name: String,
+
+    /// The column to build the index for.
+    column: String,
+
+    /// Vector dimension.
+    dimension: u32,
+
+    /// The version of dataset where this index was built.
+    dataset_version: u64,
+
+    /// Metric to compute distance
+    pub(crate) metric_type: MetricType,
+
+    /// IVF model
+    pub(crate) ivf: IvfModel,
+
+    /// Product Quantizer
+    pub(crate) pq: ProductQuantizer,
+
+    /// Transforms to be applied before search.
+    transforms: Vec<pb::Transform>,
+}
+
+#[cfg(feature = "write")]
+impl IvfPQIndexMetadata {
+    /// Create a new IvfPQIndexMetadata object
+    pub fn new(
+        name: String,
+        column: String,
+        dataset_version: u64,
+        metric_type: MetricType,
+        ivf: IvfModel,
+        pq: ProductQuantizer,
+        transforms: Vec<pb::Transform>,
+    ) -> Self {
+        let dimension = ivf.dimension() as u32;
+        Self {
+            name,
+            column,
+            dimension,
+            dataset_version,
+            metric_type,
+            ivf,
+            pq,
+            transforms,
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+/// Convert a IvfPQIndex to protobuf payload
+impl TryFrom<&IvfPQIndexMetadata> for pb::Index {
+    type Error = Error;
+
+    fn try_from(idx: &IvfPQIndexMetadata) -> Result<Self> {
+        let mut stages: Vec<pb::VectorIndexStage> = idx
+            .transforms
+            .iter()
+            .map(|tf| {
+                Ok(pb::VectorIndexStage {
+                    stage: Some(pb::vector_index_stage::Stage::Transform(tf.clone())),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        stages.extend_from_slice(&[
+            pb::VectorIndexStage {
+                stage: Some(pb::vector_index_stage::Stage::Ivf(pb::Ivf::try_from(
+                    &idx.ivf,
+                )?)),
+            },
+            pb::VectorIndexStage {
+                stage: Some(pb::vector_index_stage::Stage::Pq(pb::Pq::try_from(
+                    &idx.pq,
+                )?)),
+            },
+        ]);
+
+        Ok(Self {
+            name: idx.name.clone(),
+            columns: vec![idx.column.clone()],
+            dataset_version: idx.dataset_version,
+            index_type: pb::IndexType::Vector.into(),
+            implementation: Some(pb::index::Implementation::VectorIndex(pb::VectorIndex {
+                spec_version: 1,
+                dimension: idx.dimension,
+                stages,
+                metric_type: match idx.metric_type {
+                    MetricType::L2 => pb::VectorMetricType::L2.into(),
+                    MetricType::Cosine => pb::VectorMetricType::Cosine.into(),
+                    MetricType::Dot => pb::VectorMetricType::Dot.into(),
+                    MetricType::Hamming => pb::VectorMetricType::Hamming.into(),
+                },
+            })),
+        })
+    }
+}
+
+#[cfg(feature = "write")]
+fn sanity_check_ivf_params(ivf: &IvfBuildParams) -> Result<()> {
+    if ivf.precomputed_partitions_file.is_some() && ivf.centroids.is_none() {
+        return Err(Error::index(
+            "precomputed_partitions_file requires centroids to be set".to_string(),
+        ));
+    }
+
+    if ivf.precomputed_shuffle_buffers.is_some() && ivf.centroids.is_none() {
+        return Err(Error::index(
+            "precomputed_shuffle_buffers requires centroids to be set".to_string(),
+        ));
+    }
+
+    if ivf.precomputed_shuffle_buffers.is_some() && ivf.precomputed_partitions_file.is_some() {
+        return Err(Error::index(
+            "precomputed_shuffle_buffers and precomputed_partitions_file are mutually exclusive"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+fn sanity_check_params(ivf: &IvfBuildParams, pq: &PQBuildParams) -> Result<()> {
+    sanity_check_ivf_params(ivf)?;
+    if ivf.precomputed_shuffle_buffers.is_some() && pq.codebook.is_none() {
+        return Err(Error::index(
+            "precomputed_shuffle_buffers requires codebooks to be set".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+/// Build IVF model from the dataset.
+///
+/// Parameters
+/// ----------
+/// - *dataset*: Dataset instance
+/// - *column*: vector column.
+/// - *dim*: vector dimension.
+/// - *metric_type*: distance metric type.
+/// - *params*: IVF build parameters.
+///
+/// Returns
+/// -------
+/// - IVF model.
+///
+/// Visibility: pub(super) for testing
+pub async fn build_ivf_model(
+    dataset: &Dataset,
+    column: &str,
+    dim: usize,
+    metric_type: MetricType,
+    params: &IvfBuildParams,
+    fragment_ids: Option<&[u32]>,
+    progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<IvfModel> {
+    build_ivf_model_with_sample_loss(
+        dataset,
+        column,
+        dim,
+        metric_type,
+        params,
+        fragment_ids,
+        progress,
+        SampleLoss::Measure,
+    )
+    .await
+}
+
+#[cfg(feature = "write")]
+/// Whether IVF training from a sample measures the k-means loss over that
+/// sample, which takes one more assignment of every sampled vector to every
+/// centroid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SampleLoss {
+    Measure,
+    /// For an index build, whose merge replaces the model's loss with the one
+    /// its shuffle measured over every row.
+    Skip,
+}
+
+#[cfg(feature = "write")]
+/// [`build_ivf_model`] that measures the training loss only when
+/// `sample_loss` asks for it. Streaming training always reports its loss.
+#[allow(clippy::too_many_arguments)]
+#[instrument(level = "debug", skip_all, name = "build_ivf_model")]
+pub(crate) async fn build_ivf_model_with_sample_loss(
+    dataset: &Dataset,
+    column: &str,
+    dim: usize,
+    metric_type: MetricType,
+    params: &IvfBuildParams,
+    fragment_ids: Option<&[u32]>,
+    progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+    sample_loss: SampleLoss,
+) -> Result<IvfModel> {
+    let num_partitions = params.num_partitions.unwrap();
+    let centroids = params.centroids.clone();
+    if let (Some(centroids), false) = (centroids.as_deref(), params.retrain) {
+        info!("Pre-computed IVF centroids is provided, skip IVF training");
+        if centroids.values().len() != num_partitions * dim {
+            return Err(Error::index(format!(
+                "IVF centroids length mismatch: {} != {}",
+                centroids.len(),
+                num_partitions * dim,
+            )));
+        }
+        return Ok(IvfModel::new(centroids.clone(), None));
+    }
+    let sample_size_hint = num_partitions * params.sample_rate;
+
+    if let Some(streaming_sample_rate) = params.streaming_sample_rate {
+        if streaming_sample_rate == 0 {
+            return Err(Error::invalid_input(
+                "streaming_sample_rate must be greater than 0".to_string(),
+            ));
+        }
+        if let Some(streaming_coreset_rate) = params.streaming_coreset_rate {
+            if streaming_coreset_rate == 0 {
+                return Err(Error::invalid_input(
+                    "streaming_coreset_rate must be greater than 0".to_string(),
+                ));
+            }
+            if streaming_coreset_rate > params.sample_rate {
+                return Err(Error::invalid_input(format!(
+                    "streaming_coreset_rate ({streaming_coreset_rate}) must be less than or equal to sample_rate ({})",
+                    params.sample_rate
+                )));
+            }
+        }
+        if streaming_sample_rate < params.sample_rate {
+            info!(
+                "Start streaming IVF training. Total sample size: {}, per-step sample size: {}",
+                sample_size_hint,
+                num_partitions * streaming_sample_rate
+            );
+            let start = std::time::Instant::now();
+            let ivf = train_streaming_ivf_model(
+                dataset,
+                column,
+                dim,
+                metric_type,
+                params,
+                fragment_ids,
+                progress,
+            )
+            .await?;
+            info!(
+                "Trained streaming IVF model in {:02} seconds",
+                start.elapsed().as_secs_f32()
+            );
+            return Ok(ivf);
+        }
+    }
+
+    let start = std::time::Instant::now();
+    info!(
+        "Loading training data for IVF. Sample size: {}",
+        sample_size_hint
+    );
+    let training_data =
+        maybe_sample_ivf_training_data(dataset, column, sample_size_hint, fragment_ids).await?;
+    info!(
+        "Finished loading training data in {:02} seconds",
+        start.elapsed().as_secs_f32()
+    );
+    train_ivf_model_from_sample_with_loss(training_data, metric_type, params, progress, sample_loss)
+        .await
+}
+
+#[cfg(feature = "write")]
+/// Train an in-memory IVF model from caller-supplied vector samples.
+///
+/// This uses the same preprocessing, k-means, loss calculation, and progress
+/// reporting as [`build_ivf_model`], without reading or sampling a dataset.
+/// Cosine vectors are normalized before training with L2. Null vectors, vectors
+/// with null components, and non-finite vectors are excluded from training.
+/// The caller is responsible for providing a representative sample in random
+/// order, especially for hierarchical k-means, which trains on sample prefixes.
+/// The trainer may use a subset according to `params.sample_rate`.
+///
+/// `params.num_partitions` must be set and positive. At least that many valid
+/// vectors must remain after preprocessing. Streaming training is unsupported;
+/// use [`build_ivf_model`] when `streaming_sample_rate < sample_rate`.
+/// Provided centroids are initial seeds and require `params.retrain = true`.
+///
+/// ```
+/// # use arrow_array::{FixedSizeListArray, Float32Array};
+/// # use lance_arrow::FixedSizeListArrayExt;
+/// # use lance_index::vector::ivf::IvfBuildParams;
+/// # use lance_linalg::distance::MetricType;
+/// # async fn example() -> lance::Result<()> {
+/// let samples = FixedSizeListArray::try_new_from_values(
+///     Float32Array::from(vec![0.0, 0.0, 0.1, 0.1, 10.0, 10.0, 10.1, 10.1]),
+///     2,
+/// )?;
+/// let model = lance::index::vector::ivf::train_ivf_model_from_sample(
+///     samples,
+///     MetricType::L2,
+///     &IvfBuildParams::new(2),
+///     lance_index::progress::noop_progress(),
+/// ).await?;
+/// assert_eq!(model.num_partitions(), 2);
+/// # Ok(())
+/// # }
+/// ```
+pub async fn train_ivf_model_from_sample(
+    training_data: FixedSizeListArray,
+    metric_type: MetricType,
+    params: &IvfBuildParams,
+    progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<IvfModel> {
+    train_ivf_model_from_sample_with_loss(
+        training_data,
+        metric_type,
+        params,
+        progress,
+        SampleLoss::Measure,
+    )
+    .await
+}
+
+#[cfg(feature = "write")]
+async fn train_ivf_model_from_sample_with_loss(
+    training_data: FixedSizeListArray,
+    metric_type: MetricType,
+    params: &IvfBuildParams,
+    progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+    sample_loss: SampleLoss,
+) -> Result<IvfModel> {
+    let num_partitions = params.num_partitions.filter(|&k| k > 0).ok_or_else(|| {
+        Error::invalid_input(format!(
+            "num_partitions must be set and positive when training from samples, got {:?}",
+            params.num_partitions
+        ))
+    })?;
+    if training_data.value_length() <= 0 {
+        return Err(Error::invalid_input(format!(
+            "Training vector dimension must be positive, got {}",
+            training_data.value_length()
+        )));
+    }
+    if params.sample_rate == 0 || params.max_iters == 0 || params.max_iters > u32::MAX as usize {
+        return Err(Error::invalid_input(format!(
+            "sample_rate must be positive and max_iters must be in 1..={}, got sample_rate={} and max_iters={}",
+            u32::MAX,
+            params.sample_rate,
+            params.max_iters
+        )));
+    }
+    num_partitions.checked_mul(params.sample_rate).ok_or_else(|| {
+        Error::invalid_input(format!(
+            "Training sample count overflows usize: num_partitions={num_partitions}, sample_rate={}",
+            params.sample_rate
+        ))
+    })?;
+    if params
+        .streaming_sample_rate
+        .is_some_and(|rate| rate < params.sample_rate)
+    {
+        return Err(Error::invalid_input(
+            "Training from a supplied sample cannot use streaming_sample_rate < sample_rate"
+                .to_string(),
+        ));
+    }
+    if !matches!(
+        (training_data.value_type(), metric_type),
+        (
+            DataType::Float16 | DataType::Float32 | DataType::Float64 | DataType::Int8,
+            MetricType::L2 | MetricType::Cosine | MetricType::Dot
+        ) | (DataType::UInt8, MetricType::Hamming)
+    ) {
+        return Err(Error::invalid_input(format!(
+            "Unsupported training sample type {} with metric {}",
+            training_data.value_type(),
+            metric_type
+        )));
+    }
+    if let Some(centroids) = &params.centroids {
+        if !params.retrain {
+            return Err(Error::invalid_input(
+                "Training from samples with supplied centroids requires retrain=true".to_string(),
+            ));
+        }
+        if centroids.len() != num_partitions
+            || centroids.value_length() != training_data.value_length()
+        {
+            return Err(Error::invalid_input(format!(
+                "Initial centroid shape must be {}x{}, got {}x{}",
+                num_partitions,
+                training_data.value_length(),
+                centroids.len(),
+                centroids.value_length()
+            )));
+        }
+        let centroid_type = match training_data.value_type() {
+            DataType::Int8 => DataType::Float32,
+            data_type => data_type,
+        };
+        if centroids.value_type() != centroid_type
+            || filter_finite_training_data(centroids.as_ref().clone())?.len() != num_partitions
+        {
+            return Err(Error::invalid_input(format!(
+                "Initial centroids must contain {num_partitions} finite, non-null {centroid_type} vectors"
+            )));
+        }
+    }
+    if params.sample_rate >= 1024 && training_data.value_type() == DataType::Float16 {
+        warn!(
+            "Large sample_rate ({} >= 1024) for float16 vectors is possible to result in all zeros cluster centroid",
+            params.sample_rate
+        );
+    }
+
+    // If metric type is cosine, normalize the training data, and after this point,
+    // treat the metric type as L2.
+    let (training_data, mt) = if metric_type == MetricType::Cosine {
+        let training_data = normalize_fsl_owned(training_data)?;
+        (training_data, MetricType::L2)
+    } else {
+        (training_data, metric_type)
+    };
+
+    // Normalization can produce non-finite values, so filter after preprocessing.
+    let training_data = filter_finite_training_data(training_data)?;
+
+    info!("Start to train IVF model");
+    let start = std::time::Instant::now();
+    let ivf = train_ivf_model(
+        params.centroids.clone(),
+        &training_data,
+        mt,
+        params,
+        progress,
+        sample_loss,
+    )
+    .await?;
+    info!(
+        "Trained IVF model in {:02} seconds",
+        start.elapsed().as_secs_f32()
+    );
+    Ok(ivf)
+}
+
+#[cfg(feature = "write")]
+async fn build_ivf_model_and_pq(
+    dataset: &Dataset,
+    column: &str,
+    metric_type: MetricType,
+    ivf_params: &IvfBuildParams,
+    pq_params: &PQBuildParams,
+    progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<(IvfModel, ProductQuantizer)> {
+    sanity_check_params(ivf_params, pq_params)?;
+
+    // `num_partitions` should be set before building the IVF model,
+    // we use 32 as the default to avoid panicking, 32 is the default value
+    // before we make `num_partitions` optional.
+    let num_partitions = ivf_params.num_partitions.unwrap_or(32);
+    info!(
+        "Building vector index: IVF{},PQ{}, metric={}",
+        num_partitions, pq_params.num_sub_vectors, metric_type,
+    );
+
+    // sanity check
+    get_vector_type(dataset.schema(), column)?;
+    let dim = get_vector_dim(dataset.schema(), column)?;
+
+    let ivf_model = build_ivf_model(
+        dataset,
+        column,
+        dim,
+        metric_type,
+        ivf_params,
+        None,
+        progress,
+    )
+    .await?;
+
+    let ivf_residual = if matches!(metric_type, MetricType::Cosine | MetricType::L2) {
+        Some(&ivf_model)
+    } else {
+        None
+    };
+
+    let pq = build_pq_model(dataset, column, dim, metric_type, pq_params, ivf_residual).await?;
+
+    Ok((ivf_model, pq))
+}
+
+#[cfg(feature = "write")]
+async fn scan_index_field_stream(
+    dataset: &Dataset,
+    column: &str,
+) -> Result<impl RecordBatchStream + Unpin + 'static> {
+    let mut scanner = dataset.scan();
+    scanner.project(&[column])?;
+    scanner.with_row_id();
+    scanner.try_into_stream().await
+}
+
+#[cfg(feature = "write")]
+pub async fn load_precomputed_partitions_if_available(
+    ivf_params: &IvfBuildParams,
+) -> Result<Option<HashMap<u64, u32>>> {
+    match &ivf_params.precomputed_partitions_file {
+        Some(file) => {
+            info!("Loading precomputed partitions from file: {}", file);
+            let mut builder = DatasetBuilder::from_uri(file);
+            if let Some(storage_options) = &ivf_params.storage_options {
+                builder = builder.with_storage_options(storage_options.clone());
+            }
+            let ds = builder.load().await?;
+            let stream = ds.scan().try_into_stream().await?;
+            Ok(Some(
+                load_precomputed_partitions(stream, ds.count_rows(None).await?).await?,
+            ))
+        }
+        None => Ok(None),
+    }
+}
+
+#[cfg(feature = "write")]
+#[allow(clippy::too_many_arguments)]
+pub async fn build_ivf_pq_index(
+    dataset: &Dataset,
+    column: &str,
+    index_name: &str,
+    uuid: Uuid,
+    metric_type: MetricType,
+    ivf_params: &IvfBuildParams,
+    pq_params: &PQBuildParams,
+    progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<Vec<IndexFile>> {
+    let (ivf_model, pq) = build_ivf_model_and_pq(
+        dataset,
+        column,
+        metric_type,
+        ivf_params,
+        pq_params,
+        progress,
+    )
+    .await?;
+    let stream = scan_index_field_stream(dataset, column).await?;
+    let precomputed_partitions = load_precomputed_partitions_if_available(ivf_params).await?;
+
+    let file = write_ivf_pq_file(
+        dataset.table_state.object_store.as_ref(),
+        dataset.indices_dir(),
+        column,
+        index_name,
+        uuid,
+        dataset.version().version,
+        ivf_model,
+        pq,
+        metric_type,
+        stream,
+        precomputed_partitions,
+        ivf_params.shuffle_partition_batches,
+        ivf_params.shuffle_partition_concurrency,
+        ivf_params.precomputed_shuffle_buffers.clone(),
+    )
+    .await?;
+    Ok(vec![file])
+}
+
+#[cfg(feature = "write")]
+#[allow(clippy::too_many_arguments)]
+pub async fn build_ivf_hnsw_pq_index(
+    dataset: &Dataset,
+    column: &str,
+    index_name: &str,
+    uuid: Uuid,
+    metric_type: MetricType,
+    ivf_params: &IvfBuildParams,
+    hnsw_params: &HnswBuildParams,
+    pq_params: &PQBuildParams,
+) -> Result<()> {
+    let (ivf_model, pq) = build_ivf_model_and_pq(
+        dataset,
+        column,
+        metric_type,
+        ivf_params,
+        pq_params,
+        lance_index::progress::noop_progress(),
+    )
+    .await?;
+    let stream = scan_index_field_stream(dataset, column).await?;
+    let precomputed_partitions = load_precomputed_partitions_if_available(ivf_params).await?;
+
+    write_ivf_hnsw_file(
+        dataset,
+        column,
+        index_name,
+        uuid,
+        ivf_model,
+        Quantizer::Product(pq),
+        metric_type,
+        hnsw_params,
+        stream,
+        precomputed_partitions,
+        ivf_params.shuffle_partition_batches,
+        ivf_params.shuffle_partition_concurrency,
+        ivf_params.precomputed_shuffle_buffers.clone(),
+    )
+    .await
+}
+
+#[cfg(feature = "write")]
+struct RemapPageTask {
+    offset: usize,
+    length: u32,
+    page: Option<Box<dyn VectorIndex>>,
+}
+
+#[cfg(feature = "write")]
+impl RemapPageTask {
+    fn new(offset: usize, length: u32) -> Self {
+        Self {
+            offset,
+            length,
+            page: None,
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+impl RemapPageTask {
+    async fn load_and_remap(
+        mut self,
+        reader: Arc<dyn Reader>,
+        index: &IVFIndex,
+        mapping: Arc<RowAddrTranslator>,
+    ) -> Result<Self> {
+        let mut page = index
+            .sub_index
+            .load(reader, self.offset, self.length as usize)
+            .await?;
+        page.remap_streaming(&mapping).await?;
+        self.page = Some(page);
+        Ok(self)
+    }
+
+    async fn write(self, writer: &mut dyn Writer, ivf: &mut IvfModel) -> Result<()> {
+        let page = self.page.as_ref().expect("Load was not called");
+        let page: &PQIndex = page
+            .as_any()
+            .downcast_ref()
+            .expect("Generic index writing not supported yet");
+        ivf.offsets.push(writer.tell().await?);
+        ivf.lengths
+            .push(page.row_ids.as_ref().unwrap().len() as u32);
+        let original_pq = transpose(
+            page.code.as_ref().unwrap(),
+            page.pq.code_dim(),
+            page.row_ids.as_ref().unwrap().len(),
+        );
+        write_pq_partition_payload(
+            writer,
+            &[&original_pq],
+            &[page.row_ids.as_ref().unwrap().as_ref()],
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "write")]
+fn generate_remap_tasks(offsets: &[usize], lengths: &[u32]) -> Result<Vec<RemapPageTask>> {
+    let mut tasks: Vec<RemapPageTask> = Vec::with_capacity(offsets.len() * 2 + 1);
+
+    for (offset, length) in offsets.iter().zip(lengths.iter()) {
+        tasks.push(RemapPageTask::new(*offset, *length));
+    }
+
+    Ok(tasks)
+}
+
+#[cfg(feature = "write")]
+/// Runs one specialized builder's remap on the heap.
+///
+/// The eager compaction remap runs under Python's `block_on` on the calling
+/// thread, and in CI (dev-profile wheel, opt-level 0) it overflowed the
+/// Windows main-thread stack. `remap_index_file_v3` dispatches over an 11-arm
+/// match whose arms each await a different monomorphization of
+/// `IvfIndexBuilder::remap_with`; without the box the outer future embeds
+/// every specialized builder future, and at opt-level 0 each arm's future is
+/// also materialized as a separate stack temporary while it is polled. Boxing
+/// per arm, in the concrete `Pin<Box<impl Future>>` form (a `dyn Future`
+/// trait object would put a `dyn Send` obligation in front of the solver, see
+/// `DatasetIndexRemapper::remap_indices`), leaves one pointer per arm
+/// on the caller's stack. The builder moves into the heap future too, so the
+/// dispatching future does not hold a builder across the await either.
+fn remap_boxed<'a, S: IvfSubIndex + 'static, Q: Quantization + 'static>(
+    mut builder: IvfIndexBuilder<S, Q>,
+    mapping: &'a RowAddrTranslator,
+    owned_fragments: Option<&'a RoaringBitmap>,
+) -> Pin<Box<impl Future<Output = Result<Vec<IndexFile>>> + Send + 'a>> {
+    Box::pin(async move { builder.remap_with(mapping.clone(), owned_fragments).await })
+}
+
+#[cfg(feature = "write")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn remap_index_file_v3(
+    dataset: &Dataset,
+    new_uuid: &Uuid,
+    index: Arc<dyn VectorIndex>,
+    mapping: &RowAddrTranslator,
+    column: String,
+    owned_fragments: Option<&RoaringBitmap>,
+) -> Result<Vec<IndexFile>> {
+    let dataset = dataset.clone();
+    let index_dir = dataset.indices_dir().join(new_uuid.to_string());
+    let (_, element_type) = get_vector_type(dataset.schema(), &column)?;
+    match index.sub_index_type() {
+        (SubIndexType::Flat, QuantizationType::Flat) => match element_type {
+            DataType::Float16 | DataType::Float32 | DataType::Float64 => {
+                remap_boxed(
+                    IvfIndexBuilder::<FlatIndex, FlatQuantizer>::new_remapper(
+                        dataset, column, index_dir, index,
+                    )?,
+                    mapping,
+                    owned_fragments,
+                )
+                .await
+            }
+            DataType::UInt8 => {
+                remap_boxed(
+                    IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new_remapper(
+                        dataset, column, index_dir, index,
+                    )?,
+                    mapping,
+                    owned_fragments,
+                )
+                .await
+            }
+            _ => Err(Error::index(format!(
+                "the field type {} is not supported for FLAT index",
+                element_type
+            ))),
+        },
+        (SubIndexType::Flat, QuantizationType::Product) => {
+            remap_boxed(
+                IvfIndexBuilder::<FlatIndex, ProductQuantizer>::new_remapper(
+                    dataset, column, index_dir, index,
+                )?,
+                mapping,
+                owned_fragments,
+            )
+            .await
+        }
+        (SubIndexType::Flat, QuantizationType::Scalar) => {
+            remap_boxed(
+                IvfIndexBuilder::<FlatIndex, ScalarQuantizer>::new_remapper(
+                    dataset, column, index_dir, index,
+                )?,
+                mapping,
+                owned_fragments,
+            )
+            .await
+        }
+        (SubIndexType::Flat, QuantizationType::FlatBin) => {
+            remap_boxed(
+                IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new_remapper(
+                    dataset, column, index_dir, index,
+                )?,
+                mapping,
+                owned_fragments,
+            )
+            .await
+        }
+        (SubIndexType::Flat, QuantizationType::Rabit) => {
+            remap_boxed(
+                IvfIndexBuilder::<FlatIndex, RabitQuantizer>::new_remapper(
+                    dataset, column, index_dir, index,
+                )?,
+                mapping,
+                owned_fragments,
+            )
+            .await
+        }
+        (SubIndexType::Hnsw, QuantizationType::Flat) => {
+            remap_boxed(
+                IvfIndexBuilder::<HNSW, FlatQuantizer>::new_remapper(
+                    dataset, column, index_dir, index,
+                )?,
+                mapping,
+                owned_fragments,
+            )
+            .await
+        }
+        (SubIndexType::Hnsw, QuantizationType::FlatBin) => {
+            remap_boxed(
+                IvfIndexBuilder::<HNSW, FlatBinQuantizer>::new_remapper(
+                    dataset, column, index_dir, index,
+                )?,
+                mapping,
+                owned_fragments,
+            )
+            .await
+        }
+        (SubIndexType::Hnsw, QuantizationType::Product) => {
+            remap_boxed(
+                IvfIndexBuilder::<HNSW, ProductQuantizer>::new_remapper(
+                    dataset, column, index_dir, index,
+                )?,
+                mapping,
+                owned_fragments,
+            )
+            .await
+        }
+
+        (SubIndexType::Hnsw, QuantizationType::Scalar) => {
+            remap_boxed(
+                IvfIndexBuilder::<HNSW, ScalarQuantizer>::new_remapper(
+                    dataset, column, index_dir, index,
+                )?,
+                mapping,
+                owned_fragments,
+            )
+            .await
+        }
+        (SubIndexType::Hnsw, QuantizationType::Rabit) => {
+            remap_boxed(
+                IvfIndexBuilder::<HNSW, RabitQuantizer>::new_remapper(
+                    dataset, column, index_dir, index,
+                )?,
+                mapping,
+                owned_fragments,
+            )
+            .await
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn remap_index_file(
+    dataset: &Dataset,
+    old_uuid: &Uuid,
+    new_uuid: &Uuid,
+    old_version: u64,
+    index: &IVFIndex,
+    mapping: &RowAddrTranslator,
+    name: String,
+    column: String,
+    transforms: Vec<pb::Transform>,
+) -> Result<IndexFile> {
+    let object_store = dataset.table_state.object_store.as_ref();
+    let old_path = dataset
+        .indices_dir()
+        .join(old_uuid.to_string())
+        .join(INDEX_FILE_NAME);
+    let new_path = dataset
+        .indices_dir()
+        .join(new_uuid.to_string())
+        .join(INDEX_FILE_NAME);
+
+    let file_sizes = dataset
+        .load_index(old_uuid)
+        .await?
+        .map(|index| index.file_size_map())
+        .unwrap_or_default();
+    let reader: Arc<dyn Reader> =
+        open_index_file(object_store, &old_path, INDEX_FILE_NAME, &file_sizes)
+            .await?
+            .into();
+    let mut writer = object_store.create(&new_path).await?;
+
+    let tasks = generate_remap_tasks(&index.ivf.offsets, &index.ivf.lengths)?;
+    let mapping = Arc::new(mapping.clone());
+
+    let mut task_stream = stream::iter(tasks)
+        .map(|task| task.load_and_remap(reader.clone(), index, mapping.clone()))
+        .buffered(object_store.io_parallelism());
+
+    let mut ivf = IvfModel {
+        centroids: index.ivf.centroids.clone(),
+        offsets: Vec::with_capacity(index.ivf.offsets.len()),
+        lengths: Vec::with_capacity(index.ivf.lengths.len()),
+        loss: index.ivf.loss,
+    };
+    while let Some(write_task) = task_stream.try_next().await? {
+        write_task.write(writer.as_mut(), &mut ivf).await?;
+    }
+
+    let pq_sub_index = index
+        .sub_index
+        .as_any()
+        .downcast_ref::<PQIndex>()
+        .ok_or_else(|| Error::not_supported_source("Remapping a non-pq sub-index".into()))?;
+
+    let metadata = IvfPQIndexMetadata {
+        name,
+        column,
+        dimension: index.ivf.dimension() as u32,
+        dataset_version: old_version,
+        ivf,
+        metric_type: index.metric_type,
+        pq: pq_sub_index.pq.clone(),
+        transforms,
+    };
+
+    let metadata = pb::Index::try_from(&metadata)?;
+    let pos = writer.write_protobuf(&metadata).await?;
+    // TODO: for now the IVF_PQ index file format hasn't been updated, so keep the old version,
+    // change it to latest version value after refactoring the IVF_PQ
+    writer.write_magics(pos, 0, 1, MAGIC).await?;
+    let size_bytes = writer.tell().await? as u64;
+    Writer::shutdown(writer.as_mut()).await?;
+
+    Ok(IndexFile {
+        path: INDEX_FILE_NAME.to_string(),
+        size_bytes,
+        file_metadata_size_bytes: None,
+    })
+}
+
+#[cfg(feature = "write")]
+/// Write the index to the index file.
+///
+#[allow(clippy::too_many_arguments)]
+async fn write_ivf_pq_file(
+    object_store: &ObjectStore,
+    index_dir: Path,
+    column: &str,
+    index_name: &str,
+    uuid: Uuid,
+    dataset_version: u64,
+    mut ivf: IvfModel,
+    pq: ProductQuantizer,
+    metric_type: MetricType,
+    stream: impl RecordBatchStream + Unpin + 'static,
+    precomputed_partitions: Option<HashMap<u64, u32>>,
+    shuffle_partition_batches: usize,
+    shuffle_partition_concurrency: usize,
+    precomputed_shuffle_buffers: Option<(Path, Vec<String>)>,
+) -> Result<IndexFile> {
+    let path = index_dir
+        .clone()
+        .join(uuid.to_string())
+        .join(INDEX_FILE_NAME);
+    let mut writer = object_store.create(&path).await?;
+
+    let start = std::time::Instant::now();
+    let num_partitions = ivf.num_partitions() as u32;
+    builder::build_partitions(
+        writer.as_mut(),
+        stream,
+        column,
+        &mut ivf,
+        pq.clone(),
+        metric_type,
+        0..num_partitions,
+        precomputed_partitions,
+        shuffle_partition_batches,
+        shuffle_partition_concurrency,
+        precomputed_shuffle_buffers,
+    )
+    .await?;
+    info!("Built IVF partitions: {}s", start.elapsed().as_secs_f32());
+
+    let metadata = IvfPQIndexMetadata {
+        name: index_name.to_string(),
+        column: column.to_string(),
+        dimension: pq.dimension as u32,
+        dataset_version,
+        metric_type,
+        ivf,
+        pq,
+        transforms: vec![],
+    };
+
+    let metadata = pb::Index::try_from(&metadata)?;
+    let pos = writer.write_protobuf(&metadata).await?;
+    // TODO: for now the IVF_PQ index file format hasn't been updated, so keep the old version,
+    // change it to latest version value after refactoring the IVF_PQ
+    writer.write_magics(pos, 0, 1, MAGIC).await?;
+    let size_bytes = writer.tell().await? as u64;
+    Writer::shutdown(writer.as_mut()).await?;
+
+    Ok(IndexFile {
+        path: INDEX_FILE_NAME.to_string(),
+        size_bytes,
+        file_metadata_size_bytes: None,
+    })
+}
+
+#[cfg(feature = "write")]
+pub async fn write_ivf_pq_file_from_existing_index(
+    dataset: &Dataset,
+    column: &str,
+    index_name: &str,
+    index_id: Uuid,
+    mut ivf: IvfModel,
+    pq: ProductQuantizer,
+    streams: Vec<impl Stream<Item = Result<RecordBatch>>>,
+) -> Result<()> {
+    let obj_store = dataset.table_state.object_store.as_ref();
+    let path = dataset
+        .indices_dir()
+        .join(index_id.to_string())
+        .join("index.idx");
+    let mut writer = obj_store.create(&path).await?;
+    write_pq_partitions(writer.as_mut(), &mut ivf, Some(streams), None).await?;
+
+    let metadata = IvfPQIndexMetadata::new(
+        index_name.to_string(),
+        column.to_string(),
+        dataset.version().version,
+        pq.distance_type,
+        ivf,
+        pq,
+        vec![],
+    );
+
+    let metadata = pb::Index::try_from(&metadata)?;
+    let pos = writer.write_protobuf(&metadata).await?;
+    writer.write_magics(pos, 0, 1, MAGIC).await?;
+    Writer::shutdown(writer.as_mut()).await?;
+
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+#[allow(clippy::too_many_arguments)]
+async fn write_ivf_hnsw_file(
+    dataset: &Dataset,
+    column: &str,
+    _index_name: &str,
+    uuid: Uuid,
+    mut ivf: IvfModel,
+    quantizer: Quantizer,
+    distance_type: DistanceType,
+    hnsw_params: &HnswBuildParams,
+    stream: impl RecordBatchStream + Unpin + 'static,
+    precomputed_partitions: Option<HashMap<u64, u32>>,
+    shuffle_partition_batches: usize,
+    shuffle_partition_concurrency: usize,
+    precomputed_shuffle_buffers: Option<(Path, Vec<String>)>,
+) -> Result<()> {
+    let object_store = dataset.table_state.object_store.as_ref();
+    let path = dataset
+        .indices_dir()
+        .join(uuid.to_string())
+        .join(INDEX_FILE_NAME);
+    let writer = object_store.create(&path).await?;
+
+    let schema = lance_core::datatypes::Schema::try_from(HNSW::schema().as_ref())?;
+    let mut writer =
+        V1FileWriter::with_object_writer(writer, schema, &V1FileWriterOptions::default())?;
+    writer.add_metadata(
+        INDEX_METADATA_SCHEMA_KEY,
+        json!(IndexMetadata {
+            index_type: format!("IVF_HNSW_{}", quantizer.quantization_type()),
+            distance_type: distance_type.to_string(),
+        })
+        .to_string()
+        .as_str(),
+    );
+
+    let aux_path = dataset
+        .indices_dir()
+        .join(uuid.to_string())
+        .join(INDEX_AUXILIARY_FILE_NAME);
+    let aux_writer = object_store.create(&aux_path).await?;
+    let schema = Schema::new(vec![
+        ROW_ID_FIELD.clone(),
+        arrow_schema::Field::new(
+            quantizer.column(),
+            DataType::FixedSizeList(
+                Arc::new(arrow_schema::Field::new("item", DataType::UInt8, true)),
+                quantizer.code_dim() as i32,
+            ),
+            false,
+        ),
+    ]);
+    let schema = lance_core::datatypes::Schema::try_from(&schema)?;
+    let mut aux_writer =
+        V1FileWriter::with_object_writer(aux_writer, schema, &V1FileWriterOptions::default())?;
+    aux_writer.add_metadata(
+        INDEX_METADATA_SCHEMA_KEY,
+        json!(IndexMetadata {
+            index_type: quantizer.quantization_type().to_string(),
+            distance_type: distance_type.to_string(),
+        })
+        .to_string()
+        .as_str(),
+    );
+
+    // For PQ, we need to store the codebook
+    let quantization_metadata = match &quantizer {
+        Quantizer::Product(pq) => {
+            let codebook_tensor = pb::Tensor::try_from(&pq.codebook)?;
+            let codebook_pos = aux_writer.tell().await?;
+            aux_writer
+                .object_writer
+                .write_protobuf(&codebook_tensor)
+                .await?;
+
+            Some(QuantizationMetadata {
+                codebook_position: Some(codebook_pos),
+                ..Default::default()
+            })
+        }
+        _ => None,
+    };
+
+    aux_writer.add_metadata(
+        quantizer.metadata_key(),
+        quantizer
+            .metadata(quantization_metadata)?
+            .to_string()
+            .as_str(),
+    );
+
+    let start = std::time::Instant::now();
+    let num_partitions = ivf.num_partitions() as u32;
+
+    let (hnsw_metadata, aux_ivf) = builder::build_hnsw_partitions(
+        Arc::new(dataset.clone()),
+        &mut writer,
+        Some(&mut aux_writer),
+        stream,
+        column,
+        &mut ivf,
+        quantizer,
+        distance_type,
+        hnsw_params,
+        0..num_partitions,
+        precomputed_partitions,
+        shuffle_partition_batches,
+        shuffle_partition_concurrency,
+        precomputed_shuffle_buffers,
+    )
+    .await?;
+    info!("Built IVF partitions: {}s", start.elapsed().as_secs_f32());
+
+    // Add the metadata of HNSW partitions
+    let hnsw_metadata_json = json!(hnsw_metadata);
+    writer.add_metadata(IVF_PARTITION_KEY, &hnsw_metadata_json.to_string());
+
+    ivf.write(&mut writer).await?;
+    writer.finish().await?;
+
+    // Write the aux file
+    aux_ivf.write(&mut aux_writer).await?;
+    aux_writer.finish().await?;
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+/// Merge one caller-defined group of source segments into a single segment.
+pub(crate) async fn merge_segments(
+    dataset: &Dataset,
+    segments: Vec<TableIndexMetadata>,
+) -> Result<TableIndexMetadata> {
+    let mut row_filters = Vec::with_capacity(segments.len());
+    let no_deleted_fragments = RoaringBitmap::new();
+    for segment in &segments {
+        let owned_fragments = segment.fragment_bitmap.as_ref().ok_or_else(|| {
+            Error::index(format!(
+                "Segment '{}' is missing fragment coverage",
+                segment.uuid
+            ))
+        })?;
+        row_filters.push(
+            crate::index::append::build_old_data_filter(
+                dataset,
+                owned_fragments,
+                &no_deleted_fragments,
+                false,
+            )
+            .await?
+            .ok_or_else(|| {
+                Error::internal("Vector segment ownership filter is missing".to_string())
+            })?,
+        );
+    }
+    merge_segments_inner(
+        dataset.table_state.object_store.as_ref(),
+        &dataset.indices_dir(),
+        segments,
+        Some(row_filters),
+        lance_index::progress::noop_progress(),
+    )
+    .await
+}
+
+#[cfg(feature = "write")]
+/// Merge staging segments whose remap already removed rows not owned by each
+/// source segment.
+pub(crate) async fn merge_remapped_segments(
+    dataset: &Dataset,
+    segments: Vec<TableIndexMetadata>,
+) -> Result<TableIndexMetadata> {
+    merge_segments_inner(
+        dataset.table_state.object_store.as_ref(),
+        &dataset.indices_dir(),
+        segments,
+        None,
+        lance_index::progress::noop_progress(),
+    )
+    .await
+}
+
+/// Merge one caller-defined group of source segments into a single segment and
+/// report progress through the provided callback.
+#[cfg(all(test, feature = "write"))]
+pub(crate) async fn merge_segments_with_progress(
+    object_store: &ObjectStore,
+    indices_dir: &Path,
+    segments: Vec<TableIndexMetadata>,
+    progress: Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<TableIndexMetadata> {
+    let row_filters = segments
+        .iter()
+        .map(|segment| {
+            let to_keep = segment.fragment_bitmap.clone().ok_or_else(|| {
+                Error::index(format!(
+                    "Segment '{}' is missing fragment coverage",
+                    segment.uuid
+                ))
+            })?;
+            Ok(lance_index::scalar::OldIndexDataFilter::Fragments {
+                to_keep,
+                to_remove: RoaringBitmap::new(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    merge_segments_inner(
+        object_store,
+        indices_dir,
+        segments,
+        Some(row_filters),
+        progress,
+    )
+    .await
+}
+
+#[cfg(feature = "write")]
+async fn merge_segments_inner(
+    object_store: &ObjectStore,
+    indices_dir: &Path,
+    segments: Vec<TableIndexMetadata>,
+    row_filters: Option<Vec<lance_index::scalar::OldIndexDataFilter>>,
+    progress: Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<TableIndexMetadata> {
+    if segments.is_empty() {
+        return Err(Error::index("No segment metadata was provided".to_string()));
+    }
+    if segments.len() == 1 {
+        return Ok(segments.into_iter().next().unwrap());
+    }
+
+    let mut merged_segment = segments[0].clone();
+    let mut fragment_bitmap = RoaringBitmap::new();
+    for segment in &segments {
+        let source_fragment_bitmap = segment.fragment_bitmap.as_ref().ok_or_else(|| {
+            Error::index(format!(
+                "Segment '{}' is missing fragment coverage",
+                segment.uuid
+            ))
+        })?;
+        fragment_bitmap |= source_fragment_bitmap.clone();
+    }
+    let mut index_details = crate::index::vector::details::vector_index_details_default();
+    for segment in &segments {
+        if let Some(details) = segment.index_details.as_deref() {
+            let details = details.clone();
+            if !details.value.is_empty() {
+                index_details = details;
+                break;
+            }
+        }
+    }
+
+    let index_version = infer_source_index_version(&segments)?;
+    let segment_uuid = Uuid::new_v4();
+    let final_dir = indices_dir.clone().join(segment_uuid.to_string());
+    let files = merge_segments_to_dir(
+        object_store,
+        indices_dir,
+        &final_dir,
+        &segments,
+        row_filters.as_deref(),
+        None,
+        progress,
+    )
+    .await?;
+    merged_segment = TableIndexMetadata {
+        uuid: segment_uuid,
+        fragment_bitmap: Some(fragment_bitmap),
+        index_details: Some(Arc::new(index_details)),
+        index_version,
+        created_at: Some(chrono::Utc::now()),
+        base_id: None,
+        files: Some(files),
+        clustering_id: None,
+        metadata: Default::default(),
+        ..merged_segment
+    };
+    Ok(merged_segment)
+}
+
+#[cfg(feature = "write")]
+/// Merge the selected input segments into `final_dir`.
+///
+/// The caller defines the source segment group explicitly. This helper reads
+/// those input segments directly from `indices/<segment_uuid>/` and writes the
+/// merged auxiliary/index files into `final_dir`.
+async fn merge_segments_to_dir(
+    object_store: &ObjectStore,
+    indices_dir: &Path,
+    final_dir: &Path,
+    segments: &[TableIndexMetadata],
+    row_filters: Option<&[lance_index::scalar::OldIndexDataFilter]>,
+    _requested_index_type: Option<IndexType>,
+    progress: Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<Vec<IndexFile>> {
+    reset_final_segment_dir(object_store, final_dir).await?;
+
+    debug_assert!(
+        segments.len() > 1,
+        "merge helper should only be used for multi-source groups"
+    );
+
+    let aux_paths = segments
+        .iter()
+        .map(|segment| {
+            indices_dir
+                .clone()
+                .join(segment.uuid.to_string())
+                .join(INDEX_AUXILIARY_FILE_NAME)
+        })
+        .collect::<Vec<_>>();
+    let source_index_paths = segments
+        .iter()
+        .map(|segment| {
+            indices_dir
+                .clone()
+                .join(segment.uuid.to_string())
+                .join(INDEX_FILE_NAME)
+        })
+        .collect::<Vec<_>>();
+    let auxiliary_file = if let Some(row_filters) = row_filters {
+        lance_index::vector::distributed::index_merger::merge_partial_vector_auxiliary_files_with_row_filters(
+            object_store,
+            &aux_paths,
+            final_dir,
+            row_filters,
+            progress.clone(),
+        )
+        .await?
+    } else {
+        lance_index::vector::distributed::index_merger::merge_partial_vector_auxiliary_files(
+            object_store,
+            &aux_paths,
+            final_dir,
+            progress.clone(),
+        )
+        .await?
+    };
+    let index_file = write_root_vector_index_from_auxiliary(
+        object_store,
+        final_dir,
+        None,
+        &source_index_paths,
+        progress.clone(),
+    )
+    .await?;
+
+    Ok(vec![auxiliary_file, index_file])
+}
+
+#[cfg(feature = "write")]
+fn infer_source_index_version(group: &[TableIndexMetadata]) -> Result<i32> {
+    debug_assert!(!group.is_empty());
+    let first = group[0].index_version;
+    if group.iter().any(|segment| segment.index_version != first) {
+        return Err(Error::index(
+            "Distributed vector segments must all have the same index version".to_string(),
+        ));
+    }
+    Ok(first)
+}
+
+#[cfg(feature = "write")]
+/// Best-effort reset of one target directory before rewriting it.
+async fn reset_final_segment_dir(object_store: &ObjectStore, final_dir: &Path) -> Result<()> {
+    match object_store.remove_dir_all(final_dir.clone()).await {
+        Ok(()) => {}
+        Err(Error::NotFound { .. }) => {}
+        Err(err) => return Err(err),
+    }
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+async fn write_root_vector_index_from_auxiliary(
+    object_store: &ObjectStore,
+    index_dir: &Path,
+    requested_index_type: Option<IndexType>,
+    centroid_source_index_paths: &[Path],
+    progress: Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<IndexFile> {
+    let aux_path = index_dir.clone().join(INDEX_AUXILIARY_FILE_NAME);
+    let scheduler = ScanScheduler::new(
+        Arc::new(object_store.clone()),
+        SchedulerConfig::max_bandwidth(object_store),
+    );
+    let fh = scheduler
+        .open_file(&aux_path, &CachedFileSize::unknown())
+        .await?;
+    let aux_reader = V2Reader::try_open(
+        fh,
+        None,
+        Arc::default(),
+        &LanceCache::no_cache(),
+        V2ReaderOptions::default(),
+    )
+    .await?;
+
+    let meta = aux_reader.metadata();
+    // Inherit file format version from the unified auxiliary (which inherited it from shards)
+    let format_version = meta.version();
+    let ivf_buf_idx: u32 = meta
+        .file_schema
+        .metadata
+        .get(IVF_METADATA_KEY)
+        .ok_or_else(|| Error::index("IVF meta missing in unified auxiliary".to_string()))?
+        .parse()
+        .map_err(|_| Error::index("IVF index parse error".to_string()))?;
+
+    let raw_ivf_bytes = aux_reader.read_global_buffer(ivf_buf_idx).await?;
+    let mut pb_ivf: lance_index::pb::Ivf = Message::decode(raw_ivf_bytes.clone())?;
+
+    // If the unified IVF metadata does not contain centroids, try to source them
+    // from one of the shard index files that fed this merge.
+    if pb_ivf.centroids_tensor.is_none() {
+        for partial_index_path in centroid_source_index_paths {
+            if !object_store.exists(partial_index_path).await? {
+                continue;
+            }
+            let fh = scheduler
+                .open_file(partial_index_path, &CachedFileSize::unknown())
+                .await?;
+            let partial_reader = V2Reader::try_open(
+                fh,
+                None,
+                Arc::default(),
+                &LanceCache::no_cache(),
+                V2ReaderOptions::default(),
+            )
+            .await?;
+            let partial_meta = partial_reader.metadata();
+            if let Some(ivf_idx_str) = partial_meta.file_schema.metadata.get(IVF_METADATA_KEY)
+                && let Ok(ivf_idx) = ivf_idx_str.parse::<u32>()
+            {
+                let partial_ivf_bytes = partial_reader.read_global_buffer(ivf_idx).await?;
+                let partial_pb_ivf: lance_index::pb::Ivf = Message::decode(partial_ivf_bytes)?;
+                if partial_pb_ivf.centroids_tensor.is_some() {
+                    pb_ivf.centroids_tensor = partial_pb_ivf.centroids_tensor;
+                    break;
+                }
+            }
+        }
+    }
+
+    let ivf_model: IvfModel = IvfModel::try_from(pb_ivf.clone())?;
+    let nlist = ivf_model.num_partitions();
+    let ivf_bytes = pb_ivf.encode_to_vec().into();
+
+    // Determine index metadata JSON from auxiliary or requested index type.
+    let mut idx_meta: IndexMetadata =
+        if let Some(idx_json) = meta.file_schema.metadata.get(INDEX_METADATA_SCHEMA_KEY) {
+            serde_json::from_str(idx_json)?
+        } else {
+            let dt = meta
+                .file_schema
+                .metadata
+                .get(DISTANCE_TYPE_KEY)
+                .cloned()
+                .unwrap_or_else(|| "l2".to_string());
+            let index_type = requested_index_type.ok_or_else(|| {
+                Error::index(
+                    "Index type must be provided when auxiliary metadata is missing index metadata"
+                        .to_string(),
+                )
+            })?;
+            IndexMetadata {
+                index_type: index_type.to_string(),
+                distance_type: dt,
+            }
+        };
+    if let Some(source_hnsw_index_metadata) =
+        read_hnsw_index_metadata_from_sources(object_store, &scheduler, centroid_source_index_paths)
+            .await?
+    {
+        if idx_meta.index_type.starts_with("IVF_HNSW")
+            && !index_metadata_eq(&idx_meta, &source_hnsw_index_metadata)
+        {
+            return Err(Error::invalid_input(format!(
+                "HNSW index metadata mismatch while merging index segments: expected {:?}, got {:?}",
+                idx_meta, source_hnsw_index_metadata
+            )));
+        }
+        idx_meta = source_hnsw_index_metadata;
+    }
+
+    // Write root index.idx via V2 writer so downstream opens through v2 path.
+    let index_path = index_dir.clone().join(INDEX_FILE_NAME);
+    let obj_writer = object_store.create(&index_path).await?;
+    progress
+        .stage_start("write_root_index", Some(1), "files")
+        .await?;
+
+    // Schema for HNSW sub-index: include neighbors/dist fields; empty batch is fine.
+    let arrow_schema = HNSW::schema();
+    let schema = lance_core::datatypes::Schema::try_from(arrow_schema.as_ref())?;
+    let mut v2_writer = file_versions::create_writer(
+        format_version,
+        obj_writer,
+        schema,
+        V2WriterOptions::default(),
+    )?;
+
+    // For HNSW variants, attach per-partition metadata list; for FLAT-based
+    // variants, attach minimal placeholder metadata.
+    let is_hnsw = idx_meta.index_type.starts_with("IVF_HNSW");
+    let is_flat_based = matches!(
+        idx_meta.index_type.as_str(),
+        "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_RQ"
+    );
+
+    if is_hnsw {
+        let hnsw_params = read_hnsw_build_params_from_sources(
+            object_store,
+            &scheduler,
+            centroid_source_index_paths,
+        )
+        .await?;
+        write_hnsw_root_index_from_auxiliary(
+            &mut v2_writer,
+            &aux_reader,
+            &ivf_model,
+            &hnsw_params,
+            &idx_meta,
+            progress.clone(),
+        )
+        .await?;
+    } else {
+        // Attach precise index metadata (type + distance).
+        let index_meta_json = serde_json::to_string(&idx_meta)?;
+        v2_writer.add_schema_metadata(INDEX_METADATA_SCHEMA_KEY, &index_meta_json);
+
+        // Add IVF protobuf as a global buffer and reference via IVF_METADATA_KEY.
+        let pos = v2_writer.add_global_buffer(ivf_bytes).await?;
+        v2_writer.add_schema_metadata(IVF_METADATA_KEY, pos.to_string());
+
+        if is_flat_based {
+            let meta_vec: Vec<String> = (0..nlist).map(|_| "{}".to_string()).collect();
+            let meta_vec_json = serde_json::to_string(&meta_vec)?;
+            v2_writer.add_schema_metadata("lance:flat", meta_vec_json);
+        }
+
+        let empty_batch = RecordBatch::new_empty(arrow_schema);
+        v2_writer.write_batch(&empty_batch).await?;
+    }
+
+    let summary = v2_writer.finish().await?;
+    progress.stage_progress("write_root_index", 1).await?;
+    progress.stage_complete("write_root_index").await?;
+
+    Ok(IndexFile {
+        path: INDEX_FILE_NAME.to_string(),
+        size_bytes: summary.size_bytes,
+        file_metadata_size_bytes: None,
+    })
+}
+
+#[cfg(feature = "write")]
+async fn read_hnsw_index_metadata_from_sources(
+    object_store: &ObjectStore,
+    scheduler: &Arc<ScanScheduler>,
+    source_index_paths: &[Path],
+) -> Result<Option<IndexMetadata>> {
+    let mut index_metadata: Option<IndexMetadata> = None;
+
+    for source_index_path in source_index_paths {
+        if !object_store.exists(source_index_path).await? {
+            continue;
+        }
+
+        let fh = scheduler
+            .open_file(source_index_path, &CachedFileSize::unknown())
+            .await?;
+        let reader = V2Reader::try_open(
+            fh,
+            None,
+            Arc::default(),
+            &LanceCache::no_cache(),
+            V2ReaderOptions::default(),
+        )
+        .await?;
+        let Some(metadata_json) = reader
+            .metadata()
+            .file_schema
+            .metadata
+            .get(INDEX_METADATA_SCHEMA_KEY)
+        else {
+            continue;
+        };
+        let metadata: IndexMetadata = serde_json::from_str(metadata_json)?;
+        if !metadata.index_type.starts_with("IVF_HNSW") {
+            continue;
+        }
+
+        if let Some(index_metadata) = index_metadata.as_ref() {
+            if !index_metadata_eq(index_metadata, &metadata) {
+                return Err(Error::invalid_input(format!(
+                    "HNSW index metadata mismatch while merging index segments: \
+                     expected {:?}, got {:?} in {}",
+                    index_metadata, metadata, source_index_path
+                )));
+            }
+        } else {
+            index_metadata = Some(metadata);
+        }
+    }
+
+    Ok(index_metadata)
+}
+
+#[cfg(feature = "write")]
+fn index_metadata_eq(left: &IndexMetadata, right: &IndexMetadata) -> bool {
+    left.index_type == right.index_type && left.distance_type == right.distance_type
+}
+
+#[cfg(feature = "write")]
+async fn read_hnsw_build_params_from_sources(
+    object_store: &ObjectStore,
+    scheduler: &Arc<ScanScheduler>,
+    source_index_paths: &[Path],
+) -> Result<HnswBuildParams> {
+    let mut build_params: Option<HnswBuildParams> = None;
+
+    for source_index_path in source_index_paths {
+        if !object_store.exists(source_index_path).await? {
+            continue;
+        }
+
+        let fh = scheduler
+            .open_file(source_index_path, &CachedFileSize::unknown())
+            .await?;
+        let reader = V2Reader::try_open(
+            fh,
+            None,
+            Arc::default(),
+            &LanceCache::no_cache(),
+            V2ReaderOptions::default(),
+        )
+        .await?;
+        let Some(metadata_json) = reader
+            .metadata()
+            .file_schema
+            .metadata
+            .get(HNSW_METADATA_KEY)
+        else {
+            continue;
+        };
+        let partition_metadata: Vec<String> = serde_json::from_str(metadata_json)?;
+        for metadata in partition_metadata {
+            if metadata.is_empty() {
+                continue;
+            }
+            let metadata: HnswMetadata = serde_json::from_str(&metadata)?;
+            if let Some(build_params) = build_params.as_ref() {
+                if !hnsw_build_params_eq(build_params, &metadata.params) {
+                    return Err(Error::invalid_input(format!(
+                        "HNSW build parameters mismatch while merging index segments: \
+                         expected {:?}, got {:?} in {}",
+                        build_params, metadata.params, source_index_path
+                    )));
+                }
+            } else {
+                build_params = Some(metadata.params);
+            }
+        }
+    }
+
+    Ok(build_params.unwrap_or_default())
+}
+
+#[cfg(feature = "write")]
+fn hnsw_build_params_eq(left: &HnswBuildParams, right: &HnswBuildParams) -> bool {
+    left.max_level == right.max_level
+        && left.m == right.m
+        && left.ef_construction == right.ef_construction
+        && left.prefetch_distance == right.prefetch_distance
+}
+
+#[cfg(feature = "write")]
+async fn write_hnsw_root_index_from_auxiliary(
+    writer: &mut V2Writer,
+    aux_reader: &V2Reader,
+    aux_ivf: &IvfModel,
+    hnsw_params: &HnswBuildParams,
+    index_metadata: &IndexMetadata,
+    progress: Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<()> {
+    let mut index_ivf = if let Some(centroids) = aux_ivf.centroids.clone() {
+        IvfModel::new(centroids, aux_ivf.loss)
+    } else {
+        IvfModel::empty()
+    };
+    let distance_type = DistanceType::try_from(index_metadata.distance_type.as_str())?;
+    let mut partition_index_metadata = Vec::with_capacity(aux_ivf.num_partitions());
+    // Read once: a dense rotation is a large global buffer.
+    let rq_metadata = match index_metadata.index_type.as_str() {
+        "IVF_HNSW_RQ" => Some(read_rq_storage_metadata(aux_reader).await?),
+        _ => None,
+    };
+
+    progress
+        .stage_start(
+            "rebuild_hnsw_graph",
+            Some(aux_ivf.num_partitions() as u64),
+            "partitions",
+        )
+        .await?;
+
+    for partition_id in 0..aux_ivf.num_partitions() {
+        let row_range = aux_ivf.row_range(partition_id);
+        if row_range.is_empty() {
+            index_ivf.add_partition(0);
+            partition_index_metadata.push(String::new());
+            progress
+                .stage_progress("rebuild_hnsw_graph", partition_id as u64 + 1)
+                .await?;
+            continue;
+        }
+
+        let batch = read_v2_partition_batch(aux_reader, row_range).await?;
+        let hnsw = build_hnsw_from_storage_batch(
+            &index_metadata.index_type,
+            batch,
+            aux_reader,
+            distance_type,
+            hnsw_params,
+            rq_metadata.as_ref().zip(aux_ivf.centroid(partition_id)),
+        )
+        .await?;
+        let index_batch = hnsw.to_batch()?;
+
+        writer.write_batch(&index_batch).await?;
+        index_ivf.add_partition(index_batch.num_rows() as u32);
+        partition_index_metadata.push(serde_json::to_string(&hnsw.metadata())?);
+        progress
+            .stage_progress("rebuild_hnsw_graph", partition_id as u64 + 1)
+            .await?;
+    }
+
+    progress.stage_complete("rebuild_hnsw_graph").await?;
+
+    write_hnsw_index_metadata(writer, &index_ivf, distance_type, index_metadata).await?;
+    writer.add_schema_metadata(
+        HNSW_METADATA_KEY,
+        serde_json::to_string(&partition_index_metadata)?,
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+async fn read_v2_partition_batch(reader: &V2Reader, range: Range<usize>) -> Result<RecordBatch> {
+    let schema = Arc::new(reader.schema().as_ref().into());
+    let stream = reader
+        .read_stream(
+            ReadBatchParams::Range(range),
+            u32::MAX,
+            4,
+            FilterExpression::no_filter(),
+        )
+        .await?;
+    let batches = stream.try_collect::<Vec<_>>().await?;
+    if batches.is_empty() {
+        Ok(RecordBatch::new_empty(schema))
+    } else {
+        Ok(concat_batches(&schema, batches.iter())?)
+    }
+}
+
+#[cfg(feature = "write")]
+async fn build_hnsw_from_storage_batch(
+    index_type: &str,
+    batch: RecordBatch,
+    aux_reader: &V2Reader,
+    distance_type: DistanceType,
+    hnsw_params: &HnswBuildParams,
+    rq: Option<(&RabitQuantizationMetadata, ArrayRef)>,
+) -> Result<HNSW> {
+    match index_type {
+        "IVF_HNSW_FLAT" => {
+            let metadata = read_storage_metadata::<FlatMetadata>(aux_reader, "")?;
+            let vector_type = batch
+                .column_by_name(FLAT_COLUMN)
+                .ok_or_else(|| {
+                    Error::index(format!(
+                        "{FLAT_COLUMN} column missing from HNSW_FLAT storage"
+                    ))
+                })?
+                .as_fixed_size_list()
+                .value_type();
+            if vector_type == DataType::UInt8 && distance_type == DistanceType::Hamming {
+                let storage =
+                    FlatBinStorage::try_from_batch(batch, &metadata, distance_type, None)?;
+                HNSW::index_vectors(&storage, hnsw_params.clone())
+            } else {
+                let storage =
+                    FlatFloatStorage::try_from_batch(batch, &metadata, distance_type, None)?;
+                HNSW::index_vectors(&storage, hnsw_params.clone())
+            }
+        }
+        "IVF_HNSW_PQ" => {
+            let metadata = read_pq_storage_metadata(aux_reader).await?;
+            let storage =
+                ProductQuantizationStorage::try_from_batch(batch, &metadata, distance_type, None)?;
+            HNSW::index_vectors(&storage, hnsw_params.clone())
+        }
+        "IVF_HNSW_SQ" => {
+            let metadata =
+                read_storage_metadata::<ScalarQuantizationMetadata>(aux_reader, SQ_METADATA_KEY)?;
+            let storage =
+                ScalarQuantizationStorage::try_from_batch(batch, &metadata, distance_type, None)?;
+            HNSW::index_vectors(&storage, hnsw_params.clone())
+        }
+        "IVF_HNSW_RQ" => {
+            let (metadata, centroid) = rq
+                .ok_or_else(|| Error::index("IVF_HNSW_RQ graph rebuild needs the IVF centroids"))?;
+            let storage =
+                RabitQuantizationStorage::try_from_batch(batch, metadata, distance_type, None)?
+                    .with_centroid(centroid.as_ref())?;
+            HNSW::index_vectors(&storage, hnsw_params.clone())
+        }
+        other => Err(Error::index(format!(
+            "Cannot rebuild HNSW graph for unsupported index type {other}"
+        ))),
+    }
+}
+
+#[cfg(feature = "write")]
+async fn write_hnsw_index_metadata(
+    writer: &mut V2Writer,
+    ivf: &IvfModel,
+    distance_type: DistanceType,
+    index_metadata: &IndexMetadata,
+) -> Result<()> {
+    let pb_ivf: lance_index::pb::Ivf = ivf.try_into()?;
+    let pos = writer
+        .add_global_buffer(pb_ivf.encode_to_vec().into())
+        .await?;
+    writer.add_schema_metadata(IVF_METADATA_KEY, pos.to_string());
+    writer.add_schema_metadata(
+        INDEX_METADATA_SCHEMA_KEY,
+        serde_json::to_string(&IndexMetadata {
+            index_type: index_metadata.index_type.clone(),
+            distance_type: distance_type.to_string(),
+        })?,
+    );
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+async fn read_pq_storage_metadata(reader: &V2Reader) -> Result<ProductQuantizationMetadata> {
+    let mut metadata =
+        read_storage_metadata::<ProductQuantizationMetadata>(reader, PQ_METADATA_KEY)?;
+    if metadata.codebook.is_none() {
+        let tensor_bytes = reader
+            .read_global_buffer(metadata.codebook_position as u32)
+            .await?;
+        let codebook_tensor: lance_index::pb::Tensor = Message::decode(tensor_bytes)?;
+        metadata.codebook = Some(FixedSizeListArray::try_from(&codebook_tensor)?);
+    }
+    Ok(metadata)
+}
+
+#[cfg(feature = "write")]
+/// An `IVF_HNSW_RQ` auxiliary file's RQ metadata, with the dense rotation loaded.
+async fn read_rq_storage_metadata(reader: &V2Reader) -> Result<RabitQuantizationMetadata> {
+    let mut metadata =
+        read_storage_metadata::<RabitQuantizationMetadata>(reader, RABIT_METADATA_KEY)?;
+    // A dense rotation lives in a global buffer, not in the JSON.
+    if metadata.rotate_mat.is_none()
+        && let Some(position) = metadata.buffer_index()
+    {
+        metadata.parse_buffer(reader.read_global_buffer(position).await?)?;
+    }
+    Ok(metadata)
+}
+
+#[cfg(feature = "write")]
+fn read_storage_metadata<T>(reader: &V2Reader, storage_metadata_key: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    if !storage_metadata_key.is_empty()
+        && let Some(metadata) = reader
+            .metadata()
+            .file_schema
+            .metadata
+            .get(storage_metadata_key)
+    {
+        return Ok(serde_json::from_str(metadata)?);
+    }
+
+    let storage_metadata = reader
+        .metadata()
+        .file_schema
+        .metadata
+        .get(STORAGE_METADATA_KEY)
+        .ok_or_else(|| Error::index(format!("{STORAGE_METADATA_KEY} missing from storage file")))?;
+    let metadata_entries: Vec<String> = serde_json::from_str(storage_metadata)?;
+    let metadata = metadata_entries.first().ok_or_else(|| {
+        Error::index(format!(
+            "{STORAGE_METADATA_KEY} did not contain any storage metadata entries"
+        ))
+    })?;
+    Ok(serde_json::from_str(metadata)?)
+}
+
+#[cfg(feature = "write")]
+async fn do_train_ivf_model<T: ArrowPrimitiveType>(
+    centroids: Option<Arc<FixedSizeListArray>>,
+    data: &PrimitiveArray<T>,
+    dimension: usize,
+    metric_type: MetricType,
+    params: &IvfBuildParams,
+    progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+    sample_loss: SampleLoss,
+) -> Result<IvfModel>
+where
+    <T as ArrowPrimitiveType>::Native: Dot + L2 + Normalize,
+    PrimitiveArray<T>: From<Vec<T::Native>>,
+{
+    const REDOS: usize = 1;
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<u64>();
+    let progress_worker = {
+        let progress = progress.clone();
+        lance_core::utils::tokio::spawn(async move {
+            while let Some(iter) = progress_rx.recv().await {
+                progress.stage_progress("train_ivf", iter).await?;
+            }
+            Result::Ok(())
+        })
+    };
+
+    let on_progress: Arc<dyn Fn(u32, u32) + Send + Sync> = {
+        let progress_tx = progress_tx.clone();
+        let cumulative_iters = std::sync::atomic::AtomicU64::new(0);
+        Arc::new(move |_iter: u32, _max_iters: u32| {
+            // Track cumulative iterations across all kmeans runs in this stage
+            // (flat and hierarchical both invoke the callback per-iteration).
+            let total = cumulative_iters.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            // Non-blocking send from sync kmeans loop into async progress worker.
+            let _ = progress_tx.send(total);
+        })
+    };
+    let kmeans_params = KMeansParams::new(centroids, params.max_iters as u32, REDOS, metric_type)
+        .with_balance_factor(1.0)
+        .with_on_progress(on_progress);
+    let kmeans = lance_index::vector::kmeans::train_kmeans::<T>(
+        data,
+        kmeans_params,
+        dimension,
+        params.num_partitions.unwrap_or(32),
+        params.sample_rate,
+    );
+    drop(progress_tx);
+    progress_worker.await??;
+    let kmeans = kmeans?;
+    let loss = match sample_loss {
+        SampleLoss::Measure => {
+            let training_data = FixedSizeListArray::try_new_from_values(
+                Arc::new(data.clone()) as ArrayRef,
+                dimension as i32,
+            )?;
+            Some(kmeans.compute_loss(&training_data)?)
+        }
+        SampleLoss::Skip => None,
+    };
+    Ok(IvfModel::new(
+        FixedSizeListArray::try_new_from_values(kmeans.centroids, dimension as i32)?,
+        loss,
+    ))
+}
+
+#[cfg(feature = "write")]
+/// Given `drawn_offsets`, the chunk takes only rows absent from that set and
+/// stops drawing once the set holds the paired number of offsets.
+async fn sample_ivf_training_chunk(
+    dataset: &Dataset,
+    column: &str,
+    sample_size_hint: usize,
+    metric_type: MetricType,
+    fragment_ids: Option<&[u32]>,
+    drawn_offsets: Option<(&Arc<Mutex<RoaringTreemap>>, usize)>,
+) -> Result<(FixedSizeListArray, MetricType)> {
+    let training_data = match drawn_offsets {
+        Some((drawn_offsets, max_drawn)) => {
+            sample_unseen_training_data(
+                dataset,
+                column,
+                sample_size_hint,
+                fragment_ids,
+                drawn_offsets.clone(),
+                max_drawn,
+            )
+            .await?
+        }
+        None => {
+            maybe_sample_ivf_training_data(dataset, column, sample_size_hint, fragment_ids).await?
+        }
+    };
+    let (training_data, mt) = if metric_type == MetricType::Cosine {
+        let training_data = normalize_fsl_owned(training_data)?;
+        (training_data, MetricType::L2)
+    } else {
+        (training_data, metric_type)
+    };
+    Ok((filter_finite_training_data(training_data)?, mt))
+}
+
+#[cfg(feature = "write")]
+#[derive(Debug, Clone)]
+struct FixedIvfTrainingRanges {
+    ranges: Vec<Range<u64>>,
+    num_rows: usize,
+}
+
+#[cfg(feature = "write")]
+impl FixedIvfTrainingRanges {
+    fn new(ranges: Vec<Range<u64>>) -> Self {
+        let num_rows = ranges.iter().map(range_len).sum();
+        Self { ranges, num_rows }
+    }
+
+    fn num_rows(&self) -> usize {
+        self.num_rows
+    }
+
+    fn chunk(&self, row_offset: usize, row_count: usize) -> Vec<Range<u64>> {
+        if row_count == 0 || row_offset >= self.num_rows {
+            return Vec::new();
+        }
+
+        let mut remaining_skip = row_offset;
+        let mut remaining_take = row_count.min(self.num_rows - row_offset);
+        let mut chunk = Vec::new();
+        for range in &self.ranges {
+            let range_len = range_len(range);
+            if remaining_skip >= range_len {
+                remaining_skip -= range_len;
+                continue;
+            }
+
+            let start = range.start + remaining_skip as u64;
+            let available = range_len - remaining_skip;
+            let take = available.min(remaining_take);
+            chunk.push(start..start + take as u64);
+            remaining_take -= take;
+            remaining_skip = 0;
+            if remaining_take == 0 {
+                break;
+            }
+        }
+        chunk
+    }
+}
+
+#[cfg(feature = "write")]
+fn range_len(range: &Range<u64>) -> usize {
+    (range.end - range.start) as usize
+}
+
+#[cfg(feature = "write")]
+const DEFAULT_STREAMING_IVF_TAKE_RANGE_ROWS: usize = 8192;
+
+#[cfg(feature = "write")]
+const DEFAULT_STREAMING_IVF_PREFETCH_DEPTH: usize = 1;
+
+#[cfg(feature = "write")]
+const DEFAULT_STREAMING_IVF_PROGRESS_INTERVAL: u64 = 128;
+
+#[cfg(feature = "write")]
+const STREAMING_IVF_PREFETCH_DEPTH_ENV: &str = "LANCE_STREAMING_IVF_PREFETCH_DEPTH";
+
+#[cfg(feature = "write")]
+const STREAMING_IVF_TAKE_RANGE_ROWS_ENV: &str = "LANCE_STREAMING_IVF_TAKE_RANGE_ROWS";
+
+#[cfg(feature = "write")]
+const STREAMING_IVF_PROGRESS_INTERVAL_ENV: &str = "LANCE_STREAMING_IVF_PROGRESS_INTERVAL";
+
+#[cfg(feature = "write")]
+fn streaming_ivf_prefetch_depth() -> usize {
+    std::env::var(STREAMING_IVF_PREFETCH_DEPTH_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|depth| *depth > 0)
+        .unwrap_or(DEFAULT_STREAMING_IVF_PREFETCH_DEPTH)
+}
+
+#[cfg(feature = "write")]
+fn streaming_ivf_take_range_rows() -> usize {
+    std::env::var(STREAMING_IVF_TAKE_RANGE_ROWS_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|rows| *rows > 0)
+        .unwrap_or(DEFAULT_STREAMING_IVF_TAKE_RANGE_ROWS)
+}
+
+#[cfg(feature = "write")]
+fn streaming_ivf_progress_interval() -> u64 {
+    std::env::var(STREAMING_IVF_PROGRESS_INTERVAL_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|interval| *interval > 0)
+        .unwrap_or(DEFAULT_STREAMING_IVF_PROGRESS_INTERVAL)
+}
+
+#[cfg(feature = "write")]
+fn should_report_streaming_ivf_progress(total: u64, interval: u64) -> bool {
+    total == 1 || total.is_multiple_of(interval.max(1))
+}
+
+#[cfg(feature = "write")]
+fn split_ranges_by_row_count(ranges: &[Range<u64>], max_rows: usize) -> Vec<Range<u64>> {
+    let max_rows = max_rows.max(1) as u64;
+    let mut split = Vec::new();
+    for range in ranges {
+        let mut start = range.start;
+        while start < range.end {
+            let end = (start + max_rows).min(range.end);
+            split.push(start..end);
+            start = end;
+        }
+    }
+    split
+}
+
+#[cfg(feature = "write")]
+fn generate_fixed_training_ranges(
+    num_rows: usize,
+    sample_size: usize,
+    block_size: usize,
+    byte_width: usize,
+) -> FixedIvfTrainingRanges {
+    let sample_size = num_rows.min(sample_size);
+    if sample_size == 0 {
+        return FixedIvfTrainingRanges::new(Vec::new());
+    }
+    if sample_size >= num_rows {
+        return FixedIvfTrainingRanges::new(vec![0..num_rows as u64]);
+    }
+
+    let rows_per_range = 1.max(block_size / byte_width);
+    let num_bins = num_rows.div_ceil(rows_per_range);
+    let mut rng = SmallRng::seed_from_u64(0x1a6c_e5eed);
+
+    let bins = if sample_size * 5 >= num_rows {
+        let mut bins = (0..num_bins).collect::<Vec<_>>();
+        for i in 0..num_bins {
+            let j = rng.random_range(i..num_bins);
+            bins.swap(i, j);
+        }
+        bins
+    } else {
+        let mut bins = Vec::with_capacity(sample_size.div_ceil(rows_per_range).saturating_add(1));
+        let mut seen = HashSet::with_capacity(bins.capacity());
+        while bins.len() * rows_per_range < sample_size {
+            let bin = rng.random_range(0..num_bins);
+            if seen.insert(bin) {
+                bins.push(bin);
+            }
+        }
+        bins
+    };
+
+    let mut remaining = sample_size;
+    let mut ranges = Vec::new();
+    for bin in bins {
+        if remaining == 0 {
+            break;
+        }
+        let bin_start = bin * rows_per_range;
+        let bin_end = ((bin + 1) * rows_per_range).min(num_rows);
+        let bin_len = bin_end - bin_start;
+        if bin_len == 0 {
+            continue;
+        }
+
+        let take = bin_len.min(remaining);
+        let offset = if take < bin_len {
+            rng.random_range(0..=bin_len - take)
+        } else {
+            0
+        };
+        let start = bin_start + offset;
+        ranges.push(start as u64..(start + take) as u64);
+        remaining -= take;
+    }
+
+    ranges.sort_unstable_by_key(|range| range.start);
+    let mut merged: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if range.is_empty() {
+            continue;
+        }
+        if let Some(last) = merged.last_mut()
+            && last.end >= range.start
+        {
+            last.end = last.end.max(range.end);
+            continue;
+        }
+        merged.push(range);
+    }
+    FixedIvfTrainingRanges::new(merged)
+}
+
+#[cfg(feature = "write")]
+fn default_streaming_coreset_rate(total_sample_rate: usize, streaming_sample_rate: usize) -> usize {
+    total_sample_rate.min(streaming_sample_rate).min(64)
+}
+
+#[cfg(feature = "write")]
+fn streaming_coreset_rate(
+    total_sample_rate: usize,
+    streaming_sample_rate: usize,
+    configured_coreset_rate: Option<usize>,
+) -> usize {
+    configured_coreset_rate
+        .unwrap_or_else(|| default_streaming_coreset_rate(total_sample_rate, streaming_sample_rate))
+        .min(total_sample_rate)
+        .max(1)
+}
+
+#[cfg(feature = "write")]
+fn streaming_local_coreset_k(
+    num_partitions: usize,
+    step_sample_size: usize,
+    coreset_rate: usize,
+    total_steps: usize,
+    decoupled_coreset_budget: bool,
+) -> usize {
+    if !decoupled_coreset_budget {
+        return num_partitions.min(step_sample_size);
+    }
+    num_partitions
+        .saturating_mul(coreset_rate)
+        .div_ceil(total_steps.max(1))
+        .max(num_partitions)
+        .min(step_sample_size)
+}
+
+#[cfg(feature = "write")]
+fn get_top_level_vector_column(batch: &RecordBatch, column: &str) -> Result<ArrayRef> {
+    batch.column_by_name(column).cloned().ok_or_else(|| {
+        Error::index(format!(
+            "Fixed streaming IVF sampling only supports top-level vector column '{}'",
+            column
+        ))
+    })
+}
+
+#[cfg(feature = "write")]
+fn append_fsl_values(
+    values_buf: &mut MutableBuffer,
+    total_rows: &mut usize,
+    array: &ArrayRef,
+    byte_width: usize,
+) -> Result<()> {
+    let fsl = array.as_fixed_size_list();
+    let values = fsl.values();
+    let values_data = values.to_data();
+    let elem_size = byte_width / fsl.value_length() as usize;
+    let offset_bytes = values_data.offset() * elem_size;
+    let total_bytes = fsl.len() * byte_width;
+    let buf = &values_data.buffers()[0].as_slice()[offset_bytes..offset_bytes + total_bytes];
+    values_buf.extend_from_slice(buf);
+    *total_rows += fsl.len();
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+fn fsl_values_to_fixed_array(
+    vector_type: &DataType,
+    values_buf: MutableBuffer,
+    rows: usize,
+) -> Result<FixedSizeListArray> {
+    let DataType::FixedSizeList(field, dimension) = vector_type else {
+        return Err(Error::invalid_input(format!(
+            "expected FixedSizeList vector type, got {}",
+            vector_type
+        )));
+    };
+    let value_len = rows * *dimension as usize;
+    let values = arrow_array::make_array(
+        ArrayData::builder(field.data_type().clone())
+            .len(value_len)
+            .add_buffer(values_buf.into())
+            .build()?,
+    );
+    Ok(FixedSizeListArray::try_new(
+        field.clone(),
+        *dimension,
+        values,
+        None,
+    )?)
+}
+
+#[cfg(feature = "write")]
+struct FixedIvfTrainingSampler<'a> {
+    dataset: &'a Dataset,
+    column: &'a str,
+    vector_type: DataType,
+    projection: Arc<lance_core::datatypes::Schema>,
+    byte_width: usize,
+}
+
+#[cfg(feature = "write")]
+impl<'a> FixedIvfTrainingSampler<'a> {
+    fn try_new(dataset: &'a Dataset, column: &'a str) -> Result<Option<Self>> {
+        let vector_field = dataset.schema().field(column).ok_or(Error::index(format!(
+            "Sample training data: column {} does not exist in schema",
+            column
+        )))?;
+        if vector_field.nullable
+            || !matches!(vector_field.data_type(), DataType::FixedSizeList(_, _))
+        {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            dataset,
+            column,
+            vector_type: vector_field.data_type(),
+            projection: Arc::new(dataset.schema().project(&[column])?),
+            byte_width: vector_field
+                .data_type()
+                .byte_width_opt()
+                .unwrap_or(4 * 1024),
+        }))
+    }
+
+    async fn sample_ranges(
+        &self,
+        ranges: &[Range<u64>],
+        metric_type: MetricType,
+    ) -> Result<(FixedSizeListArray, MetricType)> {
+        let rows = ranges.iter().map(range_len).sum::<usize>();
+        let mut values_buf = MutableBuffer::with_capacity(rows * self.byte_width);
+        let mut total_rows = 0;
+
+        let read_ranges = split_ranges_by_row_count(ranges, streaming_ivf_take_range_rows());
+        let range_stream = stream::iter(read_ranges.into_iter().map(Ok));
+        let batch_readahead = streaming_ivf_prefetch_depth();
+        let mut batch_stream = self.dataset.take_scan(
+            Box::pin(range_stream),
+            self.projection.clone(),
+            batch_readahead,
+        );
+        while let Some(batch) = batch_stream.try_next().await? {
+            let array = get_top_level_vector_column(&batch, self.column)?;
+            append_fsl_values(&mut values_buf, &mut total_rows, &array, self.byte_width)?;
+        }
+
+        let training_data = fsl_values_to_fixed_array(&self.vector_type, values_buf, total_rows)?;
+        let (training_data, mt) = if metric_type == MetricType::Cosine {
+            let training_data = normalize_fsl_owned(training_data)?;
+            (training_data, MetricType::L2)
+        } else {
+            (training_data, metric_type)
+        };
+        Ok((filter_finite_training_data(training_data)?, mt))
+    }
+}
+
+#[cfg(feature = "write")]
+type KMeansProgressCallback = Arc<dyn Fn(u32, u32) + Send + Sync>;
+
+#[cfg(feature = "write")]
+trait StreamingKMeansArrowType:
+    ArrowPrimitiveType<Native: Float + FromPrimitive + AsPrimitive<f64> + std::ops::AddAssign> + Sized
+{
+    fn from_values(values: Vec<Self::Native>) -> PrimitiveArray<Self>;
+}
+
+#[cfg(feature = "write")]
+impl StreamingKMeansArrowType for Float32Type {
+    fn from_values(values: Vec<Self::Native>) -> PrimitiveArray<Self> {
+        PrimitiveArray::from(values)
+    }
+}
+
+#[cfg(feature = "write")]
+impl StreamingKMeansArrowType for Float64Type {
+    fn from_values(values: Vec<Self::Native>) -> PrimitiveArray<Self> {
+        PrimitiveArray::from(values)
+    }
+}
+
+#[cfg(feature = "write")]
+fn cast_weight<T: StreamingKMeansArrowType>(
+    weight: f64,
+    context: impl std::fmt::Display,
+) -> Result<T::Native> {
+    T::Native::from_f64(weight).ok_or_else(|| {
+        Error::invalid_input(format!(
+            "streaming kmeans cannot convert {context} weight {weight} to {}",
+            T::DATA_TYPE
+        ))
+    })
+}
+
+#[cfg(feature = "write")]
+fn streaming_kmeans_values<T: StreamingKMeansArrowType>(
+    data: &FixedSizeListArray,
+) -> Result<&[T::Native]> {
+    if data.value_type() != T::DATA_TYPE {
+        return Err(Error::invalid_input(format!(
+            "streaming coreset kmeans expected {} values, got {}",
+            T::DATA_TYPE,
+            data.value_type()
+        )));
+    }
+    Ok(data.values().as_primitive::<T>().values())
+}
+
+#[cfg(feature = "write")]
+fn streaming_kmeans_fsl_from_values<T: StreamingKMeansArrowType>(
+    values: Vec<T::Native>,
+    dimension: usize,
+) -> Result<FixedSizeListArray> {
+    Ok(FixedSizeListArray::try_new_from_values(
+        T::from_values(values),
+        dimension as i32,
+    )?)
+}
+
+#[cfg(feature = "write")]
+fn prepare_streaming_coreset_sample<T: StreamingKMeansArrowType>(
+    training_data: FixedSizeListArray,
+) -> Result<FixedSizeListArray> {
+    if training_data.value_type() == T::DATA_TYPE {
+        return Ok(training_data);
+    }
+
+    let actual_type = training_data.value_type();
+    let prepared = match (&T::DATA_TYPE, &actual_type) {
+        (DataType::Float32, DataType::Float16 | DataType::Int8) => {
+            let (field, dimension, values, nulls) = training_data.into_parts();
+            let values = arrow::compute::cast(&values, &DataType::Float32)?;
+            let field = Arc::new(field.as_ref().clone().with_data_type(DataType::Float32));
+            FixedSizeListArray::try_new(field, dimension, values, nulls)?
+        }
+        _ => {
+            return Err(Error::invalid_input(format!(
+                "streaming coreset kmeans expected {} input values, got {}",
+                T::DATA_TYPE,
+                actual_type
+            )));
+        }
+    };
+
+    Ok(prepared)
+}
+
+#[cfg(feature = "write")]
+struct StreamingCoresetTrainingRequest<'a> {
+    dataset: &'a Dataset,
+    column: &'a str,
+    dimension: usize,
+    metric_type: MetricType,
+    params: &'a IvfBuildParams,
+    fragment_ids: Option<&'a [u32]>,
+    progress: Arc<dyn lance_index::progress::IndexBuildProgress>,
+}
+
+#[cfg(feature = "write")]
+/// Metric-specific behavior for streaming coreset training.
+///
+/// Cosine input is normalized by the sampler and therefore uses the L2 policy.
+#[async_trait]
+trait StreamingKMeansMetricPolicy: Send + Sync {
+    fn metric_type(&self) -> MetricType;
+
+    async fn train_coreset_ivf_model(
+        &self,
+        request: StreamingCoresetTrainingRequest<'_>,
+    ) -> Result<IvfModel>;
+
+    fn validate_sample_metric(&self, metric_type: MetricType) -> Result<()> {
+        if metric_type == self.metric_type() {
+            Ok(())
+        } else {
+            Err(Error::invalid_input(format!(
+                "streaming sampler returned metric {}, expected {}",
+                metric_type,
+                self.metric_type()
+            )))
+        }
+    }
+
+    fn disable_local_hierarchical(&self) -> bool {
+        false
+    }
+
+    fn local_coreset_k(
+        &self,
+        num_partitions: usize,
+        num_rows: usize,
+        coreset_rate: usize,
+        total_steps: usize,
+        has_decoupled_budget: bool,
+    ) -> usize {
+        streaming_local_coreset_k(
+            num_partitions,
+            num_rows,
+            coreset_rate,
+            total_steps,
+            has_decoupled_budget,
+        )
+    }
+
+    fn has_converged(&self, previous_loss: f64, loss: f64) -> bool {
+        if loss == 0.0 {
+            previous_loss == 0.0
+        } else {
+            (previous_loss - loss).abs() < 1e-4 * loss.abs()
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+/// Operations specific to floating-point coreset summaries.
+trait StreamingFloatKMeansMetricPolicy<T: StreamingKMeansArrowType>:
+    StreamingKMeansMetricPolicy
+{
+    fn local_summary_loss(&self, distance: f32) -> f64;
+
+    fn merge_residual(&self, vector: &[T::Native], centroid: &[T::Native]) -> f64;
+
+    fn split_priority(
+        &self,
+        data_values: &[T::Native],
+        weights: &[f64],
+        indices: &[usize],
+        centroid: &[T::Native],
+        dimension: usize,
+        loss: f64,
+    ) -> f64;
+
+    fn initialize_centroids(
+        &self,
+        data_values: &[T::Native],
+        dimension: usize,
+        k: usize,
+        n: usize,
+        weights: &[f64],
+    ) -> Vec<T::Native> {
+        initialize_weighted_centroids::<T>(data_values, dimension, k, n, weights)
+    }
+}
+
+#[cfg(feature = "write")]
+struct L2MetricPolicy;
+
+#[cfg(feature = "write")]
+#[async_trait]
+impl StreamingKMeansMetricPolicy for L2MetricPolicy {
+    fn metric_type(&self) -> MetricType {
+        DistanceType::L2
+    }
+
+    async fn train_coreset_ivf_model(
+        &self,
+        request: StreamingCoresetTrainingRequest<'_>,
+    ) -> Result<IvfModel> {
+        train_streaming_float_coreset_ivf_model(request, self).await
+    }
+}
+
+#[cfg(feature = "write")]
+impl<T: StreamingKMeansArrowType> StreamingFloatKMeansMetricPolicy<T> for L2MetricPolicy {
+    fn local_summary_loss(&self, distance: f32) -> f64 {
+        distance as f64
+    }
+
+    fn merge_residual(&self, vector: &[T::Native], centroid: &[T::Native]) -> f64 {
+        squared_l2(vector, centroid)
+    }
+
+    fn split_priority(
+        &self,
+        _data_values: &[T::Native],
+        _weights: &[f64],
+        _indices: &[usize],
+        _centroid: &[T::Native],
+        _dimension: usize,
+        loss: f64,
+    ) -> f64 {
+        loss
+    }
+}
+
+#[cfg(feature = "write")]
+struct DotMetricPolicy;
+
+#[cfg(feature = "write")]
+#[async_trait]
+impl StreamingKMeansMetricPolicy for DotMetricPolicy {
+    fn metric_type(&self) -> MetricType {
+        DistanceType::Dot
+    }
+
+    async fn train_coreset_ivf_model(
+        &self,
+        request: StreamingCoresetTrainingRequest<'_>,
+    ) -> Result<IvfModel> {
+        train_streaming_float_coreset_ivf_model(request, self).await
+    }
+
+    fn disable_local_hierarchical(&self) -> bool {
+        true
+    }
+
+    fn local_coreset_k(
+        &self,
+        num_partitions: usize,
+        num_rows: usize,
+        coreset_rate: usize,
+        total_steps: usize,
+        has_decoupled_budget: bool,
+    ) -> usize {
+        let local_k = streaming_local_coreset_k(
+            num_partitions,
+            num_rows,
+            coreset_rate,
+            total_steps,
+            has_decoupled_budget,
+        );
+        // Dot summaries merge without residual loss, so distribute the final
+        // representative count across chunks. This also keeps flat local
+        // k-means below the number of rows.
+        local_k
+            .min(num_partitions.div_ceil(total_steps.max(1)))
+            .min(num_rows.saturating_sub(1))
+    }
+}
+
+#[cfg(feature = "write")]
+impl<T: StreamingKMeansArrowType> StreamingFloatKMeansMetricPolicy<T> for DotMetricPolicy {
+    fn local_summary_loss(&self, _distance: f32) -> f64 {
+        0.0
+    }
+
+    fn merge_residual(&self, _vector: &[T::Native], _centroid: &[T::Native]) -> f64 {
+        0.0
+    }
+
+    fn split_priority(
+        &self,
+        data_values: &[T::Native],
+        weights: &[f64],
+        indices: &[usize],
+        centroid: &[T::Native],
+        dimension: usize,
+        _loss: f64,
+    ) -> f64 {
+        indices
+            .iter()
+            .map(|&idx| {
+                let vector = &data_values[idx * dimension..(idx + 1) * dimension];
+                weights[idx] * squared_l2(vector, centroid)
+            })
+            .sum()
+    }
+}
+
+#[cfg(feature = "write")]
+struct HammingMetricPolicy;
+
+#[cfg(feature = "write")]
+#[async_trait]
+impl StreamingKMeansMetricPolicy for HammingMetricPolicy {
+    fn metric_type(&self) -> MetricType {
+        DistanceType::Hamming
+    }
+
+    async fn train_coreset_ivf_model(
+        &self,
+        request: StreamingCoresetTrainingRequest<'_>,
+    ) -> Result<IvfModel> {
+        train_streaming_coreset_ivf_model_with_algorithm(request, &HammingCoresetAlgorithm).await
+    }
+}
+
+#[cfg(feature = "write")]
+static L2_METRIC_POLICY: L2MetricPolicy = L2MetricPolicy;
+
+#[cfg(feature = "write")]
+static DOT_METRIC_POLICY: DotMetricPolicy = DotMetricPolicy;
+
+#[cfg(feature = "write")]
+static HAMMING_METRIC_POLICY: HammingMetricPolicy = HammingMetricPolicy;
+
+#[cfg(feature = "write")]
+fn streaming_kmeans_metric_policy(
+    metric_type: MetricType,
+) -> Result<&'static dyn StreamingKMeansMetricPolicy> {
+    match metric_type {
+        DistanceType::L2 | DistanceType::Cosine => Ok(&L2_METRIC_POLICY),
+        DistanceType::Dot => Ok(&DOT_METRIC_POLICY),
+        DistanceType::Hamming => Ok(&HAMMING_METRIC_POLICY),
+    }
+}
+
+#[cfg(feature = "write")]
+fn streaming_float_kmeans_metric_policy<T: StreamingKMeansArrowType>(
+    metric_type: MetricType,
+) -> Result<&'static dyn StreamingFloatKMeansMetricPolicy<T>> {
+    match metric_type {
+        DistanceType::L2 | DistanceType::Cosine => Ok(&L2_METRIC_POLICY),
+        DistanceType::Dot => Ok(&DOT_METRIC_POLICY),
+        _ => Err(Error::invalid_input(format!(
+            "floating-point streaming coreset IVF supports L2, Cosine, and Dot training, got {}",
+            metric_type
+        ))),
+    }
+}
+
+#[cfg(feature = "write")]
+fn squared_l2<N: AsPrimitive<f64>>(left: &[N], right: &[N]) -> f64 {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| {
+            let diff = left.as_() - right.as_();
+            diff * diff
+        })
+        .sum()
+}
+
+#[cfg(feature = "write")]
+fn validate_finite_kmeans_distance(
+    distance: f32,
+    row_idx: usize,
+    metric_type: MetricType,
+    operation: &str,
+) -> Result<()> {
+    if distance.is_finite() {
+        Ok(())
+    } else {
+        Err(Error::invalid_input(format!(
+            "{operation} produced a nonfinite distance at row {row_idx} \
+            for metric {metric_type}. Input vector magnitudes may exceed \
+            the numeric range used during streaming k-means training. \
+            Consider uniformly scaling the vectors to smaller magnitudes."
+        )))
+    }
+}
+
+#[cfg(feature = "write")]
+struct KMeansStepOptions {
+    dimension: usize,
+    metric_type: MetricType,
+    num_partitions: usize,
+    sample_rate: usize,
+    max_iters: usize,
+    disable_hierarchical: bool,
+    on_progress: KMeansProgressCallback,
+}
+
+#[cfg(feature = "write")]
+fn train_ivf_kmeans_step<T: ArrowPrimitiveType>(
+    centroids: Option<Arc<FixedSizeListArray>>,
+    data: &PrimitiveArray<T>,
+    options: &KMeansStepOptions,
+) -> Result<KMeans>
+where
+    <T as ArrowPrimitiveType>::Native: Dot + L2 + Normalize,
+    PrimitiveArray<T>: From<Vec<T::Native>>,
+{
+    let has_centroids = centroids.is_some();
+    let mut kmeans_params =
+        KMeansParams::new(centroids, options.max_iters as u32, 1, options.metric_type)
+            .with_balance_factor(1.0)
+            .with_on_progress(options.on_progress.clone());
+    if has_centroids || options.disable_hierarchical {
+        // Incremental refinement already has the full centroid set. Streaming
+        // metric policy can also require flat local training.
+        kmeans_params = kmeans_params.with_hierarchical_k(1);
+    }
+    lance_index::vector::kmeans::train_kmeans::<T>(
+        data,
+        kmeans_params,
+        options.dimension,
+        options.num_partitions,
+        options.sample_rate,
+    )
+}
+
+#[cfg(feature = "write")]
+fn train_ivf_kmeans_step_arrow_array_no_loss(
+    centroids: Option<Arc<FixedSizeListArray>>,
+    data: &FixedSizeListArray,
+    options: KMeansStepOptions,
+) -> Result<KMeans> {
+    let values = data.values();
+    let kmeans = match (values.data_type(), options.metric_type) {
+        (DataType::Float16, _) => train_ivf_kmeans_step::<Float16Type>(
+            centroids,
+            values.as_primitive::<Float16Type>(),
+            &options,
+        )?,
+        (DataType::Float32, _) => train_ivf_kmeans_step::<Float32Type>(
+            centroids,
+            values.as_primitive::<Float32Type>(),
+            &options,
+        )?,
+        (DataType::Float64, _) => train_ivf_kmeans_step::<Float64Type>(
+            centroids,
+            values.as_primitive::<Float64Type>(),
+            &options,
+        )?,
+        (DataType::Int8, DistanceType::L2)
+        | (DataType::Int8, DistanceType::Dot)
+        | (DataType::Int8, DistanceType::Cosine) => {
+            let data = data.convert_to_floating_point()?;
+            train_ivf_kmeans_step::<Float32Type>(
+                centroids,
+                data.values().as_primitive::<Float32Type>(),
+                &options,
+            )?
+        }
+        (DataType::UInt8, DistanceType::Hamming) => train_ivf_kmeans_step::<UInt8Type>(
+            centroids,
+            values.as_primitive::<UInt8Type>(),
+            &options,
+        )?,
+        _ => Err(Error::index(format!(
+            "KMeans: can not train data type {} with distance type: {}",
+            values.data_type(),
+            options.metric_type
+        )))?,
+    };
+    Ok(kmeans)
+}
+
+#[cfg(feature = "write")]
+fn accumulate_refine_assignments<T: StreamingKMeansArrowType>(
+    data: &FixedSizeListArray,
+    centroids: &FixedSizeListArray,
+    metric_policy: &dyn StreamingFloatKMeansMetricPolicy<T>,
+    cluster_sums: &mut [T::Native],
+    cluster_weights: &mut [f64],
+) -> Result<f64> {
+    let dimension = data.value_length() as usize;
+    let kmeans = KMeans::with_centroids(
+        centroids.values().clone(),
+        dimension,
+        metric_policy.metric_type(),
+        f64::MAX,
+    );
+    let (membership, distances) = kmeans.compute_membership_and_distances(data)?;
+    let data_values = streaming_kmeans_values::<T>(data)?;
+    let mut loss = 0.0;
+
+    for row_idx in 0..data.len() {
+        let (Some(cluster_id), Some(distance)) = (membership[row_idx], distances[row_idx]) else {
+            continue;
+        };
+        validate_finite_kmeans_distance(
+            distance,
+            row_idx,
+            metric_policy.metric_type(),
+            "streaming kmeans refinement",
+        )?;
+        let cluster_id = cluster_id as usize;
+        cluster_weights[cluster_id] += 1.0;
+        loss += distance as f64;
+        let vector = &data_values[row_idx * dimension..(row_idx + 1) * dimension];
+        let sum = &mut cluster_sums[cluster_id * dimension..(cluster_id + 1) * dimension];
+        for (sum, value) in sum.iter_mut().zip(vector) {
+            *sum += *value;
+        }
+    }
+
+    Ok(loss)
+}
+
+#[cfg(feature = "write")]
+fn update_refined_centroids<T: StreamingKMeansArrowType>(
+    centroids: &FixedSizeListArray,
+    cluster_sums: &[T::Native],
+    cluster_weights: &[f64],
+) -> Result<FixedSizeListArray> {
+    let dimension = centroids.value_length() as usize;
+    let mut next = streaming_kmeans_values::<T>(centroids)?.to_vec();
+    for cluster_id in 0..centroids.len() {
+        let weight = cluster_weights[cluster_id];
+        if weight <= 0.0 {
+            continue;
+        }
+        let centroid = &mut next[cluster_id * dimension..(cluster_id + 1) * dimension];
+        let sum = &cluster_sums[cluster_id * dimension..(cluster_id + 1) * dimension];
+        let weight = cast_weight::<T>(weight, format_args!("refinement cluster {cluster_id}"))?;
+        for (value, sum) in centroid.iter_mut().zip(sum) {
+            *value = *sum / weight;
+        }
+    }
+    streaming_kmeans_fsl_from_values::<T>(next, dimension)
+}
+
+#[cfg(feature = "write")]
+async fn refine_streaming_kmeans_with_sampler<T: StreamingKMeansArrowType>(
+    sampler: &FixedIvfTrainingSampler<'_>,
+    metric_type: MetricType,
+    streaming_sample_size: usize,
+    sample_ranges: &FixedIvfTrainingRanges,
+    initial_centroids: &FixedSizeListArray,
+    passes: usize,
+    on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+) -> Result<FixedSizeListArray> {
+    let metric_policy = streaming_float_kmeans_metric_policy::<T>(metric_type)?;
+    let dimension = initial_centroids.value_length() as usize;
+    let mut centroids = initial_centroids.clone();
+    for pass in 1..=passes {
+        let mut cluster_sums = vec![T::Native::default(); centroids.len() * dimension];
+        let mut cluster_weights = vec![0.0_f64; centroids.len()];
+        let mut loss = 0.0;
+        let mut row_offset = 0;
+        while row_offset < sample_ranges.num_rows() {
+            let ranges = sample_ranges.chunk(row_offset, streaming_sample_size.max(1));
+            row_offset += ranges.iter().map(range_len).sum::<usize>();
+            let (training_data, mt) = sampler.sample_ranges(&ranges, metric_type).await?;
+            metric_policy.validate_sample_metric(mt)?;
+            let training_data = prepare_streaming_coreset_sample::<T>(training_data)?;
+            loss += accumulate_refine_assignments::<T>(
+                &training_data,
+                &centroids,
+                metric_policy,
+                &mut cluster_sums,
+                &mut cluster_weights,
+            )?;
+        }
+        centroids = update_refined_centroids::<T>(&centroids, &cluster_sums, &cluster_weights)?;
+        on_progress(pass as u32, passes as u32);
+        info!(
+            "Streaming IVF raw-vector refinement pass {} / {} assigned {} vectors; pre-update loss={}",
+            pass,
+            passes,
+            cluster_weights.iter().sum::<f64>() as usize,
+            loss
+        );
+    }
+    Ok(centroids)
+}
+
+#[cfg(feature = "write")]
+#[allow(clippy::too_many_arguments)]
+async fn refine_streaming_kmeans_with_resampling<T: StreamingKMeansArrowType>(
+    dataset: &Dataset,
+    column: &str,
+    metric_type: MetricType,
+    total_sample_rate: usize,
+    streaming_sample_rate: usize,
+    num_partitions: usize,
+    initial_centroids: &FixedSizeListArray,
+    fragment_ids: Option<&[u32]>,
+    passes: usize,
+    on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+) -> Result<FixedSizeListArray> {
+    let metric_policy = streaming_float_kmeans_metric_policy::<T>(metric_type)?;
+    let dimension = initial_centroids.value_length() as usize;
+    let mut centroids = initial_centroids.clone();
+    for pass in 1..=passes {
+        let mut cluster_sums = vec![T::Native::default(); centroids.len() * dimension];
+        let mut cluster_weights = vec![0.0_f64; centroids.len()];
+        let mut remaining_sample_rate = total_sample_rate;
+        let mut loss = 0.0;
+        while remaining_sample_rate > 0 {
+            let step_sample_rate = remaining_sample_rate.min(streaming_sample_rate);
+            let step_sample_size = num_partitions * step_sample_rate;
+            let (training_data, mt) = sample_ivf_training_chunk(
+                dataset,
+                column,
+                step_sample_size,
+                metric_type,
+                fragment_ids,
+                None,
+            )
+            .await?;
+            metric_policy.validate_sample_metric(mt)?;
+            let training_data = prepare_streaming_coreset_sample::<T>(training_data)?;
+            loss += accumulate_refine_assignments::<T>(
+                &training_data,
+                &centroids,
+                metric_policy,
+                &mut cluster_sums,
+                &mut cluster_weights,
+            )?;
+            remaining_sample_rate -= step_sample_rate;
+        }
+        centroids = update_refined_centroids::<T>(&centroids, &cluster_sums, &cluster_weights)?;
+        on_progress(pass as u32, passes as u32);
+        info!(
+            "Streaming IVF resampled raw-vector refinement pass {} / {} assigned {} vectors; pre-update loss={}",
+            pass,
+            passes,
+            cluster_weights.iter().sum::<f64>() as usize,
+            loss
+        );
+    }
+    Ok(centroids)
+}
+
+#[cfg(feature = "write")]
+async fn refine_streaming_hamming_kmodes_with_sampler(
+    sampler: &FixedIvfTrainingSampler<'_>,
+    streaming_sample_size: usize,
+    sample_ranges: &FixedIvfTrainingRanges,
+    initial_centroids: &FixedSizeListArray,
+    passes: usize,
+    on_progress: KMeansProgressCallback,
+) -> Result<FixedSizeListArray> {
+    let dimension = initial_centroids.value_length() as usize;
+    let mut centroids = initial_centroids.clone();
+    for pass in 1..=passes {
+        let mut accumulator =
+            streaming_hamming::HammingAccumulator::try_new(centroids.len(), dimension)?;
+        let mut loss = 0.0;
+        let mut row_offset = 0;
+        while row_offset < sample_ranges.num_rows() {
+            let ranges = sample_ranges.chunk(row_offset, streaming_sample_size.max(1));
+            row_offset += ranges.iter().map(range_len).sum::<usize>();
+            let (training_data, metric_type) = sampler
+                .sample_ranges(&ranges, DistanceType::Hamming)
+                .await?;
+            HAMMING_METRIC_POLICY.validate_sample_metric(metric_type)?;
+            loss += streaming_hamming::accumulate_raw_assignments(
+                &training_data,
+                &centroids,
+                &mut accumulator,
+            )?;
+        }
+        centroids = streaming_hamming::update_raw_centroids(&centroids, &accumulator)?;
+        on_progress(pass as u32, passes as u32);
+        info!(
+            "Streaming IVF Hamming refinement pass {} / {} assigned {} vectors; pre-update loss={}",
+            pass,
+            passes,
+            accumulator.total_count()?,
+            loss
+        );
+    }
+    Ok(centroids)
+}
+
+#[cfg(feature = "write")]
+#[allow(clippy::too_many_arguments)]
+async fn refine_streaming_hamming_kmodes_with_resampling(
+    dataset: &Dataset,
+    column: &str,
+    total_sample_rate: usize,
+    streaming_sample_rate: usize,
+    num_partitions: usize,
+    initial_centroids: &FixedSizeListArray,
+    fragment_ids: Option<&[u32]>,
+    passes: usize,
+    on_progress: KMeansProgressCallback,
+) -> Result<FixedSizeListArray> {
+    let dimension = initial_centroids.value_length() as usize;
+    let mut centroids = initial_centroids.clone();
+    for pass in 1..=passes {
+        let mut accumulator =
+            streaming_hamming::HammingAccumulator::try_new(centroids.len(), dimension)?;
+        let mut remaining_sample_rate = total_sample_rate;
+        let mut loss = 0.0;
+        while remaining_sample_rate > 0 {
+            let step_sample_rate = remaining_sample_rate.min(streaming_sample_rate);
+            let step_sample_size = num_partitions * step_sample_rate;
+            let (training_data, metric_type) = sample_ivf_training_chunk(
+                dataset,
+                column,
+                step_sample_size,
+                DistanceType::Hamming,
+                fragment_ids,
+                None,
+            )
+            .await?;
+            HAMMING_METRIC_POLICY.validate_sample_metric(metric_type)?;
+            loss += streaming_hamming::accumulate_raw_assignments(
+                &training_data,
+                &centroids,
+                &mut accumulator,
+            )?;
+            remaining_sample_rate -= step_sample_rate;
+        }
+        centroids = streaming_hamming::update_raw_centroids(&centroids, &accumulator)?;
+        on_progress(pass as u32, passes as u32);
+        info!(
+            "Streaming IVF resampled Hamming refinement pass {} / {} assigned {} vectors; pre-update loss={}",
+            pass,
+            passes,
+            accumulator.total_count()?,
+            loss
+        );
+    }
+    Ok(centroids)
+}
+
+#[cfg(feature = "write")]
+struct WeightedCoreset<T: StreamingKMeansArrowType> {
+    values: Vec<T::Native>,
+    weights: Vec<f64>,
+    losses: Vec<f64>,
+}
+
+#[cfg(feature = "write")]
+impl<T: StreamingKMeansArrowType> WeightedCoreset<T> {
+    fn new(dimension: usize, capacity: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(capacity * dimension),
+            weights: Vec::with_capacity(capacity),
+            losses: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.weights.len()
+    }
+
+    fn push(&mut self, centroid: &[T::Native], weight: f64, loss: f64) {
+        if weight <= 0.0 {
+            return;
+        }
+        self.values.extend_from_slice(centroid);
+        self.weights.push(weight);
+        self.losses.push(loss);
+    }
+
+    fn append(&mut self, other: Self) {
+        self.values.extend(other.values);
+        self.weights.extend(other.weights);
+        self.losses.extend(other.losses);
+    }
+
+    fn into_fsl_parts(self, dimension: usize) -> Result<(FixedSizeListArray, Vec<f64>, Vec<f64>)> {
+        Ok((
+            streaming_kmeans_fsl_from_values::<T>(self.values, dimension)?,
+            self.weights,
+            self.losses,
+        ))
+    }
+
+    fn reduce_to_budget(
+        &mut self,
+        dimension: usize,
+        budget: usize,
+        metric_policy: &dyn StreamingFloatKMeansMetricPolicy<T>,
+    ) -> Result<()> {
+        if self.len() <= budget {
+            return Ok(());
+        }
+        let total_weight = self.weights.iter().sum::<f64>();
+        if total_weight <= 0.0 {
+            *self = Self::new(dimension, budget);
+            return Ok(());
+        }
+
+        let mut weighted_sums = vec![0.0_f64; dimension];
+        let mut weighted_square_sums = vec![0.0_f64; dimension];
+        for (row_idx, vector) in self.values.chunks_exact(dimension).enumerate() {
+            let weight = self.weights[row_idx];
+            for dim in 0..dimension {
+                let value: f64 = vector[dim].as_();
+                weighted_sums[dim] += weight * value;
+                weighted_square_sums[dim] += weight * value * value;
+            }
+        }
+        let split_dim = (0..dimension)
+            .max_by(|left, right| {
+                let left_mean = weighted_sums[*left] / total_weight;
+                let right_mean = weighted_sums[*right] / total_weight;
+                let left_var = weighted_square_sums[*left] / total_weight - left_mean * left_mean;
+                let right_var =
+                    weighted_square_sums[*right] / total_weight - right_mean * right_mean;
+                left_var
+                    .partial_cmp(&right_var)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(0);
+
+        let mut indices = (0..self.len()).collect::<Vec<_>>();
+        indices.sort_unstable_by(|left, right| {
+            self.values[left * dimension + split_dim]
+                .partial_cmp(&self.values[right * dimension + split_dim])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.cmp(right))
+        });
+
+        let mut reduced = Self::new(dimension, budget);
+        for group_idx in 0..budget {
+            let group_start = group_idx * indices.len() / budget;
+            let group_end = (group_idx + 1) * indices.len() / budget;
+            if group_start == group_end {
+                continue;
+            }
+            let mut weight_sum = 0.0;
+            let centroid_start = reduced.values.len();
+            reduced
+                .values
+                .resize(centroid_start + dimension, T::Native::default());
+            {
+                let centroid = &mut reduced.values[centroid_start..centroid_start + dimension];
+                for &idx in &indices[group_start..group_end] {
+                    let weight = self.weights[idx];
+                    weight_sum += weight;
+                    let weight = cast_weight::<T>(weight, format_args!("coreset row {idx}"))?;
+                    let vector = &self.values[idx * dimension..(idx + 1) * dimension];
+                    for (sum, value) in centroid.iter_mut().zip(vector) {
+                        *sum += *value * weight;
+                    }
+                }
+            }
+            if weight_sum <= 0.0 {
+                reduced.values.truncate(centroid_start);
+                continue;
+            }
+            let weight = cast_weight::<T>(weight_sum, format_args!("coreset group {group_idx}"))?;
+            {
+                let centroid = &mut reduced.values[centroid_start..centroid_start + dimension];
+                for value in centroid {
+                    *value = *value / weight;
+                }
+            }
+            if reduced.values[centroid_start..centroid_start + dimension]
+                .iter()
+                .any(|value| !value.is_finite())
+            {
+                return Err(Error::invalid_input(format!(
+                    "streaming coreset reduction produced nonfinite centroid for metric {}",
+                    metric_policy.metric_type()
+                )));
+            }
+
+            let mut loss = 0.0;
+            let centroid = &reduced.values[centroid_start..centroid_start + dimension];
+            for &idx in &indices[group_start..group_end] {
+                let vector = &self.values[idx * dimension..(idx + 1) * dimension];
+                let merge_residual = metric_policy.merge_residual(vector, centroid);
+                loss += self.losses[idx] + self.weights[idx] * merge_residual;
+            }
+            reduced.weights.push(weight_sum);
+            reduced.losses.push(loss);
+        }
+        *self = reduced;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "write")]
+#[derive(Debug)]
+struct WeightedKMeansResult<T: StreamingKMeansArrowType> {
+    centroids: Vec<T::Native>,
+    membership: Vec<Option<u32>>,
+    cluster_weights: Vec<f64>,
+    cluster_losses: Vec<f64>,
+    loss: f64,
+}
+
+#[cfg(feature = "write")]
+fn initialize_weighted_centroids<T: StreamingKMeansArrowType>(
+    data_values: &[T::Native],
+    dimension: usize,
+    k: usize,
+    n: usize,
+    weights: &[f64],
+) -> Vec<T::Native> {
+    let mut rng = SmallRng::seed_from_u64(0x1f17_5eed);
+    let mut centroids = Vec::with_capacity(k * dimension);
+    let mut selected = vec![false; n];
+    let total_weight = weights.iter().copied().sum::<f64>();
+    let first = if total_weight > 0.0 {
+        let mut threshold = rng.random::<f64>() * total_weight;
+        let mut row_idx = 0;
+        for (idx, weight) in weights.iter().enumerate() {
+            threshold -= *weight;
+            if threshold <= 0.0 {
+                row_idx = idx;
+                break;
+            }
+        }
+        row_idx
+    } else {
+        0
+    };
+    selected[first] = true;
+    centroids.extend_from_slice(&data_values[first * dimension..(first + 1) * dimension]);
+
+    let mut min_distances = vec![f64::MAX; n];
+    while centroids.len() / dimension < k {
+        let last_centroid = &centroids[centroids.len() - dimension..centroids.len()];
+        for row_idx in 0..n {
+            if selected[row_idx] {
+                min_distances[row_idx] = 0.0;
+                continue;
+            }
+            let vector = &data_values[row_idx * dimension..(row_idx + 1) * dimension];
+            let distance = squared_l2(vector, last_centroid);
+            min_distances[row_idx] = min_distances[row_idx].min(distance);
+        }
+
+        let weighted_distance_sum = min_distances
+            .iter()
+            .zip(weights)
+            .map(|(distance, weight)| distance * weight)
+            .sum::<f64>();
+        let next = if weighted_distance_sum > 0.0 {
+            let mut threshold = rng.random::<f64>() * weighted_distance_sum;
+            let mut row_idx = None;
+            for idx in 0..n {
+                if selected[idx] {
+                    continue;
+                }
+                threshold -= min_distances[idx] * weights[idx];
+                if threshold <= 0.0 {
+                    row_idx = Some(idx);
+                    break;
+                }
+            }
+            row_idx
+        } else {
+            None
+        }
+        .or_else(|| (0..n).find(|idx| !selected[*idx]));
+
+        let Some(next) = next else {
+            break;
+        };
+        selected[next] = true;
+        centroids.extend_from_slice(&data_values[next * dimension..(next + 1) * dimension]);
+    }
+
+    while centroids.len() / dimension < k {
+        let row_idx = (centroids.len() / dimension) * n / k;
+        centroids.extend_from_slice(&data_values[row_idx * dimension..(row_idx + 1) * dimension]);
+    }
+    centroids
+}
+
+#[cfg(feature = "write")]
+fn assign_weighted_points<T: StreamingKMeansArrowType>(
+    data: &FixedSizeListArray,
+    weights: &[f64],
+    base_losses: &[f64],
+    centroid_values: &[T::Native],
+    metric_policy: &dyn StreamingFloatKMeansMetricPolicy<T>,
+) -> Result<WeightedKMeansResult<T>> {
+    let dimension = data.value_length() as usize;
+    let k = centroid_values.len() / dimension;
+    let centroids = Arc::new(T::from_values(centroid_values.to_vec())) as ArrayRef;
+    let kmeans =
+        KMeans::with_centroids(centroids, dimension, metric_policy.metric_type(), f64::MAX);
+    let (membership, distances) = kmeans.compute_membership_and_distances(data)?;
+    let data_values = streaming_kmeans_values::<T>(data)?;
+    let mut centroid_sums = vec![T::Native::default(); k * dimension];
+    let mut cluster_weights = vec![0.0; k];
+    let mut cluster_losses = vec![0.0; k];
+
+    for row_idx in 0..data.len() {
+        let Some(cluster_id) = membership[row_idx] else {
+            continue;
+        };
+        let Some(distance) = distances[row_idx] else {
+            continue;
+        };
+        validate_finite_kmeans_distance(
+            distance,
+            row_idx,
+            metric_policy.metric_type(),
+            "weighted kmeans",
+        )?;
+        let cluster_id = cluster_id as usize;
+        let weight = weights[row_idx];
+        cluster_weights[cluster_id] += weight;
+        cluster_losses[cluster_id] += base_losses[row_idx] + weight * distance as f64;
+        let vector = &data_values[row_idx * dimension..(row_idx + 1) * dimension];
+        let centroid_sum = &mut centroid_sums[cluster_id * dimension..(cluster_id + 1) * dimension];
+        let weight = cast_weight::<T>(weight, format_args!("weighted row {row_idx}"))?;
+        for (sum, value) in centroid_sum.iter_mut().zip(vector) {
+            *sum += *value * weight;
+        }
+    }
+
+    let mut next_centroids = vec![T::Native::default(); k * dimension];
+    for cluster_id in 0..k {
+        let next_centroid =
+            &mut next_centroids[cluster_id * dimension..(cluster_id + 1) * dimension];
+        let weight = cluster_weights[cluster_id];
+        if weight > 0.0 {
+            let centroid_sum = &centroid_sums[cluster_id * dimension..(cluster_id + 1) * dimension];
+            let weight = cast_weight::<T>(weight, format_args!("weighted cluster {cluster_id}"))?;
+            for (value, sum) in next_centroid.iter_mut().zip(centroid_sum) {
+                *value = *sum / weight;
+            }
+        } else {
+            next_centroid.copy_from_slice(
+                &centroid_values[cluster_id * dimension..(cluster_id + 1) * dimension],
+            );
+        }
+    }
+    if next_centroids.iter().any(|value| !value.is_finite()) {
+        return Err(Error::invalid_input(format!(
+            "weighted kmeans produced nonfinite centroid for metric {}",
+            metric_policy.metric_type()
+        )));
+    }
+
+    let loss = cluster_losses.iter().sum();
+    Ok(WeightedKMeansResult {
+        centroids: next_centroids,
+        membership,
+        cluster_weights,
+        cluster_losses,
+        loss,
+    })
+}
+
+#[cfg(feature = "write")]
+fn train_weighted_kmeans<T: StreamingKMeansArrowType>(
+    data: &FixedSizeListArray,
+    weights: &[f64],
+    base_losses: &[f64],
+    k: usize,
+    metric_policy: &dyn StreamingFloatKMeansMetricPolicy<T>,
+    max_iters: usize,
+    on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+) -> Result<WeightedKMeansResult<T>> {
+    if data.len() < k {
+        return Err(Error::invalid_input(format!(
+            "weighted kmeans requires at least {k} coreset rows, got {}",
+            data.len()
+        )));
+    }
+    if weights.len() != data.len() || base_losses.len() != data.len() {
+        return Err(Error::invalid_input(format!(
+            "weighted kmeans input lengths do not match: data={}, weights={}, losses={}",
+            data.len(),
+            weights.len(),
+            base_losses.len()
+        )));
+    }
+
+    let dimension = data.value_length() as usize;
+    let data_values = streaming_kmeans_values::<T>(data)?;
+    let mut centroids =
+        metric_policy.initialize_centroids(data_values, dimension, k, data.len(), weights);
+    let mut previous_loss = f64::MAX;
+    let max_iters = max_iters.max(1);
+    for iter in 1..=max_iters {
+        on_progress(iter as u32, max_iters as u32);
+        let mut result =
+            assign_weighted_points::<T>(data, weights, base_losses, &centroids, metric_policy)?;
+        let converged = metric_policy.has_converged(previous_loss, result.loss);
+        previous_loss = result.loss;
+        if converged || iter == max_iters {
+            return Ok(result);
+        }
+        centroids = std::mem::take(&mut result.centroids);
+    }
+    unreachable!("weighted kmeans runs at least one iteration")
+}
+
+#[cfg(feature = "write")]
+fn refine_weighted_kmeans<T: StreamingKMeansArrowType>(
+    data: &FixedSizeListArray,
+    weights: &[f64],
+    base_losses: &[f64],
+    initial_centroids: &FixedSizeListArray,
+    metric_policy: &dyn StreamingFloatKMeansMetricPolicy<T>,
+    max_iters: usize,
+    on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+) -> Result<WeightedKMeansResult<T>> {
+    let mut centroids = streaming_kmeans_values::<T>(initial_centroids)?.to_vec();
+    let mut previous_loss = f64::MAX;
+    let max_iters = max_iters.max(1);
+    for iter in 1..=max_iters {
+        on_progress(iter as u32, max_iters as u32);
+        let mut result =
+            assign_weighted_points::<T>(data, weights, base_losses, &centroids, metric_policy)?;
+        let converged = metric_policy.has_converged(previous_loss, result.loss);
+        previous_loss = result.loss;
+        if converged || iter == max_iters {
+            return Ok(result);
+        }
+        centroids = std::mem::take(&mut result.centroids);
+    }
+    unreachable!("weighted kmeans refinement runs at least one iteration")
+}
+
+#[cfg(feature = "write")]
+fn append_local_coreset<T: StreamingKMeansArrowType>(
+    coreset: &mut WeightedCoreset<T>,
+    data: &FixedSizeListArray,
+    metric_policy: &dyn StreamingFloatKMeansMetricPolicy<T>,
+    local_k: usize,
+    max_iters: usize,
+    on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+) -> Result<()> {
+    let dimension = data.value_length() as usize;
+    // Dot keeps local k below the row count, which leaves a single row with zero
+    let local_k = local_k.max(1);
+    // Rows that fit the local budget are their own summaries: k-means cannot do
+    // better, and its hierarchical form fails on a repeated row when asked for
+    // one cluster per row.
+    if data.len() <= local_k {
+        for row in streaming_kmeans_values::<T>(data)?.chunks_exact(dimension) {
+            coreset.push(row, 1.0, 0.0);
+        }
+        return Ok(());
+    }
+    let sample_rate = data.len().div_ceil(local_k).max(1);
+    let kmeans = train_ivf_kmeans_step_arrow_array_no_loss(
+        None,
+        data,
+        KMeansStepOptions {
+            dimension,
+            metric_type: metric_policy.metric_type(),
+            num_partitions: local_k,
+            sample_rate,
+            max_iters,
+            disable_hierarchical: metric_policy.disable_local_hierarchical(),
+            on_progress,
+        },
+    )?;
+    let centroids = FixedSizeListArray::try_new_from_values(kmeans.centroids, dimension as i32)?;
+    if streaming_kmeans_values::<T>(&centroids)?
+        .iter()
+        .any(|value| !value.is_finite())
+    {
+        return Err(Error::invalid_input(format!(
+            "local streaming kmeans produced nonfinite centroid for metric {}",
+            metric_policy.metric_type()
+        )));
+    }
+    let kmeans = KMeans::with_centroids(
+        centroids.values().clone(),
+        dimension,
+        metric_policy.metric_type(),
+        f64::MAX,
+    );
+    let (membership, distances) = kmeans.compute_membership_and_distances(data)?;
+    let mut weights = vec![0.0; centroids.len()];
+    let mut losses = vec![0.0; centroids.len()];
+    for (row_idx, (member, distance)) in membership.into_iter().zip(distances).enumerate() {
+        let (Some(member), Some(distance)) = (member, distance) else {
+            continue;
+        };
+        validate_finite_kmeans_distance(
+            distance,
+            row_idx,
+            metric_policy.metric_type(),
+            "local streaming kmeans",
+        )?;
+        weights[member as usize] += 1.0;
+        losses[member as usize] += metric_policy.local_summary_loss(distance);
+    }
+
+    let centroid_values = streaming_kmeans_values::<T>(&centroids)?;
+    for centroid_idx in 0..centroids.len() {
+        coreset.push(
+            &centroid_values[centroid_idx * dimension..(centroid_idx + 1) * dimension],
+            weights[centroid_idx],
+            losses[centroid_idx],
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+struct WeightedCluster<T: StreamingKMeansArrowType> {
+    id: usize,
+    indices: Vec<usize>,
+    centroid: Vec<T::Native>,
+    weight: f64,
+    split_priority: f64,
+    finalized: bool,
+}
+
+#[cfg(feature = "write")]
+impl<T: StreamingKMeansArrowType> Clone for WeightedCluster<T> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            indices: self.indices.clone(),
+            centroid: self.centroid.clone(),
+            weight: self.weight,
+            split_priority: self.split_priority,
+            finalized: self.finalized,
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+impl<T: StreamingKMeansArrowType> Eq for WeightedCluster<T> {}
+
+#[cfg(feature = "write")]
+impl<T: StreamingKMeansArrowType> PartialEq for WeightedCluster<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.finalized == other.finalized
+            && self.split_priority == other.split_priority
+            && self.weight == other.weight
+    }
+}
+
+#[cfg(feature = "write")]
+impl<T: StreamingKMeansArrowType> Ord for WeightedCluster<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self.finalized, other.finalized) {
+            (false, true) => std::cmp::Ordering::Greater,
+            (true, false) => std::cmp::Ordering::Less,
+            _ => self
+                .split_priority
+                .partial_cmp(&other.split_priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    self.weight
+                        .partial_cmp(&other.weight)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }),
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+impl<T: StreamingKMeansArrowType> PartialOrd for WeightedCluster<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[cfg(feature = "write")]
+struct WeightedHierarchicalKMeansParams<'a, T: StreamingKMeansArrowType> {
+    dimension: usize,
+    target_k: usize,
+    metric_policy: &'a dyn StreamingFloatKMeansMetricPolicy<T>,
+    max_iters: usize,
+    on_progress: Arc<dyn Fn(u32, u32) + Send + Sync>,
+}
+
+#[cfg(feature = "write")]
+fn weighted_subset<T: StreamingKMeansArrowType>(
+    data_values: &[T::Native],
+    weights: &[f64],
+    losses: &[f64],
+    indices: &[usize],
+    dimension: usize,
+) -> Result<(FixedSizeListArray, Vec<f64>, Vec<f64>)> {
+    let mut values = Vec::with_capacity(indices.len() * dimension);
+    let mut subset_weights = Vec::with_capacity(indices.len());
+    let mut subset_losses = Vec::with_capacity(indices.len());
+    for &idx in indices {
+        values.extend_from_slice(&data_values[idx * dimension..(idx + 1) * dimension]);
+        subset_weights.push(weights[idx]);
+        subset_losses.push(losses[idx]);
+    }
+    Ok((
+        streaming_kmeans_fsl_from_values::<T>(values, dimension)?,
+        subset_weights,
+        subset_losses,
+    ))
+}
+
+#[cfg(feature = "write")]
+/// Splits `cluster` in two by L2 around the row farthest from its centroid and
+/// the row farthest from that one, or returns `None` when all its rows are
+/// identical. Each seed row is nearest to itself, so both halves are non-empty
+/// whenever the rows differ.
+fn bisect_weighted_cluster<T: StreamingKMeansArrowType>(
+    cluster: &WeightedCluster<T>,
+    data_values: &[T::Native],
+    weights: &[f64],
+    losses: &[f64],
+    dimension: usize,
+    metric_policy: &dyn StreamingFloatKMeansMetricPolicy<T>,
+    next_cluster_id: &mut usize,
+) -> Result<Option<[WeightedCluster<T>; 2]>> {
+    let row = |idx: usize| &data_values[idx * dimension..(idx + 1) * dimension];
+    let farthest_from = |anchor: &[T::Native]| {
+        cluster
+            .indices
+            .iter()
+            .copied()
+            .max_by(|&a, &b| squared_l2(row(a), anchor).total_cmp(&squared_l2(row(b), anchor)))
+    };
+    let Some(first) = farthest_from(&cluster.centroid) else {
+        return Ok(None);
+    };
+    let Some(second) = farthest_from(row(first)) else {
+        return Ok(None);
+    };
+    if squared_l2(row(first), row(second)) == 0.0 {
+        return Ok(None);
+    }
+    let (near_first, near_second): (Vec<usize>, Vec<usize>) = cluster
+        .indices
+        .iter()
+        .partition(|&&idx| squared_l2(row(idx), row(first)) <= squared_l2(row(idx), row(second)));
+    let mut make_half = |indices: Vec<usize>| -> Result<WeightedCluster<T>> {
+        let weight = indices.iter().map(|&idx| weights[idx]).sum::<f64>();
+        let mut centroid = vec![T::Native::default(); dimension];
+        for &idx in &indices {
+            let row_weight = cast_weight::<T>(weights[idx], format_args!("bisected row {idx}"))?;
+            for (sum, value) in centroid.iter_mut().zip(row(idx)) {
+                *sum += *value * row_weight;
+            }
+        }
+        if weight > 0.0 {
+            let weight = cast_weight::<T>(weight, "bisected cluster")?;
+            centroid
+                .iter_mut()
+                .for_each(|value| *value = *value / weight);
+        } else {
+            centroid.copy_from_slice(row(indices[0]));
+        }
+        let loss = indices
+            .iter()
+            .map(|&idx| losses[idx] + weights[idx] * squared_l2(row(idx), &centroid))
+            .sum();
+        let split_priority = metric_policy.split_priority(
+            data_values,
+            weights,
+            &indices,
+            &centroid,
+            dimension,
+            loss,
+        );
+        let id = *next_cluster_id;
+        *next_cluster_id += 1;
+        Ok(WeightedCluster {
+            id,
+            indices,
+            centroid,
+            weight,
+            split_priority,
+            finalized: true,
+        })
+    };
+    let first = make_half(near_first)?;
+    let second = make_half(near_second)?;
+    Ok(Some([first, second]))
+}
+
+#[cfg(feature = "write")]
+fn train_weighted_hierarchical_kmeans<T: StreamingKMeansArrowType>(
+    data: &FixedSizeListArray,
+    weights: &[f64],
+    losses: &[f64],
+    params: &WeightedHierarchicalKMeansParams<'_, T>,
+) -> Result<FixedSizeListArray> {
+    if data.len() == 0 {
+        return Err(Error::index("empty weighted coreset"));
+    }
+    if weights.len() != data.len() || losses.len() != data.len() {
+        return Err(Error::invalid_input(format!(
+            "weighted hierarchical kmeans input lengths do not match: data={}, weights={}, losses={}",
+            data.len(),
+            weights.len(),
+            losses.len()
+        )));
+    }
+
+    let dimension = params.dimension;
+    let target_k = params.target_k;
+    let metric_policy = params.metric_policy;
+    let max_iters = params.max_iters;
+    let initial_k = 16_usize.min(target_k).min(data.len()).max(1);
+    let initial = train_weighted_kmeans::<T>(
+        data,
+        weights,
+        losses,
+        initial_k,
+        metric_policy,
+        max_iters,
+        params.on_progress.clone(),
+    )?;
+
+    let centroids = initial.centroids;
+    let data_values = streaming_kmeans_values::<T>(data)?;
+    let mut heap = std::collections::BinaryHeap::<WeightedCluster<T>>::new();
+    let mut next_cluster_id = 0;
+    for cluster_id in 0..initial_k {
+        let mut indices = Vec::new();
+        for (row_idx, member) in initial.membership.iter().enumerate() {
+            if member.is_some_and(|member| member as usize == cluster_id) {
+                indices.push(row_idx);
+            }
+        }
+        if !indices.is_empty() {
+            let centroid = centroids[cluster_id * dimension..(cluster_id + 1) * dimension].to_vec();
+            let split_priority = metric_policy.split_priority(
+                data_values,
+                weights,
+                &indices,
+                &centroid,
+                dimension,
+                initial.cluster_losses[cluster_id],
+            );
+            heap.push(WeightedCluster {
+                id: next_cluster_id,
+                indices,
+                centroid,
+                weight: initial.cluster_weights[cluster_id],
+                split_priority,
+                finalized: false,
+            });
+            next_cluster_id += 1;
+        }
+    }
+
+    while heap.len() < target_k {
+        let mut cluster = heap
+            .pop()
+            .ok_or_else(|| Error::index("No weighted cluster can be further split"))?;
+        if cluster.finalized {
+            heap.push(cluster);
+            break;
+        }
+        if cluster.indices.len() <= 1 {
+            // A singleton can retain a large coreset loss while other clusters
+            // still have multiple summaries to split.
+            cluster.finalized = true;
+            heap.push(cluster);
+            continue;
+        }
+
+        let remaining_k = target_k - heap.len();
+        let cluster_k = if cluster.indices.len() <= 16 {
+            2.min(remaining_k).min(cluster.indices.len())
+        } else {
+            (cluster.indices.len() / 16).min(remaining_k).clamp(2, 16)
+        };
+        let (sub_data, sub_weights, sub_losses) =
+            weighted_subset::<T>(data_values, weights, losses, &cluster.indices, dimension)?;
+        let split = train_weighted_kmeans::<T>(
+            &sub_data,
+            &sub_weights,
+            &sub_losses,
+            cluster_k,
+            metric_policy,
+            max_iters.min(20),
+            params.on_progress.clone(),
+        )?;
+
+        let mut assignments = vec![Vec::new(); cluster_k];
+        let mut first_member = None;
+        let mut all_same = true;
+        for (local_idx, member) in split.membership.iter().enumerate() {
+            let Some(member) = member else {
+                continue;
+            };
+            if first_member.is_some_and(|first| first != *member) {
+                all_same = false;
+            } else if first_member.is_none() {
+                first_member = Some(*member);
+            }
+            assignments[*member as usize].push(cluster.indices[local_idx]);
+        }
+        if all_same {
+            cluster.finalized = true;
+            heap.push(cluster);
+            continue;
+        }
+
+        for (child_id, child_indices) in assignments.into_iter().enumerate() {
+            if child_indices.is_empty() {
+                continue;
+            }
+            let centroid =
+                split.centroids[child_id * dimension..(child_id + 1) * dimension].to_vec();
+            let split_priority = metric_policy.split_priority(
+                data_values,
+                weights,
+                &child_indices,
+                &centroid,
+                dimension,
+                split.cluster_losses[child_id],
+            );
+            heap.push(WeightedCluster {
+                id: next_cluster_id,
+                indices: child_indices,
+                centroid,
+                weight: split.cluster_weights[child_id],
+                split_priority,
+                finalized: false,
+            });
+            next_cluster_id += 1;
+        }
+    }
+
+    // The split loop can stop with multi-row clusters left: a k-means split can
+    // leave every row on one side even when the rows differ, which happens
+    // under Dot, and a singleton at the top of the heap ends the loop. Bisect
+    // the remaining multi-row clusters by L2 until `target_k` is reached, so
+    // the count falls short only when the coreset holds fewer distinct rows.
+    let mut clusters = heap.into_vec();
+    let mut unsplittable = Vec::new();
+    while clusters.len() + unsplittable.len() < target_k {
+        let Some(position) = (0..clusters.len())
+            .filter(|&position| clusters[position].indices.len() > 1)
+            .max_by(|&a, &b| clusters[a].cmp(&clusters[b]))
+        else {
+            break;
+        };
+        let cluster = clusters.swap_remove(position);
+        match bisect_weighted_cluster(
+            &cluster,
+            data_values,
+            weights,
+            losses,
+            dimension,
+            metric_policy,
+            &mut next_cluster_id,
+        )? {
+            Some(halves) => clusters.extend(halves),
+            None => unsplittable.push(cluster),
+        }
+    }
+    clusters.append(&mut unsplittable);
+    clusters.sort_by_key(|cluster| cluster.id);
+    if clusters.len() < target_k {
+        // Padding the count with clones of the heaviest cluster left partitions
+        // whose centroid ties exactly with the original, which assignment keeps,
+        // so they started empty. Reject instead, like the flat hierarchical
+        // trainer: after the bisection above, the coreset has fewer distinct
+        // rows than `target_k`.
+        if data.len() < target_k {
+            // Not the data's fault: the coreset summarizing the training sample
+            // is smaller than the partition count, as Dot's can be when its only
+            // chunk samples exactly `num_partitions` rows.
+            return Err(Error::invalid_input(format!(
+                "Cannot create {target_k} IVF partitions from {} weighted coreset rows: the \
+                 coreset summarizing the training sample is smaller than the partition \
+                 count. Increase sample_rate or reduce num_partitions.",
+                data.len()
+            )));
+        }
+        return Err(Error::invalid_input(format!(
+            "Cannot create {target_k} IVF partitions: weighted k-means could only form {} \
+             non-empty clusters from {} weighted coreset rows, and the rest could not be \
+             split further. Reduce num_partitions to <= {} or provide more diverse data.",
+            clusters.len(),
+            data.len(),
+            clusters.len()
+        )));
+    }
+    // The split loop stops at `target_k`, and every `cluster_k` it takes is
+    // bounded by what is left, so the count lands exactly on `target_k`.
+    debug_assert_eq!(
+        clusters.len(),
+        target_k,
+        "weighted kmeans formed {} clusters for target_k {target_k}",
+        clusters.len()
+    );
+
+    let mut values = Vec::with_capacity(target_k * dimension);
+    for cluster in clusters {
+        values.extend_from_slice(&cluster.centroid);
+    }
+    streaming_kmeans_fsl_from_values::<T>(values, dimension)
+}
+
+#[cfg(feature = "write")]
+async fn finish_streaming_ivf_training<T>(
+    training_result: Result<T>,
+    progress_tx: mpsc::UnboundedSender<u64>,
+    on_progress: KMeansProgressCallback,
+    progress_worker: lance_core::utils::tokio::JoinHandle<Result<()>>,
+    trainer_name: &str,
+) -> Result<T> {
+    drop(progress_tx);
+    drop(on_progress);
+    let progress_result = match progress_worker.await {
+        Ok(result) => result,
+        Err(err) => Err(err.into()),
+    };
+
+    match training_result {
+        Ok(value) => {
+            progress_result?;
+            Ok(value)
+        }
+        Err(training_error) => {
+            if let Err(progress_error) = progress_result {
+                warn!(
+                    "{trainer_name} failed while its progress worker also failed: {progress_error}"
+                );
+            }
+            Err(training_error)
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+async fn train_streaming_coreset_ivf_model(
+    dataset: &Dataset,
+    column: &str,
+    dimension: usize,
+    metric_type: MetricType,
+    params: &IvfBuildParams,
+    fragment_ids: Option<&[u32]>,
+    progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<IvfModel> {
+    streaming_kmeans_metric_policy(metric_type)?
+        .train_coreset_ivf_model(StreamingCoresetTrainingRequest {
+            dataset,
+            column,
+            dimension,
+            metric_type,
+            params,
+            fragment_ids,
+            progress,
+        })
+        .await
+}
+
+#[cfg(feature = "write")]
+async fn train_streaming_float_coreset_ivf_model<P>(
+    request: StreamingCoresetTrainingRequest<'_>,
+    metric_policy: &P,
+) -> Result<IvfModel>
+where
+    P: StreamingFloatKMeansMetricPolicy<Float32Type>
+        + StreamingFloatKMeansMetricPolicy<Float64Type>,
+{
+    let (_, element_type) = get_vector_type(request.dataset.schema(), request.column)?;
+    match element_type {
+        DataType::Float64 => {
+            train_streaming_coreset_ivf_model_with_algorithm(
+                request,
+                &FloatCoresetAlgorithm::<Float64Type>::new(metric_policy),
+            )
+            .await
+        }
+        DataType::Float16 | DataType::Float32 | DataType::Int8 => {
+            train_streaming_coreset_ivf_model_with_algorithm(
+                request,
+                &FloatCoresetAlgorithm::<Float32Type>::new(metric_policy),
+            )
+            .await
+        }
+        _ => Err(Error::invalid_input(format!(
+            "streaming coreset IVF does not support {} vector values with metric {}",
+            element_type, request.metric_type
+        ))),
+    }
+}
+
+#[cfg(feature = "write")]
+async fn train_streaming_coreset_ivf_model_with_algorithm<A: StreamingCoresetAlgorithm>(
+    request: StreamingCoresetTrainingRequest<'_>,
+    algorithm: &A,
+) -> Result<IvfModel> {
+    let StreamingCoresetTrainingRequest {
+        dataset,
+        column,
+        dimension,
+        metric_type,
+        params,
+        fragment_ids,
+        progress,
+    } = request;
+    let metric_policy = algorithm.metric_policy();
+    let num_partitions = params.num_partitions.unwrap_or(32);
+    let streaming_sample_rate = params.streaming_sample_rate.unwrap();
+    let total_sample_rate = params.sample_rate;
+    let mut remaining_sample_rate = total_sample_rate;
+    let mut max_training_vectors = 0;
+    let mut total_training_vectors = 0;
+    let fixed_sampler = if fragment_ids.is_none() {
+        FixedIvfTrainingSampler::try_new(dataset, column)?
+    } else {
+        None
+    };
+    let selection_rows = match fragment_ids {
+        Some(fragment_ids) => dataset.count_rows_in_fragments(fragment_ids).await?,
+        None => dataset.count_rows(None).await?,
+    };
+    let requested_rows = num_partitions * total_sample_rate;
+    let fixed_sample_ranges = fixed_sampler.as_ref().map(|sampler| {
+        generate_fixed_training_ranges(
+            selection_rows,
+            selection_rows.min(requested_rows),
+            dataset.table_state.object_store.as_ref().block_size(),
+            sampler.byte_width,
+        )
+    });
+    // A row sampled by two steps can end up as two identical summaries, which
+    // the final k-means cannot split, so resampled steps skip drawn rows.
+    // Multivector columns, whose rows hold many vectors, keep independent draws.
+    let drawn_offsets = (fixed_sampler.is_none()
+        && matches!(
+            get_vector_type(dataset.schema(), column)?.0,
+            DataType::FixedSizeList(_, _)
+        ))
+    .then(|| Arc::new(Mutex::new(RoaringTreemap::new())));
+    let independent_steps = fixed_sampler.is_none() && drawn_offsets.is_none();
+    let mut sample_offset = 0;
+    let mut requested_read = 0;
+
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<u64>();
+    let progress_worker = {
+        let progress = progress.clone();
+        lance_core::utils::tokio::spawn(async move {
+            while let Some(iter) = progress_rx.recv().await {
+                progress.stage_progress("train_ivf", iter).await?;
+            }
+            Result::Ok(())
+        })
+    };
+
+    let on_progress: Arc<dyn Fn(u32, u32) + Send + Sync> = {
+        let progress_tx = progress_tx.clone();
+        let cumulative_iters = std::sync::atomic::AtomicU64::new(0);
+        let progress_interval = streaming_ivf_progress_interval();
+        Arc::new(move |_iter: u32, _max_iters: u32| {
+            let total = cumulative_iters.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if should_report_streaming_ivf_progress(total, progress_interval) {
+                let _ = progress_tx.send(total);
+            }
+        })
+    };
+
+    let training_result = async {
+        let coreset_rate = streaming_coreset_rate(
+            total_sample_rate,
+            streaming_sample_rate,
+            params.streaming_coreset_rate,
+        );
+        let coreset_budget = num_partitions
+            .saturating_mul(coreset_rate)
+            .max(num_partitions);
+        let total_steps = total_sample_rate.div_ceil(streaming_sample_rate);
+        let has_decoupled_budget = params.streaming_coreset_rate.is_some();
+        let initial_capacity = coreset_budget.min(num_partitions.saturating_mul(16));
+        let mut coreset = algorithm.new_coreset(dimension, initial_capacity);
+        let not_enough_vectors = |sampled: usize| {
+            Error::index(format!(
+                "Not enough training vectors for streaming coreset IVF with metric {}. Requires at least {} rows but sampled {} rows",
+                metric_type, num_partitions, sampled
+            ))
+        };
+        let mut step = 0;
+        while remaining_sample_rate > 0 {
+            let step_sample_rate = remaining_sample_rate.min(streaming_sample_rate);
+            remaining_sample_rate -= step_sample_rate;
+            let step_sample_size = num_partitions * step_sample_rate;
+            requested_read += step_sample_size;
+            step += 1;
+            info!(
+                "Streaming coreset IVF training for metric {}: step {}, sample_rate={}, sample_size={}",
+                metric_type, step, step_sample_rate, step_sample_size
+            );
+
+            let (training_data, sampled_metric) = if let (Some(sample_ranges), Some(sampler)) =
+                (&fixed_sample_ranges, &fixed_sampler)
+            {
+                // Each step reads its share of the planned rows, so a selection
+                // smaller than the requested sample still reaches every step.
+                let chunk_end = (requested_read as u128 * sample_ranges.num_rows() as u128
+                    / requested_rows as u128) as usize;
+                let ranges = sample_ranges.chunk(sample_offset, chunk_end - sample_offset);
+                sample_offset += ranges.iter().map(range_len).sum::<usize>();
+                sampler.sample_ranges(&ranges, metric_type).await?
+            } else {
+                // Each step draws at most its share of the selection, nulls
+                // included, so nulls cannot leave the later steps short of rows.
+                let max_drawn = (requested_read as u128 * selection_rows as u128
+                    / requested_rows as u128) as usize;
+                sample_ivf_training_chunk(
+                    dataset,
+                    column,
+                    step_sample_size,
+                    metric_type,
+                    fragment_ids,
+                    drawn_offsets
+                        .as_ref()
+                        .map(|drawn_offsets| (drawn_offsets, max_drawn)),
+                )
+                .await?
+            };
+            let training_data = algorithm.prepare_sample(training_data, sampled_metric)?;
+            // Independent draws can repeat rows, so each must cover the partitions
+            if independent_steps && training_data.len() < num_partitions {
+                return Err(not_enough_vectors(training_data.len()));
+            }
+
+            max_training_vectors = max_training_vectors.max(training_data.len());
+            total_training_vectors += training_data.len();
+            let local_k = metric_policy.local_coreset_k(
+                num_partitions,
+                training_data.len(),
+                coreset_rate,
+                total_steps,
+                has_decoupled_budget,
+            );
+            // Per-step null density is not known in advance. Retain enough summaries
+            // to reach the partition target before returning to the normal local budget.
+            let partition_floor =
+                num_partitions.saturating_sub(algorithm.coreset_len(&coreset));
+            let local_k = local_k.max(partition_floor).min(training_data.len());
+            let mut chunk_coreset = algorithm.new_coreset(dimension, local_k);
+            algorithm.append_local_coreset(
+                &mut chunk_coreset,
+                &training_data,
+                local_k,
+                params.max_iters,
+                on_progress.clone(),
+            )?;
+            algorithm.append_coreset(&mut coreset, chunk_coreset)?;
+            algorithm.reduce_coreset(&mut coreset, dimension, coreset_budget)?;
+            info!(
+                "Streaming coreset IVF step {} compressed {} vectors into {} summaries for metric {}",
+                step,
+                total_training_vectors,
+                algorithm.coreset_len(&coreset),
+                metric_type
+            );
+        }
+        // A short selection or dense nulls can leave a step fewer rows than
+        // partitions, or none, so only the sample as a whole must cover them.
+        if total_training_vectors < num_partitions {
+            return Err(not_enough_vectors(total_training_vectors));
+        }
+
+        let coreset_len = algorithm.coreset_len(&coreset);
+        let mut centroids = algorithm.train_centroids(
+            coreset,
+            dimension,
+            num_partitions,
+            params.max_iters,
+            on_progress.clone(),
+        )?;
+        if params.streaming_refine_passes > 0 {
+            info!(
+                "Running {} streaming raw-vector refinement pass(es) for metric {}",
+                params.streaming_refine_passes, metric_type
+            );
+            centroids =
+                if let (Some(sample_ranges), Some(sampler)) = (&fixed_sample_ranges, &fixed_sampler)
+                {
+                    algorithm
+                        .refine_with_sampler(
+                            sampler,
+                            num_partitions * streaming_sample_rate,
+                            sample_ranges,
+                            &centroids,
+                            params.streaming_refine_passes,
+                            on_progress.clone(),
+                        )
+                        .await?
+                } else {
+                    algorithm
+                        .refine_with_resampling(
+                            dataset,
+                            column,
+                            total_sample_rate,
+                            streaming_sample_rate,
+                            num_partitions,
+                            &centroids,
+                            fragment_ids,
+                            params.streaming_refine_passes,
+                            on_progress.clone(),
+                        )
+                        .await?
+                };
+        }
+
+        // Float16 samples are widened for coreset training, but residuals and
+        // query preprocessing require centroids in the vector column's type.
+        if get_vector_type(dataset.schema(), column)?.1 == DataType::Float16 {
+            let values = arrow::compute::cast(centroids.values(), &DataType::Float16)?;
+            centroids = FixedSizeListArray::try_new_from_values(values, dimension as i32)?;
+        }
+
+        Ok((IvfModel::new(centroids, None), coreset_len))
+    }
+    .await;
+
+    let (ivf_model, coreset_len) = finish_streaming_ivf_training(
+        training_result,
+        progress_tx,
+        on_progress,
+        progress_worker,
+        "Streaming coreset IVF training",
+    )
+    .await?;
+
+    info!(
+        "Streaming coreset IVF for metric {} sampled {} vectors total; max in-memory training vectors per step: {}; coreset summaries: {}",
+        metric_type, total_training_vectors, max_training_vectors, coreset_len
+    );
+
+    Ok(ivf_model)
+}
+
+#[cfg(feature = "write")]
+async fn train_streaming_ivf_model(
+    dataset: &Dataset,
+    column: &str,
+    dimension: usize,
+    metric_type: MetricType,
+    params: &IvfBuildParams,
+    fragment_ids: Option<&[u32]>,
+    progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+) -> Result<IvfModel> {
+    let num_partitions = params.num_partitions.unwrap_or(32);
+    if num_partitions > 256 {
+        return train_streaming_coreset_ivf_model(
+            dataset,
+            column,
+            dimension,
+            metric_type,
+            params,
+            fragment_ids,
+            progress,
+        )
+        .await;
+    }
+    let streaming_sample_rate = params.streaming_sample_rate.unwrap();
+    let total_sample_rate = params.sample_rate;
+    let mut remaining_sample_rate = total_sample_rate;
+    let mut centroids = params.centroids.clone();
+    let mut max_training_vectors = 0;
+    let mut total_training_vectors = 0;
+
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel::<u64>();
+    let progress_worker = {
+        let progress = progress.clone();
+        lance_core::utils::tokio::spawn(async move {
+            while let Some(iter) = progress_rx.recv().await {
+                progress.stage_progress("train_ivf", iter).await?;
+            }
+            Result::Ok(())
+        })
+    };
+
+    let on_progress: Arc<dyn Fn(u32, u32) + Send + Sync> = {
+        let progress_tx = progress_tx.clone();
+        let cumulative_iters = std::sync::atomic::AtomicU64::new(0);
+        Arc::new(move |_iter: u32, _max_iters: u32| {
+            let total = cumulative_iters.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let _ = progress_tx.send(total);
+        })
+    };
+
+    let training_result = async {
+        let mut step = 0;
+        while remaining_sample_rate > 0 {
+            let step_sample_rate = remaining_sample_rate.min(streaming_sample_rate);
+            let step_sample_size = num_partitions * step_sample_rate;
+            step += 1;
+            info!(
+                "Streaming IVF training: step {}, sample_rate={}, sample_size={}",
+                step, step_sample_rate, step_sample_size
+            );
+
+            let (training_data, mt) = sample_ivf_training_chunk(
+                dataset,
+                column,
+                step_sample_size,
+                metric_type,
+                fragment_ids,
+                None,
+            )
+            .await?;
+            if training_data.len() < num_partitions {
+                return Err(Error::index(format!(
+                    "Not enough training vectors for streaming IVF. Requires at least {} rows but sampled {} rows",
+                    num_partitions,
+                    training_data.len()
+                )));
+            }
+
+            max_training_vectors = max_training_vectors.max(training_data.len());
+            total_training_vectors += training_data.len();
+            if params.sample_rate >= 1024 && training_data.value_type() == DataType::Float16 {
+                warn!(
+                    "Large sample_rate ({} >= 1024) for float16 vectors is possible to result in all zeros cluster centroid",
+                    params.sample_rate
+                );
+            }
+
+            let kmeans = train_ivf_kmeans_step_arrow_array_no_loss(
+                centroids.clone(),
+                &training_data,
+                KMeansStepOptions {
+                    dimension: training_data.value_length() as usize,
+                    metric_type: mt,
+                num_partitions,
+                sample_rate: step_sample_rate,
+                max_iters: params.max_iters,
+                disable_hierarchical: false,
+                on_progress: on_progress.clone(),
+            },
+            )?;
+            let trained_centroids = Arc::new(FixedSizeListArray::try_new_from_values(
+                kmeans.centroids,
+                dimension as i32,
+            )?);
+            centroids = Some(trained_centroids);
+
+            remaining_sample_rate -= step_sample_rate;
+        }
+
+        let centroids = centroids.ok_or_else(|| Error::index("No IVF centroids trained"))?;
+        Ok(IvfModel::new((*centroids).clone(), None))
+    }
+    .await;
+
+    let ivf_model = finish_streaming_ivf_training(
+        training_result,
+        progress_tx,
+        on_progress,
+        progress_worker,
+        "Streaming IVF training",
+    )
+    .await?;
+
+    info!(
+        "Streaming IVF training sampled {} vectors total; max in-memory training vectors per step: {}",
+        total_training_vectors, max_training_vectors
+    );
+
+    Ok(ivf_model)
+}
+
+#[cfg(feature = "write")]
+/// Train IVF partitions using kmeans.
+async fn train_ivf_model(
+    centroids: Option<Arc<FixedSizeListArray>>,
+    data: &FixedSizeListArray,
+    distance_type: DistanceType,
+    params: &IvfBuildParams,
+    progress: std::sync::Arc<dyn lance_index::progress::IndexBuildProgress>,
+    sample_loss: SampleLoss,
+) -> Result<IvfModel> {
+    assert!(
+        distance_type != DistanceType::Cosine,
+        "Cosine metric should be done by normalized L2 distance",
+    );
+    let values = data.values();
+    let dim = data.value_length() as usize;
+    match (values.data_type(), distance_type) {
+        (DataType::Float16, _) => {
+            do_train_ivf_model::<Float16Type>(
+                centroids,
+                values.as_primitive::<Float16Type>(),
+                dim,
+                distance_type,
+                params,
+                progress.clone(),
+                sample_loss,
+            )
+            .await
+        }
+        (DataType::Float32, _) => {
+            do_train_ivf_model::<Float32Type>(
+                centroids,
+                values.as_primitive::<Float32Type>(),
+                dim,
+                distance_type,
+                params,
+                progress.clone(),
+                sample_loss,
+            )
+            .await
+        }
+        (DataType::Float64, _) => {
+            do_train_ivf_model::<Float64Type>(
+                centroids,
+                values.as_primitive::<Float64Type>(),
+                dim,
+                distance_type,
+                params,
+                progress.clone(),
+                sample_loss,
+            )
+            .await
+        }
+        (DataType::Int8, DistanceType::L2)
+        | (DataType::Int8, DistanceType::Dot)
+        | (DataType::Int8, DistanceType::Cosine) => {
+            do_train_ivf_model::<Float32Type>(
+                centroids,
+                data.convert_to_floating_point()?
+                    .values()
+                    .as_primitive::<Float32Type>(),
+                dim,
+                distance_type,
+                params,
+                progress.clone(),
+                sample_loss,
+            )
+            .await
+        }
+        (DataType::UInt8, DistanceType::Hamming) => {
+            do_train_ivf_model::<UInt8Type>(
+                centroids,
+                values.as_primitive::<UInt8Type>(),
+                dim,
+                distance_type,
+                params,
+                progress.clone(),
+                sample_loss,
+            )
+            .await
+        }
+        _ => Err(Error::index(format!(
+            "Unsupported data type {} with distance type {}",
+            values.data_type(),
+            distance_type
+        ))),
+    }
+}
+
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use lance_core::utils::row_addr_remap::RowAddrRemap;

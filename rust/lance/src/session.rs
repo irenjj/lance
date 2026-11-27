@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
+#[cfg(feature = "write")]
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion_session::Session as DataFusionSession;
 
+#[cfg(feature = "write")]
+use datafusion::execution::context::SessionContext;
 use lance_core::cache::{
     CacheBackend, CacheDiagnostics, CacheMetricsKind, CacheSnapshotMode, LanceCache,
     QuickCacheBackend, QuickCacheShardPolicy,
@@ -636,8 +640,7 @@ impl Default for Session {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use lance_core::cache::{CacheKey, UnsizedCacheKey};

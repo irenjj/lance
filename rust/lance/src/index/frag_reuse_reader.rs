@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 mod cache;
 pub(crate) use cache::CachedMapping;
+#[cfg(feature = "write")]
+pub(crate) use cache::open_mapping;
 
 #[cfg(test)]
 tokio::task_local! {
@@ -515,8 +517,7 @@ async fn load_ledger(dataset: &Dataset, index: &IndexMetadata) -> Result<FragReu
     .await
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 pub mod tests {
     use super::*;
     use crate::dataset::{InsertBuilder, WriteMode, WriteParams};
@@ -2169,8 +2170,6 @@ pub mod tests {
     }
 }
 
-
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 #[path = "frag_reuse_reader_tests.rs"]
 mod consumer_tests;

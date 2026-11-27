@@ -771,8 +771,7 @@ impl ExecutionPlan for MatchQueryExec {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use std::sync::Arc;

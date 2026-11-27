@@ -17,6 +17,10 @@ mod list_structure;
 mod minhash;
 mod plan;
 mod source;
+
+#[cfg(all(test, feature = "write"))]
+pub mod test_dataset;
+
 mod vector;
 
 pub use aggregate::{AggregateExpr, AggregateExprBuilder};
@@ -870,8 +874,7 @@ impl From<DatasetRecordBatchStream> for SendableRecordBatchStream {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

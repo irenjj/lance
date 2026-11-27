@@ -374,3 +374,6 @@ pub(super) fn filter_index_segments_by_ids(
 
     Ok(filtered)
 }
+
+#[cfg(all(test, feature = "write"))]
+mod tests;

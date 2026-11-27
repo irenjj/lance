@@ -21,6 +21,10 @@ use mock_instant::thread_local::{SystemTime, UNIX_EPOCH};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+#[cfg(feature = "write")]
+use lance_namespace::LanceNamespace;
+#[cfg(feature = "write")]
+use lance_namespace::models::DescribeTableRequest;
 use tokio::sync::RwLock;
 
 use crate::{Error, Result};
@@ -97,6 +101,76 @@ pub trait StorageOptionsProvider: Send + Sync + fmt::Debug {
     ///
     /// The ID should uniquely identify the provider's configuration.
     fn provider_id(&self) -> String;
+}
+
+#[cfg(feature = "write")]
+/// StorageOptionsProvider implementation that fetches options from a LanceNamespace
+pub struct LanceNamespaceStorageOptionsProvider {
+    namespace_client: Arc<dyn LanceNamespace>,
+    table_id: Vec<String>,
+}
+
+#[cfg(feature = "write")]
+impl fmt::Debug for LanceNamespaceStorageOptionsProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.provider_id())
+    }
+}
+
+#[cfg(feature = "write")]
+impl fmt::Display for LanceNamespaceStorageOptionsProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.provider_id())
+    }
+}
+
+#[cfg(feature = "write")]
+impl LanceNamespaceStorageOptionsProvider {
+    /// Create a new LanceNamespaceStorageOptionsProvider
+    ///
+    /// # Arguments
+    /// * `namespace_client` - The namespace implementation to fetch storage options from
+    /// * `table_id` - The table identifier
+    pub fn new(namespace_client: Arc<dyn LanceNamespace>, table_id: Vec<String>) -> Self {
+        Self {
+            namespace_client,
+            table_id,
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+#[async_trait]
+impl StorageOptionsProvider for LanceNamespaceStorageOptionsProvider {
+    async fn fetch_storage_options(&self) -> Result<Option<HashMap<String, String>>> {
+        let request = DescribeTableRequest {
+            id: Some(self.table_id.clone()),
+            // Some server implementations may not return credentials unless explicitly requested
+            vend_credentials: Some(true),
+            ..Default::default()
+        };
+
+        let response = self
+            .namespace_client
+            .describe_table(request)
+            .await
+            .map_err(|e| {
+                Error::io_source(Box::new(std::io::Error::other(format!(
+                    "Failed to fetch storage options: {}",
+                    e
+                ))))
+            })?;
+
+        Ok(response.storage_options)
+    }
+
+    fn provider_id(&self) -> String {
+        format!(
+            "LanceNamespaceStorageOptionsProvider {{ namespace_client: {}, table_id: {:?} }}",
+            self.namespace_client.namespace_id(),
+            self.table_id
+        )
+    }
 }
 
 /// Prefix marking a storage option as scoped to a single registered base path.

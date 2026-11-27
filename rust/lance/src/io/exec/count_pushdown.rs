@@ -472,8 +472,7 @@ fn is_count_star(af: &Arc<AggregateFunctionExpr>) -> bool {
     !lit.value().is_null()
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use std::sync::Arc;
 

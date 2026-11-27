@@ -3,27 +3,138 @@
 
 //! Wraps a Fragment of the dataset.
 
+#[cfg(feature = "write")]
+mod aligned_update;
+
 pub mod session;
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
+#[cfg(feature = "write")]
+use arrow_array::cast::as_primitive_array;
+#[cfg(feature = "write")]
+use arrow_array::{RecordBatchReader, UInt64Array};
+#[cfg(feature = "write")]
+use datafusion::logical_expr::Expr;
+#[cfg(feature = "write")]
+use datafusion::scalar::ScalarValue;
 use futures::future::try_join_all;
 use futures::{FutureExt, StreamExt};
+#[cfg(feature = "write")]
+use futures::{Stream, TryStreamExt};
 use lance_core::datatypes::Schema;
+#[cfg(feature = "write")]
+use lance_core::datatypes::{BlobHandling, SchemaCompareOptions};
 use lance_core::utils::deletion::DeletionVector;
 use lance_core::{Error, Result};
+#[cfg(feature = "write")]
+use lance_core::{ROW_ADDR, ROW_ID};
+#[cfg(feature = "write")]
+use lance_datafusion::utils::StreamingWriteSource;
+#[cfg(feature = "write")]
+use lance_encoding::decoder::DecoderPlugins;
 use lance_file::reader::{CachedFileMetadata, FileMetadataIndex};
+#[cfg(feature = "write")]
+use lance_file::version::ConcreteFileVersion;
+#[cfg(feature = "write")]
+use lance_file::writer::FileWriterOptions;
+#[cfg(feature = "write")]
+use lance_file::{determine_file_version, versions as file_versions};
+#[cfg(feature = "write")]
+use lance_io::scheduler::SchedulerConfig;
 use lance_io::scheduler::{FileScheduler, ScanScheduler};
 use lance_io::stream::RecordBatchStream;
+#[cfg(feature = "write")]
+use lance_io::utils::CachedFileSize;
 use lance_table::format::{DataFile, Fragment};
 use lance_table::utils::stream::ReadBatchFutStream;
 use lance_table_runtime::Table;
 
+#[cfg(feature = "write")]
+use self::write::FragmentCreateBuilder;
+#[cfg(feature = "write")]
+use super::hash_joiner::HashJoiner;
 use super::scanner::Scanner;
+#[cfg(feature = "write")]
+use super::updater::Updater;
+#[cfg(feature = "write")]
+use super::write::seeds::LanceWriteSeedHook;
+#[cfg(feature = "write")]
+use super::{NewColumnTransform, WriteParams, schema_evolution, versions};
+#[cfg(feature = "write")]
+use crate::blob::BlobWriteSources;
 use crate::dataset::Dataset;
+#[cfg(feature = "write")]
+use crate::dataset::UpdateJoinOptions;
 use crate::dataset::fragment::session::FragmentSession;
+#[cfg(feature = "write")]
+use crate::dataset::overlay::writer::{OverlayWriter, WriteOverlayError};
+#[cfg(feature = "write")]
+use roaring::RoaringBitmap;
+
+#[cfg(feature = "write")]
+pub mod write;
+
+#[cfg(feature = "write")]
+/// Result of a fragment column update: updated fragment metadata, modified field ids, and physical
+/// row offsets that matched the join (for stable row-id version metadata).
+#[derive(Debug, Clone)]
+pub struct FragmentUpdateColumnsResult {
+    pub fragment: Fragment,
+    pub fields_modified: Vec<u32>,
+    /// Physical row offsets (0-based within this fragment) whose columns were rewritten from the right-hand stream.
+    pub matched_offsets: RoaringBitmap,
+}
+
+#[cfg(feature = "write")]
+/// Cleanup ownership for files staged by [`FileFragment::add_columns_with_cleanup`].
+///
+/// Call [`Self::cleanup`] only after establishing that the outer commit did not
+/// land. Dropping this value does not remove any files because a failed commit
+/// response can have an ambiguous outcome.
+#[derive(Debug)]
+#[must_use = "retain this token until the outer fragment merge has committed"]
+pub struct FragmentAddColumnsCleanup {
+    original_fragment: FileFragment,
+    fragments_to_cleanup: Vec<Fragment>,
+}
+
+#[cfg(feature = "write")]
+impl FragmentAddColumnsCleanup {
+    /// Remove only the files created by the fragment-level add-columns operation.
+    ///
+    /// Pre-existing fragment files and files stored in an external base are
+    /// preserved. Cleanup is best effort; failures are logged for later dataset
+    /// garbage collection.
+    pub async fn cleanup(self) {
+        schema_evolution::cleanup_new_column_data_files(
+            std::slice::from_ref(&self.original_fragment),
+            &self.fragments_to_cleanup,
+        )
+        .await;
+    }
+}
+
+#[cfg(feature = "write")]
+/// A staged fragment-level add-columns result and its cleanup ownership.
+///
+/// The fragment and schema can be used to build an outer [`Operation::Merge`].
+/// Keep `cleanup` until that commit succeeds. If the commit definitively fails,
+/// invoking the token removes only files staged by this operation.
+///
+/// [`Operation::Merge`]: crate::dataset::transaction::Operation::Merge
+#[derive(Debug)]
+#[must_use = "the cleanup token must be retained until the outer merge commits"]
+pub struct FragmentAddColumnsResult {
+    /// Fragment metadata containing the staged columns.
+    pub fragment: Fragment,
+    /// Dataset schema containing the staged columns.
+    pub schema: Schema,
+    /// Ownership token for the files written by this operation.
+    pub cleanup: FragmentAddColumnsCleanup,
+}
 
 /// A Fragment of a Lance [`Dataset`].
 ///
@@ -38,6 +149,8 @@ pub(crate) use lance_table_runtime::fragment::V1FragmentReader;
 pub use lance_table_runtime::fragment::{
     BaseSchedulers, FragReadConfig, FragmentReader, GenericFileReader,
 };
+#[cfg(feature = "write")]
+pub(crate) use lance_table_runtime::fragment::{duplicate_field_path, relax_nullability};
 
 impl FileFragment {
     /// Creates a new FileFragment.
@@ -53,6 +166,140 @@ impl FileFragment {
 
     pub(super) fn as_runtime(&self) -> &lance_table_runtime::FileFragment {
         &self.core
+    }
+
+    #[cfg(feature = "write")]
+    /// Create a new [`FileFragment`] from a [`StreamingWriteSource`].
+    ///
+    /// This method can be used before a `Dataset` is created. For example,
+    /// Fragments can be created distributed first, before a central machine to
+    /// commit the dataset with these fragments.
+    ///
+    pub async fn create(
+        dataset_uri: &str,
+        id: usize,
+        source: impl StreamingWriteSource,
+        params: Option<WriteParams>,
+    ) -> Result<Fragment> {
+        let mut builder = FragmentCreateBuilder::new(dataset_uri);
+
+        if let Some(params) = params.as_ref() {
+            builder = builder.write_params(params);
+        }
+
+        builder.write(source, Some(id as u64)).await
+    }
+
+    #[cfg(feature = "write")]
+    /// Create a list of [`FileFragment`] from a [`StreamingWriteSource`].
+    pub async fn create_fragments(
+        dataset_uri: &str,
+        source: impl StreamingWriteSource,
+        params: Option<WriteParams>,
+    ) -> Result<Vec<Fragment>> {
+        let mut builder = FragmentCreateBuilder::new(dataset_uri);
+
+        if let Some(params) = params.as_ref() {
+            builder = builder.write_params(params);
+        }
+
+        builder.write_fragments(source).await
+    }
+
+    #[cfg(feature = "write")]
+    pub async fn create_from_file(
+        filename: &str,
+        dataset: &Dataset,
+        fragment_id: usize,
+        physical_rows: Option<usize>,
+    ) -> Result<Fragment> {
+        let filepath = dataset.data_dir().join(filename);
+        let file_version =
+            determine_file_version(dataset.table_state.object_store.as_ref(), &filepath, None)
+                .await?;
+
+        super::versions::create_fragment_from_file(
+            file_version,
+            dataset.manifest.data_storage_format.lance_file_format(),
+            filename,
+            dataset,
+            fragment_id,
+            physical_rows,
+        )
+        .await
+    }
+
+    #[cfg(feature = "write")]
+    pub(crate) async fn create_from_v1_file(
+        filename: &str,
+        dataset: &Dataset,
+        fragment_id: usize,
+        physical_rows: Option<usize>,
+    ) -> Result<Fragment> {
+        Ok(Fragment::with_file_legacy(
+            fragment_id as u64,
+            filename,
+            dataset.schema(),
+            physical_rows,
+        ))
+    }
+
+    #[cfg(feature = "write")]
+    pub(crate) async fn create_from_current_file(
+        filename: &str,
+        dataset: &Dataset,
+        fragment_id: usize,
+    ) -> Result<Fragment> {
+        let filepath = dataset.data_dir().join(filename);
+        // Load the file metadata, confirm the schema is compatible, and
+        // determine the column offsets
+        let mut frag = Fragment::new(fragment_id as u64);
+        let scheduler = ScanScheduler::new(
+            dataset.table_state.object_store.clone(),
+            SchedulerConfig::max_bandwidth(&dataset.table_state.object_store),
+        );
+        let file_scheduler = scheduler
+            .open_file(&filepath, &CachedFileSize::unknown())
+            .await?;
+        let reader = lance_file::reader::FileReader::try_open(
+            file_scheduler,
+            None,
+            Arc::<DecoderPlugins>::default(),
+            &dataset
+                .table_state
+                .metadata_cache
+                .file_metadata_cache(&filepath),
+            dataset
+                .table_state
+                .file_reader_options
+                .as_deref()
+                .cloned()
+                .unwrap_or_default(),
+        )
+        .await?;
+        // If the schemas are not compatible we can't calculate field id offsets
+        reader
+            .schema()
+            .check_compatible(dataset.schema(), &SchemaCompareOptions::default())?;
+        let projection = file_versions::reader_projection_from_whole_schema(
+            dataset.schema(),
+            reader.metadata().version(),
+        );
+        frag.physical_rows = Some(reader.metadata().num_rows as usize);
+
+        let column_indices = projection
+            .column_indices
+            .into_iter()
+            .map(|column| column as i32)
+            .collect();
+        frag.add_file(
+            filename,
+            dataset.schema().field_ids(),
+            column_indices,
+            reader.metadata().version(),
+            None,
+        );
+        Ok(frag)
     }
 
     /// Returns storage stats as `(field_id, bytes_on_disk)` pairs for this fragment.
@@ -98,6 +345,11 @@ impl FileFragment {
     /// Returns the fragment's metadata.
     pub fn metadata(&self) -> &Fragment {
         self.core.metadata()
+    }
+
+    #[cfg(feature = "write")]
+    pub(super) fn metadata_mut(&mut self) -> &mut Fragment {
+        self.core.metadata_mut()
     }
 
     /// The id of this [`FileFragment`].
@@ -397,11 +649,633 @@ impl FileFragment {
             .await
     }
 
+    #[cfg(feature = "write")]
+    pub(crate) async fn take_rows(
+        &self,
+        row_offsets: &[u32],
+        projection: &Schema,
+        read_config: FragReadConfig,
+    ) -> Result<RecordBatch> {
+        self.core
+            .take_rows(row_offsets, projection, read_config)
+            .await
+    }
+
     /// Scan this [`FileFragment`].
     ///
     /// See [`Dataset::scan`].
     pub fn scan(&self) -> Scanner {
         Scanner::from_fragment(self.dataset.clone(), self.metadata().clone())
+    }
+
+    #[cfg(feature = "write")]
+    /// Create an [`Updater`] to append new columns.
+    ///
+    /// The `columns` parameter is a list of existing columns to be read from
+    /// the fragment. They can be used to derive new columns. This is allowed to
+    /// be empty.
+    ///
+    /// The columns `_rowaddr` and `_rowid` can be used to load the row id or row address
+    ///
+    /// The `schemas` parameter is a tuple of the write schema (just the new fields)
+    /// and the full schema (the target schema after the update). If the write
+    /// schema is None, it is inferred from the first batch of results. The full
+    /// schema is inferred by appending the write schema to the existing schema.
+    ///
+    /// The `batch_size` parameter can be used to influence how much data is processed
+    /// at a time. This can be useful to control memory usage when processing very large
+    /// fields. The batch_size will only be used if the dataset is a v2 dataset.  It will
+    /// be ignored for v1 datasets.
+    ///
+    /// The `blob_handling` parameter controls the in-memory representation of blob
+    /// columns read by the updater. If unset, the dataset schema is used unchanged.
+    pub(crate) async fn updater<T: AsRef<str>>(
+        &self,
+        columns: Option<&[T]>,
+        schemas: Option<(Schema, Schema)>,
+        batch_size: Option<u32>,
+        blob_handling: Option<BlobHandling>,
+    ) -> Result<Updater> {
+        let write_version = self
+            .dataset
+            .manifest
+            .data_storage_format
+            .lance_file_format();
+        self.updater_with_version(columns, schemas, batch_size, blob_handling, write_version)
+            .await
+    }
+
+    #[cfg(feature = "write")]
+    pub(crate) async fn updater_with_version<T: AsRef<str>>(
+        &self,
+        columns: Option<&[T]>,
+        schemas: Option<(Schema, Schema)>,
+        batch_size: Option<u32>,
+        blob_handling: Option<BlobHandling>,
+        write_version: ConcreteFileVersion,
+    ) -> Result<Updater> {
+        let updater = Box::pin(self.core.updater_with_version(
+            columns,
+            schemas,
+            batch_size,
+            blob_handling,
+            write_version,
+            || super::scanner::get_default_batch_size().unwrap_or(1024),
+        ))
+        .await?;
+        let hook = Arc::new(LanceWriteSeedHook::new(self.dataset.session.clone()));
+        Ok(Updater::from_runtime(
+            self.clone(),
+            updater.with_seed_hook(hook),
+        ))
+    }
+
+    #[cfg(feature = "write")]
+    pub async fn merge_columns(
+        &mut self,
+        stream: impl RecordBatchReader + Send + 'static,
+        left_on: &str,
+        right_on: &str,
+    ) -> Result<(Fragment, Schema)> {
+        let stream = Box::new(stream);
+        if self.schema().field(left_on).is_none() && left_on != ROW_ID && left_on != ROW_ADDR {
+            return Err(Error::invalid_input(format!(
+                "Column {} does not exist in the left side fragment",
+                left_on
+            )));
+        };
+        let right_schema = stream.schema();
+        if right_schema.field_with_name(right_on).is_err() {
+            return Err(Error::invalid_input(format!(
+                "Column {} does not exist in the right side fragment",
+                right_on
+            )));
+        };
+
+        for field in right_schema.fields() {
+            if field.name() == right_on {
+                // right_on is allowed to exist in the dataset, since it may be
+                // the same as left_on.
+                continue;
+            }
+            if self.schema().field(field.name()).is_some() {
+                return Err(Error::invalid_input(format!(
+                    "Column {} exists in left side fragment and right side dataset",
+                    field.name()
+                )));
+            }
+        }
+        // Hash join
+        let joiner = Arc::new(HashJoiner::try_new(stream, right_on).await?);
+        // Final schema is union of current schema, plus the RHS schema without
+        // the right_on key.
+        let mut new_schema: Schema = self.schema().merge(joiner.out_schema().as_ref())?;
+        // Use the same starting id as the updater so schema and data file ids match.
+        new_schema.try_set_field_id(Some(self.dataset.manifest.max_field_id()))?;
+
+        let new_fragment = self
+            .clone()
+            .merge(left_on, &joiner)
+            .await
+            .map(Fragment::from)?;
+
+        Ok((new_fragment, new_schema))
+    }
+
+    #[cfg(feature = "write")]
+    pub(crate) async fn merge(mut self, join_column: &str, joiner: &HashJoiner) -> Result<Self> {
+        let mut updater = self.updater(Some(&[join_column]), None, None, None).await?;
+
+        while let Some(batch) = updater.next().await? {
+            let batch = joiner
+                .collect(&self.dataset, batch[join_column].clone())
+                .await?;
+            updater.update(batch).await?;
+        }
+
+        *self.metadata_mut() = updater.finish().await?;
+
+        Ok(self)
+    }
+
+    #[cfg(feature = "write")]
+    /// Same as [`Self::update_columns_with_offsets`] but discards the matched row offsets.
+    /// Use [`Self::update_columns_with_offsets`] if you need per-row version metadata for stable row IDs.
+    pub async fn update_columns(
+        &mut self,
+        right_stream: impl RecordBatchReader + Send + 'static,
+        left_on: &str,
+        right_on: &str,
+    ) -> Result<(Fragment, Vec<u32>)> {
+        let r = self
+            .update_columns_with_offsets(right_stream, left_on, right_on)
+            .await?;
+        Ok((r.fragment, r.fields_modified))
+    }
+
+    #[cfg(feature = "write")]
+    /// Same operation as [`Self::update_columns`], and also returns matched physical row offsets for stable row IDs.
+    pub async fn update_columns_with_offsets(
+        &mut self,
+        right_stream: impl RecordBatchReader + Send + 'static,
+        left_on: &str,
+        right_on: &str,
+    ) -> Result<FragmentUpdateColumnsResult> {
+        self.update_columns_with_options(
+            right_stream,
+            left_on,
+            right_on,
+            UpdateJoinOptions::default(),
+        )
+        .await
+    }
+
+    #[cfg(feature = "write")]
+    /// Updates columns using explicit join-strategy and external-resource controls.
+    ///
+    /// The returned offsets are physical row offsets within this fragment. Existing callers can
+    /// continue to use [`Self::update_columns`] or [`Self::update_columns_with_offsets`], which use
+    /// [`UpdateJoinOptions::default`].
+    ///
+    /// ```
+    /// # use arrow_array::RecordBatchReader;
+    /// # use lance::Result;
+    /// # use lance::dataset::UpdateJoinOptions;
+    /// # use lance::dataset::fragment::FileFragment;
+    /// # async fn update(
+    /// #     fragment: &mut FileFragment,
+    /// #     updates: impl RecordBatchReader + Send + 'static,
+    /// # ) -> Result<()> {
+    /// let options = UpdateJoinOptions::default()
+    ///     .with_hash_thresholds(500_000, 1024 * 1024 * 1024)
+    ///     .with_external_memory_pool_bytes(256 * 1024 * 1024);
+    /// fragment
+    ///     .update_columns_with_options(updates, "id", "id", options)
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn update_columns_with_options(
+        &mut self,
+        right_stream: impl RecordBatchReader + Send + 'static,
+        left_on: &str,
+        right_on: &str,
+        options: UpdateJoinOptions,
+    ) -> Result<FragmentUpdateColumnsResult> {
+        super::update_join::update_columns(self, Box::new(right_stream), left_on, right_on, options)
+            .await
+    }
+
+    #[cfg(feature = "write")]
+    /// Append new columns to the fragment
+    ///
+    /// This is the fragment-level version of [`Dataset::add_columns`].
+    /// Call [`Self::add_columns_with_cleanup`] when the resulting files will be
+    /// committed by a separate fallible operation and explicit cleanup is needed.
+    pub async fn add_columns(
+        &self,
+        transforms: NewColumnTransform,
+        read_columns: Option<Vec<String>>,
+        batch_size: Option<u32>,
+    ) -> Result<(Fragment, Schema)> {
+        let result = self
+            .add_columns_with_cleanup(transforms, read_columns, batch_size)
+            .await?;
+        Ok((result.fragment, result.schema))
+    }
+
+    #[cfg(feature = "write")]
+    /// Append new columns while retaining ownership of the staged files.
+    ///
+    /// This variant is intended for distributed or multi-step callers that
+    /// perform the final [`Operation::Merge`] separately. The returned cleanup
+    /// token should be dropped after a successful commit and invoked only when
+    /// the caller can establish that the commit did not land.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use lance::Result;
+    /// # use lance::dataset::{NewColumnTransform, fragment::FileFragment};
+    /// # async fn stage(
+    /// #     fragment: &FileFragment,
+    /// #     transform: NewColumnTransform,
+    /// # ) -> Result<()> {
+    /// let staged = fragment
+    ///     .add_columns_with_cleanup(transform, None, None)
+    ///     .await?;
+    ///
+    /// // Use staged.fragment and staged.schema in an outer Merge commit.
+    /// // If that commit definitively fails, release the staged files:
+    /// staged.cleanup.cleanup().await;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`Operation::Merge`]: crate::dataset::transaction::Operation::Merge
+    pub async fn add_columns_with_cleanup(
+        &self,
+        transforms: NewColumnTransform,
+        read_columns: Option<Vec<String>>,
+        batch_size: Option<u32>,
+    ) -> Result<FragmentAddColumnsResult> {
+        let (fragments, schema, fragments_to_cleanup, _) =
+            schema_evolution::add_columns_to_fragments(
+                self.dataset.as_ref(),
+                transforms,
+                read_columns,
+                std::slice::from_ref(self),
+                batch_size,
+            )
+            .await?;
+        let fragment_count = fragments.len();
+        let Ok([fragment]) = <Vec<Fragment> as TryInto<[Fragment; 1]>>::try_into(fragments) else {
+            return Err(Error::internal(format!(
+                "fragment add-columns produced {} fragments for fragment {}",
+                fragment_count,
+                self.id()
+            )));
+        };
+        Ok(FragmentAddColumnsResult {
+            fragment,
+            schema,
+            cleanup: FragmentAddColumnsCleanup {
+                original_fragment: self.clone(),
+                fragments_to_cleanup,
+            },
+        })
+    }
+
+    #[cfg(feature = "write")]
+    /// Write new data for columns of this fragment as a standalone data file,
+    /// without committing it, and return the
+    /// [`DataReplacementGroup`](super::transaction::DataReplacementGroup)
+    /// describing it.
+    ///
+    /// Unlike [`Self::add_columns`], the staged file answers for a field that
+    /// already exists, so this recomputes a column rather than appending one.
+    ///
+    /// `schema` names the fields being written. Each must be a top-level
+    /// column the dataset schema already defines, matching its manifest
+    /// definition; a column is staged whole, so a nested field cannot be
+    /// staged on its own. To recompute a new column, declare it first with an
+    /// all-null [`Self::add_columns`], then stage its data. Physical layout
+    /// comes from the manifest, so staging cannot change a field's storage
+    /// encoding. Batch columns are matched by name at every level, so struct
+    /// children may arrive in any order, but a batch whose fields are not
+    /// exactly the target's, at every level, is rejected.
+    ///
+    /// `data` must produce exactly the fragment's physical row count, nulls
+    /// included: the file is positionally aligned with the fragment and no
+    /// deletion vector is applied on the way in. Batches are pulled one at a
+    /// time, so the full column need not be held in memory.
+    ///
+    /// Callers should take care to set the read version correctly. If this is
+    /// not done then multiple replacements to the same field will not be
+    /// detected as a conflict.
+    pub async fn write_columns(
+        &self,
+        data: impl Stream<Item = Result<RecordBatch>> + Send,
+        schema: &Schema,
+    ) -> Result<super::transaction::DataReplacementGroup> {
+        self.write_columns_with_file_writer_options(data, schema, FileWriterOptions::default())
+            .await
+    }
+
+    #[cfg(feature = "write")]
+    /// Write replacement column data with runtime file-writer options.
+    ///
+    /// This has the same format and commit semantics as [`Self::write_columns`].
+    /// The options control buffering and execution only; the fragment's
+    /// manifest still selects the file grammar and physical layout.
+    pub async fn write_columns_with_file_writer_options(
+        &self,
+        data: impl Stream<Item = Result<RecordBatch>> + Send,
+        schema: &Schema,
+        file_writer_options: FileWriterOptions,
+    ) -> Result<super::transaction::DataReplacementGroup> {
+        let write_version = self
+            .dataset
+            .manifest
+            .data_storage_format
+            .lance_file_format();
+        let data = data.map(|result| result.map(|batch| (batch, None)));
+        self.write_column_with_version_and_options(
+            data,
+            schema,
+            write_version,
+            file_writer_options,
+            false,
+        )
+        .await
+    }
+
+    #[cfg(feature = "write")]
+    /// Stage replacement columns using prepared Blob v2 leaves and trusted
+    /// payload sources associated with each batch.
+    ///
+    /// See [`Self::write_columns`] for the schema, row alignment and commit
+    /// contract. Each batch can supply [`BlobWriteSources`] for payloads
+    /// uploaded into primary dataset storage or resolved from a prior write.
+    /// Only the dataset schema's Managed opt-in determines whether the
+    /// writer can adopt a completed upload. Requires file version 2.2 or newer.
+    ///
+    /// ```
+    /// # use arrow_array::RecordBatch;
+    /// # use lance::{Result, blob::BlobWriteSources, dataset::fragment::FileFragment};
+    /// # use lance_core::datatypes::Schema;
+    /// # use lance_file::writer::FileWriterOptions;
+    /// # async fn example(fragment: &FileFragment, batch: RecordBatch, schema: &Schema,
+    /// #   sources: BlobWriteSources) -> Result<()> {
+    /// let replacement = fragment.write_columns_with_blob_sources(
+    ///     futures::stream::iter([Ok((batch, sources))]), schema, FileWriterOptions::default(),
+    /// ).await?;
+    /// # let _ = replacement;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn write_columns_with_blob_sources(
+        &self,
+        data: impl Stream<Item = Result<(RecordBatch, BlobWriteSources)>> + Send,
+        schema: &Schema,
+        file_writer_options: FileWriterOptions,
+    ) -> Result<super::transaction::DataReplacementGroup> {
+        let write_version = self
+            .dataset
+            .manifest
+            .data_storage_format
+            .lance_file_format();
+        if !versions::writes_blob_v2(write_version) {
+            return Err(Error::not_supported(
+                "Column writes with Blob sources require Lance file version 2.2 or later",
+            ));
+        }
+        let data = data.map(|result| result.map(|(batch, sources)| (batch, Some(sources))));
+        self.write_column_with_version_and_options(
+            data,
+            schema,
+            write_version,
+            file_writer_options,
+            true,
+        )
+        .await
+    }
+
+    #[cfg(feature = "write")]
+    /// Write replacement column data using an exact V2 data file version.
+    ///
+    /// The input and commit requirements are the same as [`Self::write_columns`].
+    /// V1 targets and legacy datasets are not supported.
+    /// When the version differs from the manifest default, the commit that
+    /// publishes the returned replacement group derives the mixed-version
+    /// capability from its final manifest.
+    ///
+    /// ```
+    /// # use lance::{dataset::fragment::FileFragment, Result};
+    /// # use lance_core::datatypes::Schema;
+    /// # use lance_file::version::ConcreteFileVersion;
+    /// # async fn example(fragment: &FileFragment, batch: arrow_array::RecordBatch, schema: &Schema) -> Result<()> {
+    /// let replacement = fragment.write_column_with_version(
+    ///     futures::stream::iter([Ok(batch)]), schema, ConcreteFileVersion::V2_2,
+    /// ).await?;
+    /// // Commit the replacement with Operation::DataReplacement.
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn write_column_with_version(
+        &self,
+        data: impl Stream<Item = Result<RecordBatch>> + Send,
+        schema: &Schema,
+        write_version: ConcreteFileVersion,
+    ) -> Result<super::transaction::DataReplacementGroup> {
+        let data = data.map(|result| result.map(|batch| (batch, None)));
+        self.write_column_with_version_and_options(
+            data,
+            schema,
+            write_version,
+            FileWriterOptions::default(),
+            false,
+        )
+        .await
+    }
+
+    #[cfg(feature = "write")]
+    async fn write_column_with_version_and_options(
+        &self,
+        data: impl Stream<Item = Result<(RecordBatch, Option<BlobWriteSources>)>> + Send,
+        schema: &Schema,
+        write_version: ConcreteFileVersion,
+        file_writer_options: FileWriterOptions,
+        has_blob_sources: bool,
+    ) -> Result<super::transaction::DataReplacementGroup> {
+        let hook = LanceWriteSeedHook::new(self.dataset.session.clone());
+        Box::pin(self.core.write_column_with_version_and_options(
+            data,
+            schema,
+            write_version,
+            file_writer_options,
+            has_blob_sources,
+            Some(&hook),
+        ))
+        .await
+    }
+
+    #[cfg(feature = "write")]
+    /// Stage a data overlay supplying new values for a subset of this fragment's
+    /// cells, without rewriting its base data files.
+    ///
+    /// `schema` declares the fields the overlay may supply, by the dataset's own
+    /// field ids, exactly as [`Self::write_columns`] does. Values are then fed to
+    /// the returned writer keyed by `_rowaddr`; see [`OverlayWriter`] for the
+    /// ordering and coverage rules it enforces, and for how to finish or discard
+    /// what it stages.
+    ///
+    /// An overlay is the cheap way to fill a small fraction of a column: write
+    /// cost is proportional to the cells supplied, rows keep their addresses, and
+    /// no existing values are re-read to carry them forward. It costs a merge on
+    /// every later read of the cells it covers, so a dense fill of a whole column
+    /// is better served by [`Self::write_columns`].
+    ///
+    /// ```
+    /// # use std::sync::Arc;
+    /// # use arrow_array::RecordBatch;
+    /// # use futures::TryStreamExt;
+    /// # use lance::Dataset;
+    /// # use lance::dataset::transaction::Operation;
+    /// # use lance::dataset::WriteDestination;
+    /// # use lance_core::Result;
+    /// # async fn backfill(
+    /// #     dataset: Arc<Dataset>,
+    /// #     mut values: impl futures::TryStream<Ok = RecordBatch, Error = lance_core::Error> + Unpin,
+    /// #     field_id: i32,
+    /// # ) -> Result<()> {
+    /// let read_version = dataset.version().version;
+    /// let fragment = dataset.get_fragment(0).expect("fragment 0 exists");
+    /// let schema = dataset.schema().project_by_ids(&[field_id], true);
+    ///
+    /// let mut overlay = fragment.write_overlay(&schema).await?;
+    /// // Each batch carries `_rowaddr` plus the fields being filled, for the
+    /// // rows it has values for. Addresses must strictly ascend per field.
+    /// while let Some(batch) = values.try_next().await? {
+    ///     overlay.write_batch(&batch).await?;
+    /// }
+    ///
+    /// if let Some(group) = overlay.finish().await? {
+    ///     Dataset::commit(
+    ///         WriteDestination::Dataset(dataset),
+    ///         Operation::DataOverlay { groups: vec![group] },
+    ///         Some(read_version),
+    ///         None,
+    ///         None,
+    ///         Arc::new(Default::default()),
+    ///         false,
+    ///     )
+    ///     .await?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn write_overlay(
+        &self,
+        schema: &Schema,
+    ) -> std::result::Result<OverlayWriter, WriteOverlayError> {
+        Box::pin(self.core.write_overlay(schema)).await
+    }
+
+    #[cfg(feature = "write")]
+    /// Delete rows from the fragment.
+    ///
+    /// If all rows are deleted, returns `Ok(None)`. Otherwise, returns a new
+    /// fragment with the updated deletion vector. This must be persisted to
+    /// the manifest.
+    pub async fn delete(self, predicate: &str) -> Result<Option<Self>> {
+        // Load existing deletion vector
+        let mut deletion_vector = self
+            .get_deletion_vector()
+            .await?
+            .unwrap_or_default()
+            .as_ref()
+            .clone();
+
+        let starting_length = deletion_vector.len();
+
+        // scan with predicate and row addresses
+        let mut scanner = self.scan();
+
+        let predicate_lower = predicate.trim().to_lowercase();
+        if predicate_lower == "true" {
+            return Ok(None);
+        } else if predicate_lower == "false" {
+            return Ok(Some(self));
+        }
+
+        scanner
+            .with_row_address()
+            .filter(predicate)?
+            .project::<&str>(&[])?;
+
+        // if predicate is `true`, delete the whole fragment
+        // else if predicate is `false`, filter the predicate
+        // We do this on the expression level after expression optimization has
+        // occurred so we also catch expressions that are equivalent to `true`
+        if let Some(predicate) = &scanner.get_expr_filter()? {
+            if matches!(
+                predicate,
+                Expr::Literal(ScalarValue::Boolean(Some(false)), _)
+            ) {
+                return Ok(Some(self));
+            }
+            if matches!(
+                predicate,
+                Expr::Literal(ScalarValue::Boolean(Some(true)), _)
+            ) {
+                return Ok(None);
+            }
+        }
+
+        // As we get row addrs, add them into our deletion vector
+        scanner
+            .try_into_stream()
+            .await?
+            .try_for_each(|batch| {
+                let array = batch[ROW_ADDR].clone();
+                let int_array: &UInt64Array = as_primitive_array(array.as_ref());
+
+                // _rowaddr is global, not within fragment level. The high bits
+                // are the fragment_id, the low bits are the row_id within the
+                // fragment.
+                let local_row_ids = int_array.values().iter().map(|v| *v as u32);
+
+                deletion_vector.extend(local_row_ids);
+                futures::future::ready(Ok(()))
+            })
+            .await?;
+
+        // If we haven't deleted any additional rows, we can return the fragment as-is.
+        if deletion_vector.len() == starting_length {
+            return Ok(Some(self));
+        }
+
+        self.write_deletions(deletion_vector).await
+    }
+
+    #[cfg(feature = "write")]
+    pub async fn extend_deletions(
+        self,
+        new_deletions: impl IntoIterator<Item = u32>,
+    ) -> Result<Option<Self>> {
+        let Self { dataset, core } = self;
+        Ok(Box::pin(core.extend_deletions(new_deletions))
+            .await?
+            .map(|core| Self { dataset, core }))
+    }
+
+    #[cfg(feature = "write")]
+    async fn write_deletions(self, deletion_vector: DeletionVector) -> Result<Option<Self>> {
+        let Self { dataset, core } = self;
+        Ok(Box::pin(core.write_deletions(deletion_vector))
+            .await?
+            .map(|core| Self { dataset, core }))
     }
 }
 
@@ -411,8 +1285,7 @@ impl From<FileFragment> for Fragment {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 pub(crate) mod tests {
     use crate::dataset::rowids::load_row_id_sequence;
     use arrow::compute::concat_batches;

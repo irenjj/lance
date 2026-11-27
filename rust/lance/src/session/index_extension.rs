@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
+#[cfg(all(test, feature = "write"))]
+use lance_core::utils::row_addr_remap::RowAddrRemap;
 use std::sync::Arc;
 
 use lance_core::Result;
@@ -50,8 +52,7 @@ pub trait VectorIndexExtension: IndexExtension {
     ) -> Result<Arc<dyn VectorIndex>>;
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod test {
     use crate::{
         dataset::{builder::DatasetBuilder, scanner::test_dataset::TestVectorDataset},

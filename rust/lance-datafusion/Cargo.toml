@@ -49,5 +49,8 @@ lance-testing = { workspace = true, features = ["datafusion"] }
 geo-types.workspace = true
 rstest.workspace = true
 
+[features]
+write = []
+
 [lints]
 workspace = true

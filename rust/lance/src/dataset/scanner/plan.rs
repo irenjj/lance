@@ -17,6 +17,8 @@ use std::sync::Arc;
 use arrow_array::{Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema, SchemaRef, SortOptions};
 use arrow_select::concat::concat_batches;
+#[cfg(feature = "write")]
+use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion_catalog::Session;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::exec_datafusion_err;
@@ -285,6 +287,30 @@ impl Scanner {
             )?))
         }
         .boxed()
+    }
+
+    #[cfg(feature = "write")]
+    pub(crate) async fn try_into_dfstream(
+        &self,
+        mut options: LanceExecutionOptions,
+    ) -> Result<SendableRecordBatchStream> {
+        let plan = self.create_plan().await?;
+
+        // Use the scan stats callback if the user didn't set an execution stats callback
+        if options.execution_stats_callback.is_none() {
+            options.execution_stats_callback = self.scan_stats_callback.clone();
+        }
+
+        execute_plan(plan, options)
+    }
+
+    #[cfg(feature = "write")]
+    pub(crate) fn execution_options(&self) -> LanceExecutionOptions {
+        LanceExecutionOptions {
+            batch_size: self.batch_size,
+            execution_stats_callback: self.scan_stats_callback.clone(),
+            ..Default::default()
+        }
     }
 
     pub async fn try_into_batch(&self) -> Result<RecordBatch> {
@@ -1184,8 +1210,7 @@ impl Scanner {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

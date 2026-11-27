@@ -23,6 +23,10 @@ mod rowids;
 pub mod scalar_index;
 mod scan;
 pub(crate) mod take;
+
+#[cfg(all(test, feature = "write"))]
+pub mod testing;
+
 pub mod topk_late_materialization;
 pub mod utils;
 

@@ -57,6 +57,7 @@ tempfile.workspace = true
 
 [features]
 default = []
+write = []
 test-util = []
 aws = ["lance-io/aws"]
 azure = ["lance-io/azure"]

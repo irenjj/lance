@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 use lance_core::datatypes::Field;
 use lance_index::pb::ListElementIndexDetails;
+#[cfg(feature = "write")]
+use lance_index::scalar::CreatedIndex;
 use lance_index::scalar::ScalarIndex;
 use lance_index::scalar::list_element::ListElementIndex;
 use lance_table::format::IndexMetadata;
@@ -49,6 +51,37 @@ fn element_fields(column: &Field) -> Option<&[Field]> {
     item.logical_type
         .is_struct()
         .then_some(item.children.as_slice())
+}
+
+#[cfg(feature = "write")]
+/// Record, in a segment the plugin has just trained on `column`, the field IDs
+/// of the keys it names. Training validated the names against the same schema.
+pub fn record_key_field_ids(column: &Field, created: &mut CreatedIndex) -> Result<()> {
+    let mut details = decode(&created.index_details)?;
+    let fields = element_fields(column).ok_or_else(|| {
+        Error::invalid_input(format!(
+            "a list-element index needs a list<struct> column, but '{}' is {}",
+            column.name, column.logical_type
+        ))
+    })?;
+    details.key_field_ids = details
+        .keys
+        .iter()
+        .map(|key| {
+            fields
+                .iter()
+                .find(|field| &field.name == key)
+                .map(|field| field.id)
+                .ok_or_else(|| {
+                    Error::internal(format!(
+                        "trained list-element key '{key}' is not a field of the elements of '{}'",
+                        column.name
+                    ))
+                })
+        })
+        .collect::<Result<_>>()?;
+    created.index_details = prost_types::Any::from_msg(&details)?;
+    Ok(())
 }
 
 /// The details of a list-element segment on `column`, with each key field
@@ -107,6 +140,20 @@ pub fn details_for_open(
         Some(bound) => Arc::new(bound),
         None => details,
     })
+}
+
+#[cfg(feature = "write")]
+/// Whether the recorded key IDs still resolve to children of the expected types
+/// in `schema`. Renames preserve the IDs and continue to resolve.
+pub fn key_fields_resolve(
+    schema: &lance_core::datatypes::Schema,
+    index: &IndexMetadata,
+) -> Result<bool> {
+    let (Some(column), Some(details)) = (indexed_column(schema, index), &index.index_details)
+    else {
+        return Ok(false);
+    };
+    Ok(bind_key_fields(column, details)?.is_some())
 }
 
 /// Whether `index`, possibly cached before a rename, names its keys other than
@@ -199,5 +246,20 @@ mod tests {
     #[case::ids_not_recorded(&[], &["label"], &["string"])]
     fn test_binding_declines(#[case] ids: &[i32], #[case] keys: &[&str], #[case] types: &[&str]) {
         assert_eq!(bound_keys(&column(), &details(ids, keys, types)), None);
+    }
+
+    #[cfg(feature = "write")]
+    #[test]
+    fn test_record_key_field_ids() {
+        let mut created = CreatedIndex {
+            index_details: details(&[], &["confidence", "label"], &["float", "string"]),
+            index_version: 0,
+            files: Vec::new(),
+        };
+        record_key_field_ids(&column(), &mut created).unwrap();
+        assert_eq!(
+            decode(&created.index_details).unwrap().key_field_ids,
+            [4, 2]
+        );
     }
 }

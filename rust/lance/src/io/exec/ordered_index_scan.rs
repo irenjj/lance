@@ -560,8 +560,7 @@ impl ExecutionPlan for OrderedIndexScanExec {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use std::cmp::Ordering;
     use std::collections::{HashMap, HashSet};

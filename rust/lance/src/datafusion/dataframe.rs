@@ -2,16 +2,26 @@
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
 use std::sync::Arc;
+#[cfg(feature = "write")]
+use std::sync::Mutex;
 
 use arrow_schema::{Schema, SchemaRef};
 use async_trait::async_trait;
+#[cfg(feature = "write")]
+use datafusion::{dataframe::DataFrame, execution::context::SessionContext};
 use datafusion_catalog::Session;
 use datafusion_catalog::TableProvider;
+#[cfg(feature = "write")]
+use datafusion_catalog::streaming::StreamingTable;
 use datafusion_common::DataFusionError;
+#[cfg(feature = "write")]
+use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion_physical_plan::ExecutionPlan;
+#[cfg(feature = "write")]
+use datafusion_physical_plan::streaming::PartitionStream;
 use lance_arrow::SchemaExt;
-#[cfg(test)]
+#[cfg(any(test, feature = "write"))]
 use lance_core::ROW_CREATED_AT_VERSION_FIELD;
 use lance_core::{ROW_ADDR_FIELD, ROW_ID_FIELD};
 
@@ -107,7 +117,7 @@ impl LanceTableProvider {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "write"))]
     /// Exposes the target rows' creation versions for rewrite operations that
     /// carry their lineage into new fragments.
     pub(crate) fn with_row_created_at_version(mut self) -> crate::Result<Self> {
@@ -216,13 +226,104 @@ impl TableProvider for LanceTableProvider {
     }
 }
 
+#[cfg(feature = "write")]
+pub trait SessionContextExt {
+    /// Creates a DataFrame for reading a Lance dataset
+    fn read_lance(
+        &self,
+        dataset: Arc<Dataset>,
+        with_row_id: bool,
+        with_row_addr: bool,
+    ) -> datafusion::common::Result<DataFrame>;
+
+    /// Creates a DataFrame for reading a stream of data
+    ///
+    /// This dataframe may only be queried once, future queries will fail
+    fn read_one_shot(
+        &self,
+        data: SendableRecordBatchStream,
+    ) -> datafusion::common::Result<DataFrame>;
+}
+
+#[cfg(feature = "write")]
+pub struct OneShotPartitionStream {
+    data: Arc<Mutex<Option<SendableRecordBatchStream>>>,
+    schema: Arc<Schema>,
+}
+
+#[cfg(feature = "write")]
+impl OneShotPartitionStream {
+    pub fn new(data: SendableRecordBatchStream) -> Self {
+        let schema = data.schema();
+        Self {
+            data: Arc::new(Mutex::new(Some(data))),
+            schema,
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+impl std::fmt::Debug for OneShotPartitionStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OneShotPartitionStream")
+            .field("schema", &self.schema)
+            .finish()
+    }
+}
+
+#[cfg(feature = "write")]
+impl PartitionStream for OneShotPartitionStream {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let mut stream = self.data.lock().unwrap();
+        stream
+            .take()
+            .expect("Attempt to consume a one shot dataframe multiple times")
+    }
+}
+
+#[cfg(feature = "write")]
+impl SessionContextExt for SessionContext {
+    fn read_lance(
+        &self,
+        dataset: Arc<Dataset>,
+        with_row_id: bool,
+        with_row_addr: bool,
+    ) -> datafusion::common::Result<DataFrame> {
+        self.read_table(Arc::new(LanceTableProvider::new(
+            dataset,
+            with_row_id,
+            with_row_addr,
+        )))
+    }
+
+    fn read_one_shot(
+        &self,
+        data: SendableRecordBatchStream,
+    ) -> datafusion::common::Result<DataFrame> {
+        let schema = data.schema();
+        let part_stream = Arc::new(OneShotPartitionStream::new(data));
+        let provider = StreamingTable::try_new(schema, vec![part_stream])?;
+        self.read_table(Arc::new(provider))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    #[cfg(feature = "write")]
+    use crate::utils::test::{DatagenExt, FragmentCount, FragmentRowCount};
     use crate::{Dataset, datafusion::LanceTableProvider};
+    #[cfg(feature = "write")]
+    use arrow::datatypes::{Int32Type, Int64Type};
     use arrow::{array::AsArray, datatypes::UInt64Type};
     use arrow_array::record_batch;
+    #[cfg(feature = "write")]
+    use datafusion::prelude::SessionContext;
     use datafusion_catalog::TableProvider;
     use datafusion_physical_plan::collect;
     use datafusion_session::Session;
@@ -230,7 +331,11 @@ mod tests {
     use lance_table_runtime::write::{InsertBuilder, WriteParams};
     use lance_testing::datafusion::TestSession;
 
+    #[cfg(feature = "write")]
+    use lance_core::utils::tempfile::TempStrDir;
     use lance_core::{ROW_ADDR, ROW_CREATED_AT_VERSION, ROW_ID};
+    #[cfg(feature = "write")]
+    use lance_datagen::array;
     use rstest::rstest;
 
     #[rstest]
@@ -283,6 +388,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "write")]
+    #[tokio::test]
+    pub async fn test_table_provider() {
+        let test_uri = TempStrDir::default();
+        let data = lance_datagen::gen_batch()
+            .col("x", array::step::<Int32Type>())
+            .col("y", array::step_custom::<Int32Type>(0, 2))
+            .into_dataset(
+                &test_uri,
+                FragmentCount::from(10),
+                FragmentRowCount::from(10),
+            )
+            .await
+            .unwrap();
+
+        let ctx = SessionContext::new();
+
+        ctx.register_table(
+            "foo",
+            Arc::new(LanceTableProvider::new(Arc::new(data), true, true)),
+        )
+        .unwrap();
+
+        let df = ctx
+            .sql("SELECT SUM(x) FROM foo WHERE y > 100")
+            .await
+            .unwrap();
+
+        let results = df.collect().await.unwrap();
+        assert_eq!(results.len(), 1);
+        let results = results.into_iter().next().unwrap();
+        assert_eq!(results.num_columns(), 1);
+        assert_eq!(results.num_rows(), 1);
+        // SUM(0..100) - SUM(0..50) = 3675
+        assert_eq!(results.column(0).as_primitive::<Int64Type>().value(0), 3675);
     }
 
     #[tokio::test]

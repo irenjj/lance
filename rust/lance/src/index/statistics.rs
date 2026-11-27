@@ -7,8 +7,14 @@ use super::field_dependencies::described_field_ids;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+#[cfg(feature = "write")]
+use std::sync::OnceLock;
 
+#[cfg(feature = "write")]
+use lance_core::utils::parse::parse_env_as_bool;
 use lance_index::frag_reuse::CompactFragReuseIndexHandle;
+#[cfg(feature = "write")]
+use lance_index::mem_wal::MemWalIndexHandle;
 use lance_index::registry::display_type_from_url;
 use lance_index::scalar::lance_format::LanceIndexStore;
 use lance_index::{
@@ -20,6 +26,8 @@ use roaring::RoaringBitmap;
 use serde_json::json;
 
 use crate::dataset::index::LanceIndexStoreExt;
+#[cfg(feature = "write")]
+use crate::index::api::DatasetIndexExt;
 use crate::index::api::IndexSegmentStatistics;
 use crate::index::loading::{DatasetIndexInternalExt, find_frag_reuse_index_meta};
 use crate::index::scalar::{self, IndexDetails};
@@ -58,6 +66,11 @@ fn unique_indexed_fragment_count(indexed_fragments_per_delta: &[Vec<Fragment>]) 
 }
 
 // Whether to auto-migrate a dataset when we encounter corruption.
+#[cfg(feature = "write")]
+fn auto_migrate_corruption() -> bool {
+    static LANCE_AUTO_MIGRATION: OnceLock<bool> = OnceLock::new();
+    *LANCE_AUTO_MIGRATION.get_or_init(|| parse_env_as_bool("LANCE_AUTO_MIGRATION", true))
+}
 
 /// Derive a friendly (but not necessarily unique) type name from a type URL.
 /// Extract a human-friendly type name from a type URL.
@@ -400,6 +413,23 @@ fn serialize_index_statistics(stats: &serde_json::Value) -> Result<String> {
         .map_err(|e| Error::index(format!("Failed to serialize index statistics: {}", e)))
 }
 
+#[cfg(feature = "write")]
+async fn migrate_and_recompute_index_statistics(ds: &Dataset, index_name: &str) -> Result<String> {
+    let mut ds = ds.clone();
+    log::warn!(
+        "Detecting out-dated fragment metadata, migrating dataset. \
+                        To disable migration, set LANCE_AUTO_MIGRATION=false"
+    );
+    ds.delete("false").await.map(|_| ()).map_err(|err| {
+        Error::execution(format!(
+            "Failed to migrate dataset while calculating index statistics. \
+                        To disable migration, set LANCE_AUTO_MIGRATION=false. Original error: {}",
+            err
+        ))
+    })?;
+    ds.index_statistics(index_name).await
+}
+
 pub(super) async fn index_statistics_frag_reuse(ds: &Dataset) -> Result<String> {
     if let Some(fri) = find_frag_reuse_index_meta(ds).await?
         && fri.index_version != 0
@@ -415,6 +445,15 @@ pub(super) async fn index_statistics_frag_reuse(ds: &Dataset) -> Result<String> 
     serialize_index_statistics(&CompactFragReuseIndexHandle(index).statistics()?)
 }
 
+#[cfg(feature = "write")]
+pub(super) async fn index_statistics_mem_wal(ds: &Dataset) -> Result<String> {
+    let index = ds
+        .open_mem_wal_index(&NoOpMetricsCollector)
+        .await?
+        .expect("MemWal index does not exist");
+    serialize_index_statistics(&MemWalIndexHandle(index).statistics()?)
+}
+
 pub(super) async fn index_statistics_scalar(
     ds: &Dataset,
     index_name: &str,
@@ -428,6 +467,9 @@ pub(super) async fn index_statistics_scalar(
     match serialize_regular_index_statistics(ds, index_name, &metadatas, segment_statistics).await?
     {
         Some(statistics) => Ok(statistics),
+        #[cfg(feature = "write")]
+        None => migrate_and_recompute_index_statistics(ds, index_name).await,
+        #[cfg(not(feature = "write"))]
         None => Err(Error::not_supported(format!(
             "Index {index_name} has overlapping fragment coverage. Repair its metadata with a writer."
         ))),
@@ -595,9 +637,25 @@ async fn gather_fragment_statistics(
 ) -> Result<Option<(Vec<usize>, usize, usize, usize, usize)>> {
     let indexed_fragments_per_delta = ds.indexed_fragments(index_name).await?;
 
-    let num_indexed_rows_per_delta = sum_indexed_rows_per_delta(&indexed_fragments_per_delta)?;
+    let rows_per_delta = sum_indexed_rows_per_delta(&indexed_fragments_per_delta);
+    #[cfg(feature = "write")]
+    if let Err(Error::Internal { message, .. }) = &rows_per_delta
+        && auto_migrate_corruption()
+        && message.contains("trigger a single write")
+    {
+        return Ok(None);
+    }
+    let num_indexed_rows_per_delta = rows_per_delta?;
     let Some(num_indexed_fragments) = unique_indexed_fragment_count(&indexed_fragments_per_delta)
     else {
+        #[cfg(feature = "write")]
+        if !auto_migrate_corruption() {
+            return Err(Error::internal(
+                "Overlap in indexed fragments. Please upgrade to lance >= 0.23.0 \
+                                  and trigger a single write to fix this"
+                    .to_string(),
+            ));
+        }
         return Ok(None);
     };
 

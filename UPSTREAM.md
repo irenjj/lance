@@ -4,14 +4,39 @@
 - `upstream_tag` = `v15.1.0-beta.2`
 - `upstream_sha` = `fc8f59e53233a46f0d73604d66254142802389c9`
 - `spike_sha` = `c9e0dfd4335d2f00a5e874680e58bc67936a0af7`
-- `target_datafusion_sha` = `0ddfccd0ee54565ad66484f1c9b86fdacbd790a8`
+- `readonly_baseline_sha` = `644d2e0334a0bc3c005aa68f90df31efc9af10a3`
+- `target_datafusion_sha` = `9f21b10e76b13f35c379376d09d51fbc5e8581f3`
 
 This branch opens Lance snapshots using the modular DataFusion 57 crates.
 Cargo resolves Arrow and Parquet 60.2.0 and object_store 0.14.2. The lower
 Lance layers retain file, manifest, and index construction primitives for
-local fixtures. Dataset mutation and index maintenance APIs are outside the
-compiled leaf crate. The workspace still excludes namespace, geo, tools,
-datagen, and the upstream examples crate.
+local fixtures. The workspace excludes namespace, geo, tools, datagen, and
+the upstream examples crate.
+
+## Write-side source retention
+
+Dataset mutation, index building and maintenance, and their writer-backed
+tests are restored at their upstream locations under
+`#[cfg(feature = "write")]` and `#[cfg(all(test, feature = "write"))]`. The
+`write` feature defaults to off in `lance`, `lance-datafusion`, `lance-table-runtime`, and
+`lance-io`. The Lance manifest gates upstream writer-dependent targets
+with `required-features`. The only integration tests selected by the
+verified read-only build are `arrow_ordering` and `readonly_baseline`.
+
+The feature preserves source for rebasing. Building the write configuration
+still requires porting upstream DataFusion core APIs and namespace
+integrations, and adapting writer tests that use the excluded datagen
+crate. Supported verification uses the modular DataFusion read-only build.
+
+| Diff against `upstream_sha` | Before source restoration | After source restoration |
+| --- | --- | --- |
+| Including `Cargo.lock` | 177 files, +4,690 / −20,384 | 177 files, +6,043 / −4,038 |
+| Excluding `Cargo.lock` | 176 files, +4,395 / −18,265 | 176 files, +5,748 / −1,919 |
+| Deleted files | 0 | 0 |
+
+`Cargo.lock` already resolves with the 24 patches at the target DataFusion
+revision. The Cargo manifests, lockfile, and Rust source contain zero
+hard-coded local checkout paths from the migration.
 
 ## Read-side boundaries
 
@@ -24,40 +49,60 @@ datagen, and the upstream examples crate.
 | Dataset and fragment | `DatasetBuilder`, version and fragment metadata, `FileFragment::open`, `open_session`, physical slices, Blob descriptors and range reads, and `take` remain available. Blob location and payload reads use the existing runtime primitives. |
 | Index API | `index/api.rs::DatasetIndexExt`, `index/read.rs`, and `index/loading.rs::DatasetIndexInternalExt` cover listing, prewarm, statistics, and scalar, vector, and inverted reads. MemWAL opens return `NotSupported`. Overlapping legacy index coverage that requires repair also returns an error. |
 
-The `lance` Cargo manifest explicitly selects `arrow_ordering` and
-`readonly_baseline` as integration tests. Several upstream inline unit suites
-use the detached high-level writers, index builders, or the excluded datagen
-crate. Their source stays under unconditional false `cfg` guards where
-practical for rebasing. The guards expose no Cargo feature or test target.
-
 ## Reproduce offline
 
-Use Rust 1.98.1, a local Cargo dependency cache, and a DataFusion checkout at
-`target_datafusion_sha`. Set `DF_ROOT` to that checkout's absolute path in
-the invoking shell. The patch arguments belong on the command line.
+Use Rust 1.98.1 and a local Cargo dependency cache. Set `DF_ROOT` to the
+absolute path of a clean DataFusion checkout at `target_datafusion_sha`.
+Run the following from a clean Lance checkout to bind the evidence to its
+current commit. Choose an empty `EVIDENCE_DIR` for the run.
 
 ```bash
+set -euo pipefail
 export PATH="$HOME/.cargo/bin:$PATH"
-test "$(git -C "$DF_ROOT" rev-parse HEAD)" = 0ddfccd0ee54565ad66484f1c9b86fdacbd790a8 || exit 1
+export CARGO_BUILD_JOBS=8 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+df_revision=9f21b10e76b13f35c379376d09d51fbc5e8581f3
+test "$(git -C "$DF_ROOT" rev-parse HEAD)" = "$df_revision"
+test -z "$(git -C "$DF_ROOT" status --porcelain)"
 mapfile -t df_crates < <(sed -n 's/^name = "\(datafusion-[^"]*\)"$/\1/p' Cargo.lock)
+test "${#df_crates[@]}" -eq 24
 patch=()
 for name in "${df_crates[@]}"; do
     dir="$DF_ROOT/datafusion/${name#datafusion-}"
-    test -f "$dir/Cargo.toml" || exit 1
+    test -f "$dir/Cargo.toml"
     patch+=(--config "patch.crates-io.$name.path=\"$dir\"")
 done
 
-cargo fmt --all -- --check
-cargo test --locked --offline -p lance-datafusion --lib --tests "${patch[@]}"
-cargo clippy --locked --offline -p lance --no-default-features --lib --tests --no-deps "${patch[@]}" -- -D warnings
-cargo test --locked --offline -p lance --no-default-features --lib --tests "${patch[@]}"
-bash rust/lance/ci/check_readonly_tree.sh "${patch[@]}"
+evidence_dir="${EVIDENCE_DIR:-/tmp/df-lake-evidence/b-p0b-optb}"
+record() {
+    local lane=$1
+    shift
+    bash "$DF_ROOT/scripts/evidence.sh" --name "$lane" --output-dir "$evidence_dir" \
+        --notes "DataFusion $df_revision." -- "$@"
+}
+
+record lance-fmt cargo fmt --all -- --check
+record lance-datafusion-test cargo test --locked --offline -p lance-datafusion --lib --tests "${patch[@]}"
+record lance-clippy cargo clippy --locked --offline -p lance --no-default-features --lib --tests --no-deps "${patch[@]}" -- -D warnings
+record lance-readonly-test cargo test --locked --offline -p lance --no-default-features --lib --tests "${patch[@]}"
+record lance-tree-check bash rust/lance/ci/check_readonly_tree.sh "${patch[@]}"
+
+revision=$(git rev-parse HEAD)
+(
+    cd "$evidence_dir"
+    for manifest in *.json; do
+        jq -e --arg revision "$revision" \
+            '.schema == "df-evidence-v1" and .source_revision == $revision and .source_dirty == false and .exit_code == 0' \
+            "$manifest" >/dev/null
+        jq -r '.artifacts[] | "\(.sha256)  \(.path)"' "$manifest"
+    done | sha256sum --check --strict
+    sha256sum -- *.json > manifests.sha256
+    sha256sum --check --strict manifests.sha256
+)
 ```
 
 The Clippy invocation applies strict linting to the leaf library and its
-test targets. Dependency linting in the same invocation trips existing
-Arrow 60 deprecations in `lance-arrow/src/ipc.rs` and an explicit auto-deref
-in `lance-arrow/src/schema.rs`, outside this change's file scope.
+test targets. Dependency diagnostics can include existing deprecation and
+dead-code warnings outside the leaf crate.
 
 ## Local fixtures and verification
 
@@ -75,12 +120,11 @@ in `lance-arrow/src/schema.rs`, outside this change's file scope.
 
 | Gate | Result |
 | --- | --- |
-| Workspace formatting | Passed |
-| `lance-datafusion --lib --tests` | 678 unit tests and 2 core-free planner tests passed |
-| Strict `lance --lib --tests --no-deps` Clippy | Passed |
-| `lance --no-default-features --lib --tests` | 1,087 unit tests, 46 Arrow ordering tests, and 8 read-only fixture cases passed |
-| Dependency assertions | Passed |
-| Doctests | 74 Lance and 5 lance-datafusion passed. 16 pre-existing ignored examples |
+| `lance-fmt` | Passed |
+| `lance-datafusion-test` | 678 unit tests and 2 core-free planner tests passed |
+| `lance-clippy` | Strict leaf and test linting passed |
+| `lance-readonly-test` | 1,087 unit tests, 46 Arrow ordering tests, and 8 read-only fixture cases passed |
+| `lance-tree-check` | Passed for normal, build, and dev dependencies |
 
 The tree assertion includes normal, build, and development edges. It checks
 for zero DataFusion core packages, Arrow and Parquet exclusively at 60.2.0,

@@ -38,8 +38,7 @@ impl FragmentSession {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use crate::Dataset;
     use crate::dataset::WriteParams;

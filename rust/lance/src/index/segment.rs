@@ -13,13 +13,66 @@
 use lance_index::registry::{
     plugin_name_from_details_url, scalar_index_details_are_known, scalar_index_version,
 };
+#[cfg(feature = "write")]
+use lance_index::scalar::btree::BTREE_LOOKUP_NAME;
 use lance_index::{INDEX_FILE_NAME, IndexType, pb::VectorIndexDetails};
+#[cfg(feature = "write")]
+use lance_table::format::IndexFile;
 use lance_table::format::IndexMetadata;
 use lance_table::system_index::is_system_index;
 use prost::Name;
+#[cfg(feature = "write")]
+use std::collections::HashSet;
 
+#[cfg(feature = "write")]
+use crate::Error;
 use crate::Result;
 use crate::index::scalar::IndexDetails;
+#[cfg(feature = "write")]
+use roaring::RoaringBitmap;
+
+#[cfg(feature = "write")]
+pub(crate) fn retain_committed_inverted_files(files: &mut Vec<IndexFile>) {
+    files.retain(|file| !lance_index::scalar::inverted::builder::is_staged_path(&file.path));
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn validate_segment_metadata(
+    index_name: &str,
+    segments: &[IndexMetadata],
+) -> Result<()> {
+    if segments.is_empty() {
+        return Err(Error::invalid_input(
+            "CreateIndex: at least one index segment is required".to_string(),
+        ));
+    }
+
+    let mut seen_segment_ids = HashSet::with_capacity(segments.len());
+    let mut covered_fragments = RoaringBitmap::new();
+    for segment in segments {
+        if !seen_segment_ids.insert(segment.uuid) {
+            return Err(Error::invalid_input(format!(
+                "CreateIndex: duplicate segment uuid {} for index '{}'",
+                segment.uuid, index_name
+            )));
+        }
+        let fragment_bitmap = segment.fragment_bitmap.as_ref().ok_or_else(|| {
+            Error::invalid_input(format!(
+                "CreateIndex: segment {} is missing fragment coverage",
+                segment.uuid
+            ))
+        })?;
+        if !covered_fragments.is_disjoint(fragment_bitmap) {
+            return Err(Error::invalid_input(format!(
+                "CreateIndex: overlapping fragment coverage in segment set for index '{}'",
+                index_name
+            )));
+        }
+        covered_fragments |= fragment_bitmap.clone();
+    }
+
+    Ok(())
+}
 
 /// Ask the scalar index plugin whether the parameters of `incoming` segments
 /// let them join `existing` ones (for example, MinHash signatures are only
@@ -51,6 +104,56 @@ pub(crate) fn validate_segment_params_compatible(
         .filter_map(|segment| segment.index_details.as_deref())
         .collect();
     plugin.validate_new_segments_against_existing(&existing_details, &incoming_details)
+}
+
+#[cfg(feature = "write")]
+/// Every segment of one commit must carry index details of the same type;
+/// whether their parameters are compatible is the plugin's call, see
+/// [`validate_segment_params_compatible`].
+pub(crate) fn validate_segment_index_details(
+    index_name: &str,
+    segments: &[IndexMetadata],
+) -> Result<()> {
+    let mut type_url = None::<&str>;
+    for segment in segments {
+        let segment_type_url = segment.index_details.as_ref().ok_or_else(|| {
+            Error::invalid_input(format!(
+                "CreateIndex: segment {} is missing index details",
+                segment.uuid
+            ))
+        })?;
+        match type_url {
+            Some(expected) if expected != segment_type_url.type_url => {
+                return Err(Error::invalid_input(format!(
+                    "CreateIndex: segment set for index '{}' mixes incompatible index detail types",
+                    index_name
+                )));
+            }
+            None => type_url = Some(segment_type_url.type_url.as_str()),
+            Some(_) => {}
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+/// Whether optimize can fold several segments of this kind into one without
+/// rescanning the table: the kinds the single-process optimize merges rather
+/// than rebuilds, vector, BTree, Bitmap, BloomFilter, NGram, MinHash LSH and RTree
+/// (`merge_scalar_indices`), Inverted (`InvertedIndex::merge_segments`), and
+/// LabelList (`merge_label_list_indices`). LabelList's pure merge is supported
+/// even though its ordinary append path cannot merge several old segments with
+/// a new stream.
+pub(crate) fn segment_has_merge_primitive(segment: &IndexMetadata) -> bool {
+    segment_has_vector_details(segment)
+        || segment_has_btree_details(segment)
+        || segment_has_bitmap_details(segment)
+        || segment_has_bloomfilter_details(segment)
+        || segment_has_ngram_details(segment)
+        || segment_has_minhashlsh_details(segment)
+        || segment_has_inverted_details(segment)
+        || segment_has_label_list_details(segment)
 }
 
 /// Detect vector segments while preserving the legacy pre-details fallback.
@@ -96,6 +199,96 @@ pub(crate) fn index_details_have_reader(type_url: &str) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(feature = "write")]
+/// Detect FTS / inverted segments from manifest details.
+///
+/// Unlike vector, inverted segment support was added after index details were
+/// part of the segment contract, so there is no legacy file-name fallback here.
+pub(crate) fn segment_has_inverted_details(segment: &IndexMetadata) -> bool {
+    segment
+        .index_details
+        .as_ref()
+        .is_some_and(|details| details.type_url.ends_with("InvertedIndexDetails"))
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn segment_has_bitmap_details(segment: &IndexMetadata) -> bool {
+    segment
+        .index_details
+        .as_ref()
+        .is_some_and(|details| details.type_url.ends_with("BitmapIndexDetails"))
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn segment_has_bloomfilter_details(segment: &IndexMetadata) -> bool {
+    segment
+        .index_details
+        .as_ref()
+        .is_some_and(|details| details.type_url.ends_with("BloomFilterIndexDetails"))
+}
+
+#[cfg(feature = "write")]
+/// Detect BTree segments, preserving a legacy pre-details fallback.
+pub(crate) fn segment_has_btree_details(segment: &IndexMetadata) -> bool {
+    segment.index_details.as_ref().map_or_else(
+        || {
+            segment
+                .files
+                .as_ref()
+                .is_some_and(|files| files.iter().any(|file| file.path == BTREE_LOOKUP_NAME))
+        },
+        |details| details.type_url.ends_with("BTreeIndexDetails"),
+    )
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn segment_has_zonemap_details(segment: &IndexMetadata) -> bool {
+    segment
+        .index_details
+        .as_ref()
+        .is_some_and(|details| details.type_url.ends_with("ZoneMapIndexDetails"))
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn segment_has_fmindex_details(segment: &IndexMetadata) -> bool {
+    segment
+        .index_details
+        .as_ref()
+        .is_some_and(|details| details.type_url.ends_with("FMIndexDetails"))
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn segment_has_label_list_details(segment: &IndexMetadata) -> bool {
+    segment
+        .index_details
+        .as_ref()
+        .is_some_and(|details| details.type_url.ends_with("LabelListIndexDetails"))
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn segment_has_rtree_details(segment: &IndexMetadata) -> bool {
+    segment
+        .index_details
+        .as_ref()
+        .is_some_and(|details| details.type_url.ends_with("RTreeIndexDetails"))
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn segment_has_minhashlsh_details(segment: &IndexMetadata) -> bool {
+    segment
+        .index_details
+        .as_ref()
+        .is_some_and(|details| details.type_url.ends_with("MinHashLshIndexDetails"))
+}
+
+#[cfg(feature = "write")]
+pub(crate) fn segment_has_ngram_details(segment: &IndexMetadata) -> bool {
+    segment
+        .index_details
+        .as_ref()
+        .is_some_and(|details| details.type_url.ends_with("NGramIndexDetails"))
 }
 
 /// `None` when this build supports the index's version, otherwise the highest

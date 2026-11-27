@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
+#[cfg(feature = "write")]
+pub mod writer;
+
 // Deciding which rows an overlay makes stale needs only fragment and index metadata,
 // so it lives at the table layer; this module resolves the reads that consume it.
 pub use lance_table::format::overlay::staleness::{

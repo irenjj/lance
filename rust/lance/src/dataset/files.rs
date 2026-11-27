@@ -487,8 +487,7 @@ fn build_all_files_batch(
     .map_err(Into::into)
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use crate::Dataset;

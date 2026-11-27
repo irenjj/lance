@@ -132,6 +132,16 @@ impl CachedMapping {
         }
         result
     }
+
+    #[cfg(all(test, feature = "write"))]
+    pub fn uncached(reader: Arc<dyn MappingReader>) -> Arc<Self> {
+        Arc::new(Self {
+            reader,
+            cache: None,
+            grows_on_open: false,
+            accounted_bytes: AtomicUsize::new(0),
+        })
+    }
 }
 
 pub async fn open_mapping(

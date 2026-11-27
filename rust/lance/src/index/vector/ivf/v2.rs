@@ -104,6 +104,8 @@ use super::{IvfIndexPartitionStatistics, IvfIndexStatistics, maybe_centroids_for
 mod partition_search;
 pub mod rabit_scan;
 
+#[cfg(all(test, feature = "write"))]
+use partition_search::balanced_query_ranges;
 use partition_search::{
     BatchPartition, NativeRabitScan, PartitionSearchRequest, PartitionSearchSource,
     PreparedPartition,
@@ -859,6 +861,18 @@ impl PreparedPartitionTracker {
         self.peak.fetch_max(now, Ordering::Relaxed);
         PreparedPartitionGuard(self.clone())
     }
+
+    /// Prepared partitions currently alive.
+    #[cfg(all(test, feature = "write"))]
+    pub(crate) fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+
+    /// Most prepared partitions alive at once over the index's lifetime.
+    #[cfg(all(test, feature = "write"))]
+    pub(crate) fn peak(&self) -> usize {
+        self.peak.load(Ordering::Relaxed)
+    }
 }
 
 struct PreparedPartitionGuard(Arc<PreparedPartitionTracker>);
@@ -1064,6 +1078,10 @@ pub(crate) trait IvfStateEntry: DeepSizeOf + Send + Sync + 'static {
         frag_reuse_index: Option<ResolvedRemapping>,
         context: IvfOpenContext,
     ) -> BoxFuture<'a, Result<Arc<dyn VectorIndex>>>;
+
+    /// Whether the state carries a prebuilt quantizer for its reconstructions.
+    #[cfg(all(test, feature = "write"))]
+    fn has_quantizer(&self) -> bool;
 }
 
 /// Sized wrapper around `Arc<dyn IvfStateEntry>` for use as a cache value.
@@ -1208,6 +1226,11 @@ impl CacheCodecImpl for IvfStateEntryBox {
 }
 
 impl<Q: Quantization + 'static> IvfStateEntry for IvfIndexState<Q> {
+    #[cfg(all(test, feature = "write"))]
+    fn has_quantizer(&self) -> bool {
+        self.quantizer.is_some()
+    }
+
     fn serialize_state(&self, w: &mut CacheEntryWriter<'_>) -> Result<()> {
         let quantizer_metadata_json = serde_json::to_string(&self.metadata)
             .map_err(|e| lance_core::Error::io(format!("IvfIndexState metadata: {e}")))?;
@@ -2252,6 +2275,18 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
         self.origin_latency
     }
 
+    /// Replace the origin latency class so tests can exercise both classes
+    /// over one store in one process.
+    #[cfg(all(test, feature = "write"))]
+    pub(crate) fn with_origin_latency_for_test(
+        mut self,
+        origin_latency: OriginLatencyClass,
+    ) -> Result<Self> {
+        self.origin_latency = origin_latency;
+        self.storage = self.storage.with_origin_latency(origin_latency);
+        Ok(self)
+    }
+
     /// Whether an index keeps the small columns of `storage`'s file
     /// resident in `file_cache`, whatever its origin latency class: when the
     /// setting admits the store (see [`ResidentColumnsSetting::admits`]).
@@ -2344,6 +2379,24 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
         self.storage.resident_store_size()
     }
 
+    /// Replace whether reads keep the small columns resident, so tests can
+    /// open both in one process. Enabling loads the store through the
+    /// index's handle unless it is loaded, as an open that keeps the columns
+    /// resident does: a store of the index's own when the open kept none.
+    /// Disabling also gives the index a store handle of its own, so that it
+    /// never shares the store the open bound.
+    #[cfg(all(test, feature = "write"))]
+    pub(crate) async fn with_resident_columns_for_test(mut self, enabled: bool) -> Result<Self> {
+        if !enabled {
+            self.storage = self
+                .storage
+                .with_resident_columns(ResidentColumns::default());
+        }
+        self.storage = self.storage.with_resident_columns_enabled(enabled);
+        self.storage.load_resident_store(None).await?;
+        Ok(self)
+    }
+
     /// The entry columns an opening index asks its storage for: an IVF_RQ
     /// index reads (and validates) `LANCE_RQ_ENTRY_COLUMNS`, and its storage
     /// resolves them against residency (see
@@ -2361,6 +2414,14 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
     /// [`IvfQuantizationStorage::resident_attach`].
     pub fn resident_attach(&self) -> ResidentAttach {
         self.storage.resident_attach()
+    }
+
+    /// Replace how reads attach the resident rows, so tests can run both
+    /// modes in one process.
+    #[cfg(all(test, feature = "write"))]
+    pub(crate) fn with_resident_attach_for_test(mut self, resident_attach: ResidentAttach) -> Self {
+        self.storage = self.storage.with_resident_attach(resident_attach);
+        self
     }
 
     /// What the index's cache entries hold, resolved when it opened; see
@@ -2384,6 +2445,21 @@ impl<S: IvfSubIndex + 'static, Q: Quantization> IVFIndex<S, Q> {
         Q::quantization_type() == QuantizationType::Rabit
             && S::name() == <FlatIndex as IvfSubIndex>::name()
             && self.storage.entry_columns() == EntryColumns::Codes
+    }
+
+    /// Replace the entry columns the index asks for, so tests can open both
+    /// in one process; the storage still resolves them against residency.
+    #[cfg(all(test, feature = "write"))]
+    pub(crate) fn with_entry_columns_for_test(mut self, entry_columns: EntryColumns) -> Self {
+        self.storage = self.storage.with_entry_columns(entry_columns);
+        self
+    }
+
+    /// Prepared-partition accounting for this index instance; see
+    /// [`PreparedPartitionTracker`].
+    #[cfg(all(test, feature = "write"))]
+    pub(crate) fn prepared_partitions(&self) -> &PreparedPartitionTracker {
+        &self.prepared_partitions
     }
 
     #[instrument(level = "debug", skip(self, metrics))]
@@ -4051,3 +4127,6 @@ async fn reconstruct_typed<S: IvfSubIndex + 'static, Q: Quantization + 'static>(
     index.rabit_scan = rabit_scan;
     Ok(Arc::new(index))
 }
+
+#[cfg(all(test, feature = "write"))]
+pub(crate) mod tests;

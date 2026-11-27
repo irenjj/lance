@@ -722,8 +722,7 @@ pub fn hamming_clustering_from_hashes(
     clustering.into_reader(None)
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use arrow_array::Array;

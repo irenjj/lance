@@ -8,6 +8,8 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::array::{ArrayData, make_array};
+#[cfg(feature = "write")]
+use arrow::compute::concat;
 use arrow_array::types::UInt64Type;
 use arrow_array::{
     Array, FixedSizeListArray, RecordBatch, UInt8Array, UInt64Array,
@@ -22,6 +24,8 @@ use async_trait::async_trait;
 use datafusion_execution::SendableRecordBatchStream;
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
 use lance_arrow::{BufferExt, DataTypeExt, FixedSizeListArrayExt};
+#[cfg(feature = "write")]
+use lance_core::ROW_ID;
 use lance_core::ROW_ID_FIELD;
 use lance_core::deepsize::DeepSizeOf;
 use lance_core::utils::address::RowAddress;
@@ -29,6 +33,8 @@ use lance_core::utils::tokio::spawn_cpu;
 use lance_index::frag_reuse::CompactFragReuseIndex;
 use lance_index::metrics::MetricsCollector;
 use lance_index::vector::ivf::storage::IvfModel;
+#[cfg(feature = "write")]
+use lance_index::vector::pq::storage::ProductQuantizationStorage;
 use lance_index::vector::pq::storage::transpose;
 use lance_index::vector::quantizer::{Quantization, QuantizationType, Quantizer};
 use lance_index::vector::v3::subindex::SubIndexType;
@@ -677,23 +683,78 @@ pub async fn build_pq_model_in_fragments(
     Ok(pq)
 }
 
+#[cfg(feature = "write")]
+pub(crate) fn build_pq_storage(
+    distance_type: DistanceType,
+    row_ids: Arc<dyn Array>,
+    code_array: Vec<Arc<dyn Array>>,
+    pq: ProductQuantizer,
+) -> Result<ProductQuantizationStorage> {
+    let pq_arrs = code_array.iter().map(|a| a.as_ref()).collect::<Vec<_>>();
+    let pq_column = concat(&pq_arrs)?;
+    std::mem::drop(code_array);
+
+    let pq_batch = RecordBatch::try_from_iter_with_nullable(vec![
+        (ROW_ID, row_ids, true),
+        (pq.column(), pq_column, false),
+    ])?;
+    let pq_store = ProductQuantizationStorage::new(
+        pq.codebook.clone(),
+        pq_batch,
+        pq.num_bits,
+        pq.code_dim(),
+        pq.dimension,
+        distance_type,
+        false,
+        // TODO: support auto-remap with frag_reuse_index for HNSW
+        None,
+    )?;
+
+    Ok(pq_store)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(feature = "write")]
+    use std::collections::HashMap;
+    #[cfg(feature = "write")]
+    use std::ops::Range;
     use std::sync::Mutex;
 
+    #[cfg(feature = "write")]
+    use arrow::datatypes::Float32Type;
+    #[cfg(feature = "write")]
+    use arrow_array::RecordBatchIterator;
+    #[cfg(feature = "write")]
+    use arrow_schema::{Field, Schema};
     use lance_core::utils::tempfile::TempObjFile;
+    #[cfg(feature = "write")]
+    use lance_core::utils::tempfile::TempStrDir;
     use lance_io::object_store::ObjectStore;
     use lance_io::traits::Writer;
 
+    #[cfg(feature = "write")]
+    use lance_linalg::kernels::normalize_fsl;
     use object_store::path::Path;
     use tokio::io::AsyncWriteExt;
 
+    #[cfg(feature = "write")]
+    use crate::index::vector::ivf::build_ivf_model;
     use lance_index::metrics::NoOpMetricsCollector;
     use lance_index::vector::DEFAULT_QUERY_PARALLELISM;
 
+    #[cfg(feature = "write")]
+    use lance_index::vector::ivf::IvfBuildParams;
     use lance_select::RowAddrMask;
+    #[cfg(feature = "write")]
+    use lance_testing::datagen::{
+        generate_random_array_with_range, generate_random_array_with_seed,
+    };
+
+    #[cfg(feature = "write")]
+    const DIM: usize = 128;
 
     #[tokio::test]
     async fn empty_legacy_ivf_pq_partition_does_not_read_object_store() {
@@ -733,6 +794,228 @@ mod tests {
             values.as_primitive::<UInt64Type>(),
             &UInt64Array::from_iter_values([11, 12])
         );
+    }
+
+    #[cfg(feature = "write")]
+    async fn generate_dataset(
+        test_uri: &str,
+        range: Range<f32>,
+    ) -> (Dataset, Arc<FixedSizeListArray>) {
+        let vectors = generate_random_array_with_range::<Float32Type>(1000 * DIM, range);
+        let metadata: HashMap<String, String> = vec![("test".to_string(), "ivf_pq".to_string())]
+            .into_iter()
+            .collect();
+
+        let schema = Arc::new(
+            Schema::new(vec![Field::new(
+                "vector",
+                DataType::FixedSizeList(
+                    Arc::new(Field::new("item", DataType::Float32, true)),
+                    DIM as i32,
+                ),
+                true,
+            )])
+            .with_metadata(metadata),
+        );
+        let fsl = Arc::new(FixedSizeListArray::try_new_from_values(vectors, DIM as i32).unwrap());
+        let batch = RecordBatch::try_new(schema.clone(), vec![fsl.clone()]).unwrap();
+
+        let batches = RecordBatchIterator::new(vec![batch].into_iter().map(Ok), schema.clone());
+        (Dataset::write(batches, test_uri, None).await.unwrap(), fsl)
+    }
+
+    #[cfg(feature = "write")]
+    #[tokio::test]
+    async fn test_build_pq_model_l2() {
+        let test_dir = TempStrDir::default();
+        let test_uri = test_dir.as_str();
+
+        let (dataset, _) = generate_dataset(test_uri, 100.0..120.0).await;
+
+        let centroids = generate_random_array_with_range::<Float32Type>(4 * DIM, -1.0..1.0);
+        let fsl = FixedSizeListArray::try_new_from_values(centroids, DIM as i32).unwrap();
+        let ivf = IvfModel::new(fsl, None);
+        let params = PQBuildParams {
+            max_iters: 2,
+            sample_rate: 4,
+            ..PQBuildParams::new(16, 8)
+        };
+        let pq = build_pq_model(&dataset, "vector", DIM, MetricType::L2, &params, Some(&ivf))
+            .await
+            .unwrap();
+
+        assert_eq!(pq.code_dim(), 16);
+        assert_eq!(pq.num_bits, 8);
+        assert_eq!(pq.dimension, DIM);
+
+        let codebook = pq.codebook;
+        assert_eq!(codebook.len(), 256);
+        codebook
+            .values()
+            .as_primitive::<Float32Type>()
+            .values()
+            .iter()
+            .for_each(|v| {
+                assert!((99.0..121.0).contains(v));
+            });
+    }
+
+    #[cfg(feature = "write")]
+    #[tokio::test]
+    async fn test_build_pq_model_rejects_empty_ivf_centroids() {
+        let (dataset, vectors) = generate_dataset("memory://", 100.0..120.0).await;
+        let ivf = IvfModel::new(vectors.as_ref().slice(0, 0), None);
+        let params = PQBuildParams::new(16, 8);
+        let err = build_pq_model(&dataset, "vector", DIM, MetricType::L2, &params, Some(&ivf))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidInput { .. }), "got {err:?}");
+        assert!(
+            err.to_string().contains("nonempty IVF centroids"),
+            "got {err}"
+        );
+    }
+
+    #[cfg(feature = "write")]
+    #[tokio::test]
+    async fn test_build_pq_model_cosine() {
+        let test_dir = TempStrDir::default();
+        let test_uri = test_dir.as_str();
+
+        let (dataset, vectors) = generate_dataset(test_uri, 100.0..120.0).await;
+
+        let ivf_params = IvfBuildParams::new(4);
+        let ivf = build_ivf_model(
+            &dataset,
+            "vector",
+            DIM,
+            MetricType::Cosine,
+            &ivf_params,
+            None,
+            lance_index::progress::noop_progress(),
+        )
+        .await
+        .unwrap();
+        let params = PQBuildParams {
+            max_iters: 2,
+            sample_rate: 4,
+            ..PQBuildParams::new(16, 8)
+        };
+        let pq = build_pq_model(
+            &dataset,
+            "vector",
+            DIM,
+            MetricType::Cosine,
+            &params,
+            Some(&ivf),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(pq.code_dim(), 16);
+        assert_eq!(pq.num_bits, 8);
+        assert_eq!(pq.dimension, DIM);
+
+        let codebook = pq.codebook.clone();
+        assert_eq!(codebook.len(), 256);
+        codebook
+            .values()
+            .as_primitive::<Float32Type>()
+            .values()
+            .iter()
+            .for_each(|v| {
+                assert!((-1.0..1.0).contains(v));
+            });
+
+        let vectors = normalize_fsl(&vectors).unwrap();
+        let row = vectors.slice(0, 1);
+
+        let ivf2 = lance_index::vector::ivf::new_ivf_transformer(
+            ivf.centroids.clone().unwrap(),
+            MetricType::L2,
+            vec![],
+        );
+
+        let residual_query = ivf2.compute_residual(&row).unwrap();
+        let pq_code = pq.quantize(&residual_query).unwrap();
+        let distances = pq
+            .compute_distances(
+                &residual_query.value(0),
+                pq_code.as_fixed_size_list().values().as_primitive(),
+            )
+            .unwrap();
+        assert!(
+            distances.values().iter().all(|&d| d <= 0.001),
+            "distances: {:?}",
+            distances
+        );
+    }
+
+    #[cfg(feature = "write")]
+    #[tokio::test]
+    async fn test_build_pq_model_insufficient_rows_returns_prereq() {
+        let test_dir = TempStrDir::default();
+        let test_uri = test_dir.as_str();
+
+        let dim = 16;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "vector",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                dim as i32,
+            ),
+            false,
+        )]));
+
+        let vectors = generate_random_array_with_seed::<Float32Type>(dim * 10, [11u8; 32]);
+        let fsl = FixedSizeListArray::try_new_from_values(vectors, dim as i32).unwrap();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(fsl)]).unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema.clone());
+        let dataset = Dataset::write(reader, test_uri, None).await.unwrap();
+
+        let params = PQBuildParams::new(16, 8);
+        let err = build_pq_model(&dataset, "vector", dim, MetricType::L2, &params, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::Unprocessable { .. }));
+    }
+
+    #[cfg(feature = "write")]
+    /// The supplied codebook is checked before 2^num_bits is derived, so a
+    /// num_bits that does not fit reports the input rather than overflowing.
+    #[tokio::test]
+    async fn test_build_pq_model_rejects_unrepresentable_num_bits() {
+        let test_dir = TempStrDir::default();
+        let test_uri = test_dir.as_str();
+
+        let dim = 16;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "vector",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                dim as i32,
+            ),
+            false,
+        )]));
+
+        let vectors = generate_random_array_with_seed::<Float32Type>(dim * 10, [11u8; 32]);
+        let fsl = FixedSizeListArray::try_new_from_values(vectors, dim as i32).unwrap();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(fsl)]).unwrap();
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema.clone());
+        let dataset = Dataset::write(reader, test_uri, None).await.unwrap();
+
+        let codebook = Arc::new(generate_random_array_with_seed::<Float32Type>(
+            dim, [12u8; 32],
+        ));
+        let params = PQBuildParams::with_codebook(4, usize::BITS as usize, codebook);
+        let err = build_pq_model(&dataset, "vector", dim, MetricType::L2, &params, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidInput { .. }), "got {err:?}");
+        assert!(err.to_string().contains("not representable"), "got {err}");
     }
 
     struct TestPreFilter {

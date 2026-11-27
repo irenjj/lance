@@ -66,8 +66,7 @@ impl TableProvider for Dataset {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use crate::{dataset::WriteParams, io::exec::LanceScanExec};

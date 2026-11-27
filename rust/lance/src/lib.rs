@@ -35,6 +35,36 @@
 //! }
 //! ```
 
+#![cfg_attr(
+    feature = "write",
+    doc = r#"
+# Create a Dataset
+
+```rust
+# use std::sync::Arc;
+# use tokio::runtime::Runtime;
+# use arrow_array::{RecordBatch, RecordBatchIterator};
+# use arrow_schema::{Schema, Field, DataType};
+use lance::{dataset::WriteParams, Dataset};
+
+# let mut rt = Runtime::new().unwrap();
+# rt.block_on(async {
+#
+# let test_dir = tempfile::tempdir().unwrap();
+# let uri = test_dir.path().to_str().unwrap().to_string();
+let schema = Arc::new(Schema::new(vec![Field::new("test", DataType::Int64, false)]));
+let batches = vec![RecordBatch::new_empty(schema.clone())];
+let reader = RecordBatchIterator::new(
+    batches.into_iter().map(Ok), schema
+);
+
+let write_params = WriteParams::default();
+Dataset::write(reader, &uri, Some(write_params)).await.unwrap();
+# })
+```
+"#
+)]
+
 use arrow_schema::DataType;
 use dataset::builder::DatasetBuilder;
 pub use lance_core::datatypes;

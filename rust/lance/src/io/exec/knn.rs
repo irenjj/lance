@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
+#[cfg(all(test, feature = "write"))]
+use lance_core::utils::row_addr_remap::RowAddrRemap;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -3052,8 +3054,7 @@ impl ExecutionPlan for MultivectorScoringExec {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::adaptive_probe::AutoProbeConfig;
     use super::*;

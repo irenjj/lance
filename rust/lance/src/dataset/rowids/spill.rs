@@ -23,12 +23,20 @@
 //! here share one such file.
 
 use crate::{Dataset, Result};
+#[cfg(feature = "write")]
+use lance_table::format::RowDatasetVersionSequence;
+#[cfg(feature = "write")]
+use lance_table::rowids::RowIdSequence;
+#[cfg(feature = "write")]
+use lance_table_runtime::rowids::CarriedRowLineage;
 use lance_table_runtime::rowids::{self as runtime};
 
 pub use runtime::{
     DEFAULT_INLINE_ROW_LINEAGE_MAX_BYTES, INLINE_ROW_LINEAGE_MAX_BYTES_CONFIG_KEY,
     PlacedRowLineage, RowLineage, SPILL_ROW_LINEAGE_CONFIG_KEY,
 };
+#[cfg(all(test, feature = "write"))]
+pub use runtime::{RowLineagePlan, RowLineageSpill, plan_row_lineage_spill};
 
 /// The largest encoded lineage sequence kept inline, if spilling is enabled.
 pub fn inline_row_lineage_max_bytes(dataset: &Dataset) -> Result<Option<usize>> {
@@ -43,8 +51,18 @@ pub async fn place_row_lineage(
     runtime::place_row_lineage(&dataset.table_view().to_table(), lineage).await
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(feature = "write")]
+pub async fn place_carried_row_lineage(
+    dataset: &Dataset,
+    limit: usize,
+    row_ids: &RowIdSequence,
+    created_at: &RowDatasetVersionSequence,
+) -> Result<CarriedRowLineage> {
+    runtime::place_carried_row_lineage(&dataset.table_view().to_table(), limit, row_ids, created_at)
+        .await
+}
+
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use crate::Error;

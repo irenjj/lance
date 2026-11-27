@@ -38,8 +38,7 @@ pub use match_query::MatchQueryExec;
 pub use phrase::PhraseQueryExec;
 pub use selection::{FTS_SEGMENT_BIND_DURATION_METRIC, FtsIndexMetrics};
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
 
     use datafusion::common::tree_node::TreeNodeRecursion;

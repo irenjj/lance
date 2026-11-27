@@ -9,7 +9,7 @@
 //! - Serializing details as JSON for `describe_indices()`
 //! - Inferring details from index files on disk (fallback for legacy indices)
 
-#[cfg(test)]
+#[cfg(any(test, feature = "write"))]
 use {
     super::{StageParams, VectorIndexParams},
     lance_index::{
@@ -90,7 +90,7 @@ enum CompressionDetailsJson {
     },
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "write"))]
 /// Build a `VectorIndexDetails` proto from build params at index creation time.
 ///
 /// `built_target` is the vectors per partition the build settled on, which
@@ -187,7 +187,7 @@ pub fn vector_index_details_default() -> prost_types::Any {
     prost_types::Any::from_msg(&details).unwrap()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "write"))]
 /// Apply stored runtime hints from `VectorIndexDetails` back into build params.
 ///
 /// Known `lance.*` keys are parsed and applied to the appropriate stage. Unknown
@@ -250,7 +250,18 @@ pub fn apply_runtime_hints(hints: &HashMap<String, String>, params: &mut VectorI
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "write")]
+/// The rows-per-partition target the index was created with, if it was recorded.
+pub fn target_partition_size_from_details(details: &prost_types::Any) -> Option<usize> {
+    let details = details.to_msg::<VectorIndexDetails>().ok()?;
+    (details.target_partition_size > 0).then_some(details.target_partition_size as usize)
+}
+
+#[cfg(any(test, feature = "write"))]
+/// Reconstruct `VectorIndexParams` from a stored `VectorIndexDetails` proto.
+///
+/// Returns `None` for legacy indices (empty details) or if the proto is malformed.
+///
 /// Runtime hints are applied on top of the reconstructed spec.
 // TODO: wire into a general `Dataset::rebuild_index` method so users can
 // regenerate an index from its stored details (e.g. after file corruption).

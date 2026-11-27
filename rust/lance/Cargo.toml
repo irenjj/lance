@@ -153,8 +153,13 @@ name = "readonly_baseline"
 [[test]]
 name = "arrow_ordering"
 
+[[test]]
+name = "memory_components"
+required-features = ["metrics", "write"]
+
 [features]
 default = ["aws", "azure", "gcp", "oss", "huggingface", "tencent", "tos", "goosefs"]
+write = []
 backtrace = ["lance-core/backtrace"]
 fp16kernels = ["lance-linalg/fp16kernels"]
 # Prevent dynamic linking of lzma, which comes from datafusion
@@ -179,6 +184,254 @@ update-join-bench = []
 # Compile the RocksDB comparison arm of the (disabled) mem_wal_kv_point_lookup
 # bench. Commented out so it stays out of CI's all-features build.
 # bench-rocksdb = ["dep:rocksdb"]
+
+[[bin]]
+name = "lq"
+required-features = ["cli", "write"]
+
+[[bin]]
+name = "fm_contains_bench"
+required-features = ["cli", "write"]
+
+[[bin]]
+name = "fm_index_tool"
+required-features = ["cli", "write"]
+
+[[bench]]
+name = "scalar_index"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "membership_planning"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "index_visibility"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "regex_ngram"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "merge_insert"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "update_join"
+harness = false
+required-features = ["update-join-bench", "write"]
+
+[[bench]]
+name = "scan"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "cdf"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "s3_file_reader_diagnostics"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "count_pushdown"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "list_structure"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "stable_row_id_limit"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "vector_index"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "ivf_pq"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "nullable_vector_training"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "streaming_ivf_training"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "take"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "take_blob"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "random_access"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "fts_search"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "scalar_prefilter"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "vector_throughput"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "distributed_vector_build"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "frag_reuse"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "hnsw_auto_remap"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_write"
+path = "benches/mem_wal/write/mem_wal_write.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "memtable_read"
+path = "benches/mem_wal/read/memtable_read.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_point_lookup_bench"
+path = "benches/mem_wal/point_lookup/mem_wal_point_lookup_bench.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_vector_bench"
+path = "benches/mem_wal/vector/mem_wal_vector_bench.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_replay"
+path = "benches/mem_wal/write/mem_wal_replay.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_index_micro"
+path = "benches/mem_wal/vector/mem_wal_index_micro.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_recall_hnsw"
+path = "benches/mem_wal/vector/hnsw/mem_wal_recall_hnsw.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_hnsw_bench"
+path = "benches/mem_wal/vector/hnsw/mem_wal_hnsw_bench.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_shard_writer_backpressure"
+path = "benches/mem_wal/write/mem_wal_shard_writer_backpressure.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_fineweb_fts"
+path = "benches/mem_wal/fts/mem_wal_fineweb_fts.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_fts_bench"
+path = "benches/mem_wal/fts/mem_wal_fts_bench.rs"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "mem_wal_fts_read_bench"
+path = "benches/mem_wal/fts/mem_wal_fts_read_bench.rs"
+harness = false
+required-features = ["write"]
+
+# MemTable KV point-lookup benchmark (Lance vs RocksDB). Disabled as a build
+# target: it needs the optional `rocksdb` dep (bundled librocksdb C++, needs
+# libclang) which CI's all-features build can't compile. To run it, uncomment
+# this entry plus the `rocksdb` dependency and the `bench-rocksdb` feature.
+# [[bench]]
+# name = "mem_wal_kv_point_lookup"
+# path = "benches/mem_wal/kv/mem_wal_kv_point_lookup.rs"
+# harness = false
+
+[[bench]]
+name = "manifest_commit"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "rowid_spill"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "concurrent_append"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "hamming"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "hamming_ivf_training"
+harness = false
+required-features = ["write"]
+
+[[bench]]
+name = "cleanup"
+harness = false
+required-features = ["write"]
 
 [lints]
 workspace = true

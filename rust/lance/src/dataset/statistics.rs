@@ -307,8 +307,7 @@ impl<'a> DatasetStatistics<'a> {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;

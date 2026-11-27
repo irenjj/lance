@@ -96,6 +96,8 @@ pub(super) fn v0_segment_cache_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "write")]
+    use crate::dataset::index::frag_reuse::tests::{index_covering, reuse_version};
     use lance_table::system_index::frag_reuse::FragReuseVersion;
     use roaring::RoaringBitmap;
 

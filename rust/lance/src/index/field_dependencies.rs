@@ -14,6 +14,8 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+#[cfg(any(test, feature = "write"))]
+use lance_core::datatypes::Schema;
 use lance_index::scalar::registry::ScalarIndexPlugin;
 use lance_table::format::IndexMetadata;
 
@@ -88,38 +90,7 @@ fn resolve_input_field_ids<'a>(
     ))
 }
 
-fn validate_additional_fields(fields: &[i32], additional: &[i32]) -> Result<()> {
-    let mut seen = HashSet::with_capacity(fields.len());
-    if let Some(id) = fields.iter().find(|id| !seen.insert(**id)) {
-        return Err(Error::invalid_input(format!(
-            "index field declaration {fields:?} repeats field {id}"
-        )));
-    }
-    let mut seen = HashSet::with_capacity(additional.len());
-    for id in additional {
-        if *id < 0 || !seen.insert(*id) {
-            return Err(Error::invalid_input(format!(
-                "index additional fields {additional:?} must be unique user field IDs; invalid field {id}"
-            )));
-        }
-        if !fields.contains(id) {
-            return Err(Error::invalid_input(format!(
-                "index additional field {id} is absent from its field declaration {fields:?}"
-            )));
-        }
-    }
-    if fields.first().is_none_or(|id| additional.contains(id)) {
-        return Err(Error::invalid_input(format!(
-            "index additional fields {additional:?} consume the primary input of {fields:?}"
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-use lance_core::datatypes::Schema;
-
-#[cfg(test)]
+#[cfg(any(test, feature = "write"))]
 /// Persist additional dependencies after the input columns for a newly built index.
 /// The plugin must already have recorded any dataset field IDs in its details.
 pub fn fields_with_dependencies(
@@ -146,6 +117,34 @@ pub fn fields_with_dependencies(
         }
     }
     Ok(fields)
+}
+
+fn validate_additional_fields(fields: &[i32], additional: &[i32]) -> Result<()> {
+    let mut seen = HashSet::with_capacity(fields.len());
+    if let Some(id) = fields.iter().find(|id| !seen.insert(**id)) {
+        return Err(Error::invalid_input(format!(
+            "index field declaration {fields:?} repeats field {id}"
+        )));
+    }
+    let mut seen = HashSet::with_capacity(additional.len());
+    for id in additional {
+        if *id < 0 || !seen.insert(*id) {
+            return Err(Error::invalid_input(format!(
+                "index additional fields {additional:?} must be unique user field IDs; invalid field {id}"
+            )));
+        }
+        if !fields.contains(id) {
+            return Err(Error::invalid_input(format!(
+                "index additional field {id} is absent from its field declaration {fields:?}"
+            )));
+        }
+    }
+    if fields.first().is_none_or(|id| additional.contains(id)) {
+        return Err(Error::invalid_input(format!(
+            "index additional fields {additional:?} consume the primary input of {fields:?}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

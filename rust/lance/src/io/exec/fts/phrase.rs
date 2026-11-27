@@ -634,8 +634,7 @@ impl ExecutionPlan for PhraseQueryExec {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use std::sync::Arc;

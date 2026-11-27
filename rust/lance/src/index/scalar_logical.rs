@@ -491,8 +491,7 @@ pub async fn open_scalar_index_segments(
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use std::collections::BTreeSet;
     use std::ops::Bound;

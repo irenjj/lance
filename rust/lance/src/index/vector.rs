@@ -4,8 +4,20 @@
 //! Vector Index for Fast Approximate Nearest Neighbor (ANN) Search
 //!
 
+#[cfg(feature = "write")]
+use lance_core::utils::{address::RowAddress, row_addr_remap::RowAddrRemap};
+#[cfg(feature = "write")]
+use lance_index::scalar::RowAddrTranslator;
+#[cfg(feature = "write")]
+use roaring::RoaringBitmap;
 use std::sync::Arc;
 use std::{any::Any, collections::HashMap};
+
+#[cfg(feature = "write")]
+mod bounded_partition_stream;
+
+#[cfg(feature = "write")]
+pub mod builder;
 
 pub mod dedup;
 pub(crate) mod details;
@@ -15,18 +27,50 @@ pub mod pq;
 pub mod utils;
 
 use self::{ivf::*, pq::PQIndex};
+#[cfg(feature = "write")]
+use arrow_array::Array;
+#[cfg(feature = "write")]
+use arrow_array::cast::AsArray;
+#[cfg(feature = "write")]
+use arrow_schema::DataType;
 use arrow_schema::Schema;
+#[cfg(feature = "write")]
+use builder::{IvfIndexBuilder, VectorIndexBuildSummary};
 use datafusion_physical_plan::SendableRecordBatchStream;
 use datafusion_physical_plan::stream::RecordBatchStreamAdapter;
+#[cfg(feature = "write")]
+use futures::TryStreamExt;
 use futures::stream;
 use lance_file::versions::v1::reader::FileReader as V1FileReader;
 use lance_index::frag_reuse::CompactFragReuseIndex;
 use lance_index::metrics::NoOpMetricsCollector;
+#[cfg(feature = "write")]
+use lance_index::optimize::OptimizeOptions;
+#[cfg(feature = "write")]
+use lance_index::progress::{IndexBuildProgress, noop_progress};
+#[cfg(feature = "write")]
+use lance_index::vector::bq::builder::RabitQuantizer;
+#[cfg(feature = "write")]
+use lance_index::vector::bq::validate_supported_rq_num_bits;
 use lance_index::vector::bq::{RQBuildParams, RQRotationType};
+#[cfg(feature = "write")]
+use lance_index::vector::flat::index::{FlatBinQuantizer, FlatIndex, FlatQuantizer};
+#[cfg(feature = "write")]
+use lance_index::vector::hnsw::HNSW;
+#[cfg(feature = "write")]
+use lance_index::vector::ivf::builder::recommended_num_partitions;
 use lance_index::vector::ivf::storage::IvfModel;
 use object_store::path::Path;
 
+#[cfg(feature = "write")]
+use lance_arrow::FixedSizeListArrayExt;
 use lance_index::vector::pq::ProductQuantizer;
+#[cfg(feature = "write")]
+use lance_index::vector::quantizer::QuantizationType;
+#[cfg(feature = "write")]
+use lance_index::vector::v3::shuffler::{Shuffler, create_owned_ivf_shuffler};
+#[cfg(feature = "write")]
+use lance_index::vector::v3::subindex::SubIndexType;
 use lance_index::vector::{
     VectorIndex,
     hnsw::{
@@ -42,17 +86,72 @@ use lance_io::object_reader::LazyReader;
 use lance_io::object_store::ObjectStore;
 use lance_io::traits::Reader;
 use lance_linalg::distance::*;
+#[cfg(feature = "write")]
+use lance_table::format::IndexFile;
 use lance_table::format::IndexMetadata;
 use serde::Serialize;
 use tracing::instrument;
+#[cfg(feature = "write")]
+use utils::get_vector_type;
 use uuid::Uuid;
 
 use super::IndexParams;
+#[cfg(feature = "write")]
+use super::loading::DatasetIndexInternalExt;
+#[cfg(feature = "write")]
+use crate::dataset::index::dataset_format_version;
+#[cfg(feature = "write")]
+use crate::dataset::transaction::{Operation, Transaction};
 use crate::{Error, Result, dataset::Dataset};
 
 use lance_index::pb::vector_index_stage::Stage;
 
+#[cfg(all(test, feature = "write"))]
+mod fixture_test;
+
 pub const LANCE_VECTOR_INDEX: &str = "__lance_vector_index";
+
+#[cfg(feature = "write")]
+/// Restrict a row-address remap to the fragments owned by one physical segment.
+///
+/// A segment may still contain rows from fragments it no longer owns. Those
+/// rows must be removed before its remapped output can be merged without the
+/// source segment's old fragment filter.
+fn remap_for_owned_fragments(
+    mapping: Arc<RowAddrRemap>,
+    row_addrs: impl IntoIterator<Item = u64>,
+    owned_fragments: &RoaringBitmap,
+) -> RowAddrRemap {
+    let removed_fragments = row_addrs
+        .into_iter()
+        .filter_map(|row_addr| {
+            let fragment_id = RowAddress::from(row_addr).fragment_id();
+            (!owned_fragments.contains(fragment_id)).then_some(fragment_id)
+        })
+        .collect();
+    RowAddrRemap::with_removed_fragments(mapping, removed_fragments)
+}
+
+#[cfg(feature = "write")]
+async fn resolve_shared_remap(
+    translator: &RowAddrTranslator,
+    row_addrs: impl IntoIterator<Item = u64>,
+) -> Result<Arc<RowAddrRemap>> {
+    match translator {
+        RowAddrTranslator::Sync(mapping) => Ok(mapping.clone()),
+        _ => Ok(Arc::new(translator.resolve(row_addrs).await?.into_owned())),
+    }
+}
+
+#[cfg(feature = "write")]
+fn has_unowned_fragment_rows(
+    row_addrs: impl IntoIterator<Item = u64>,
+    owned_fragments: &RoaringBitmap,
+) -> bool {
+    row_addrs
+        .into_iter()
+        .any(|row_addr| !owned_fragments.contains(RowAddress::from(row_addr).fragment_id()))
+}
 
 /// A materialized snapshot of one logical vector index and all of its segments.
 #[derive(Debug)]
@@ -143,6 +242,13 @@ impl LogicalVectorIndex {
 impl<'a> LogicalIvfView<'a> {
     pub(crate) fn indices(&self) -> impl ExactSizeIterator<Item = &Arc<dyn VectorIndex>> + '_ {
         self.logical_index.iter().map(|(_, index)| index)
+    }
+
+    #[cfg(feature = "write")]
+    pub(crate) fn segments(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&IndexMetadata, &Arc<dyn VectorIndex>)> + '_ {
+        self.logical_index.iter()
     }
 
     /// Returns the partition count for each segment in this IVF index.
@@ -503,12 +609,1491 @@ impl IndexParams for VectorIndexParams {
     }
 }
 
+#[cfg(feature = "write")]
+/// Whether `column` holds at least `minimum` vectors to train a quantizer from.
+///
+/// The metadata-only row total settles anything already short of the floor, so
+/// the validity count runs only where its answer can change the verdict.
+pub async fn has_vectors_to_train(dataset: &Dataset, column: &str, minimum: usize) -> Result<bool> {
+    let total = dataset.count_rows(None).await?;
+    if total < minimum && !is_multivector(dataset, column)? {
+        return Ok(false);
+    }
+    Ok(count_trainable_vectors(dataset, column, total, minimum).await? >= minimum)
+}
+
+#[cfg(feature = "write")]
+/// Vectors in `column` available to train from.
+///
+/// A multivector row holds a list, so its rows bound the vectors from neither
+/// side — ten rows can carry a thousand, and an empty list carries none. Those
+/// are summed from the lists themselves; everything else counts the rows that
+/// hold a vector. Both callers compare the count with a threshold, so `enough`
+/// stops the walk as soon as the answer is settled.
+pub(crate) async fn count_trainable_vectors(
+    dataset: &Dataset,
+    column: &str,
+    total_rows: usize,
+    enough: usize,
+) -> Result<usize> {
+    let is_multivector = is_multivector(dataset, column)?;
+    if !is_multivector
+        && dataset
+            .schema()
+            .field(column)
+            .is_some_and(|field| !field.nullable)
+    {
+        return Ok(total_rows);
+    }
+    if enough == 0 {
+        return Ok(0);
+    }
+
+    let mut scanner = dataset.scan();
+    scanner.project(&[column])?;
+    // These callers need a threshold, not a full count. Bound prefetch so a
+    // small training floor does not schedule reads from the rest of the table.
+    // Keep batches large enough to also scan sparse or all-null inputs efficiently.
+    scanner
+        .batch_size(1024)
+        .batch_readahead(1)
+        .fragment_readahead(1);
+    let mut batches = scanner.try_into_stream().await?;
+    let mut vectors = 0_usize;
+    while let Some(batch) = batches.try_next().await? {
+        let array = utils::get_column_from_batch(&batch, column)?;
+        if is_multivector {
+            let lists = array.as_list::<i32>();
+            for row in 0..lists.len() {
+                if lists.is_null(row) {
+                    continue;
+                }
+                // Null vectors inside a non-null list cannot be trained on.
+                let row_vectors = lists.value(row);
+                vectors = vectors.saturating_add(row_vectors.len() - row_vectors.null_count());
+            }
+        } else {
+            vectors = vectors.saturating_add(array.len() - array.null_count());
+        }
+        if vectors >= enough {
+            return Ok(vectors);
+        }
+    }
+    Ok(vectors)
+}
+
+#[cfg(feature = "write")]
+fn is_multivector(dataset: &Dataset, column: &str) -> Result<bool> {
+    let (vector_type, _) = get_vector_type(dataset.schema(), column)?;
+    Ok(matches!(vector_type, DataType::List(_)))
+}
+
+#[cfg(feature = "write")]
+/// The partition count a whole-table build can train.
+///
+/// A partition's centroid is what search ranks to choose partitions, so one
+/// built from a handful of vectors prunes nothing while still paying the
+/// quantizer's precision loss. The vectors available therefore cap the count,
+/// at `vectors_per_partition` each.
+async fn supported_num_partitions(
+    dataset: &Dataset,
+    column: &str,
+    stages: &[StageParams],
+    requested: usize,
+    mode: &str,
+) -> Result<usize> {
+    let total = dataset.count_rows(None).await?;
+    let enough = vectors_for_partitions(stages, requested);
+    let vectors = count_trainable_vectors(dataset, column, total, enough).await?;
+    if vectors >= enough {
+        return Ok(requested);
+    }
+
+    let supported = match vectors_per_partition(stages) {
+        Some(target) => requested.min(recommended_num_partitions(vectors, target)),
+        None => requested.min(vectors).max(1),
+    };
+    if supported < requested {
+        log::warn!(
+            "{mode}: training {supported} of the {requested} requested IVF partitions; \
+             column '{column}' holds {vectors} vectors"
+        );
+    }
+    Ok(supported)
+}
+
+#[cfg(feature = "write")]
+/// Vectors needed before `partitions` can each train a quantizer of their own.
+///
+/// The upper edge of the reduced-partition band: below this a build trains
+/// fewer partitions than asked for.
+fn vectors_for_partitions(stages: &[StageParams], partitions: usize) -> usize {
+    partitions.saturating_mul(vectors_per_partition(stages).unwrap_or(1))
+}
+
+#[cfg(feature = "write")]
+/// The vectors one partition's centroid should be fitted on, or `None` when the
+/// index stores vectors uncompressed.
+///
+/// A codebook's precision loss is paid on every vector, so a centroid fitted on
+/// a handful prunes nothing and still costs it. Without a codebook there is no
+/// precision to lose, and KMeans needing a vector per centroid is the only
+/// limit.
+fn vectors_per_partition(stages: &[StageParams]) -> Option<usize> {
+    vector_quantizer_minimum_rows(stages)?;
+    // IVF training fits each centroid on `sample_rate` vectors, which is also
+    // where KMeans starts warning (`k * 256` at the default rate). That number
+    // belongs to the IVF stage: an 8-bit codebook holds the same 256 entries by
+    // coincidence, and a 4-bit one asking only 16 vectors per partition would
+    // train centroids that prune nothing.
+    Some(
+        stages
+            .iter()
+            .find_map(|stage| match stage {
+                StageParams::Ivf(ivf) => Some(ivf.sample_rate),
+                _ => None,
+            })
+            .unwrap_or_else(|| IvfBuildParams::default().sample_rate)
+            .max(1),
+    )
+}
+
 /// Rows a PQ codebook needs before it can be trained.
 ///
 /// One row per code, which is `2^num_bits` — 256 at the default 8 bits, and not
 /// 256 at any other setting. `None` when the width does not fit a `usize`.
 pub fn pq_quantizer_minimum_rows(num_bits: usize) -> Option<usize> {
     1_usize.checked_shl(num_bits as u32)
+}
+
+#[cfg(feature = "write")]
+/// Rows a vector index's quantizer needs before it can be trained.
+///
+/// `None` for an index type whose stages name no quantizer with a row floor.
+pub(crate) fn vector_quantizer_minimum_rows(stages: &[StageParams]) -> Option<usize> {
+    stages.iter().find_map(|stage| match stage {
+        // A supplied codebook is what training would have produced, so the
+        // build needs no vectors to fit one.
+        StageParams::PQ(pq) if pq.codebook.is_none() => pq_quantizer_minimum_rows(pq.num_bits),
+        _ => None,
+    })
+}
+
+#[cfg(feature = "write")]
+/// Prepare the shared build inputs used by both direct local builds and
+/// staged shard builds.
+///
+/// These paths emit different file layouts, but they follow the same rules for
+/// validating the vector column, deriving the effective index type, sizing IVF
+/// partitions, and constructing the shuffler.
+///
+/// The returned shuffler owns the scratch directory it shuffles into, so callers
+/// do not have to keep a guard alive for the build.
+async fn prepare_vector_segment_build(
+    dataset: &Dataset,
+    column: &str,
+    params: &VectorIndexParams,
+    progress: Arc<dyn IndexBuildProgress>,
+    mode: &str,
+    require_precomputed_ivf: bool,
+    fragment_ids: Option<&[u32]>,
+) -> Result<(DataType, IndexType, IvfBuildParams, Box<dyn Shuffler>)> {
+    let stages = &params.stages;
+
+    if stages.is_empty() {
+        return Err(Error::index(format!("{mode}: must have at least 1 stage")));
+    }
+
+    let StageParams::Ivf(ivf_params0) = &stages[0] else {
+        return Err(Error::index(format!(
+            "{mode}: invalid stages: {:?}",
+            stages
+        )));
+    };
+
+    if ivf_params0.target_partition_size == Some(0) {
+        return Err(Error::invalid_input(
+            "target_partition_size must be greater than zero",
+        ));
+    }
+
+    if require_precomputed_ivf && ivf_params0.centroids.is_none() {
+        return Err(Error::index(format!(
+            "{mode}: missing precomputed IVF centroids; please provide \
+                 IvfBuildParams.centroids for distributed segment build"
+        )));
+    }
+
+    let (vector_type, element_type) = get_vector_type(dataset.schema(), column)?;
+    if let DataType::List(_) = vector_type
+        && params.metric_type != DistanceType::Cosine
+    {
+        return Err(Error::index(format!(
+            "{mode}: multivector type supports only cosine distance"
+        )));
+    }
+
+    let index_type = params.index_type();
+    if matches!(index_type, IndexType::IvfRq | IndexType::IvfHnswRq) {
+        let Some(StageParams::RQ(rq_params)) = stages.last() else {
+            return Err(Error::index(format!(
+                "{mode}: invalid stages: {:?}",
+                stages
+            )));
+        };
+        validate_supported_rq_num_bits(rq_params.num_bits)?;
+    }
+
+    let num_partitions = match (ivf_params0.num_partitions, ivf_params0.centroids.as_ref()) {
+        (Some(num_partitions), Some(centroids)) if num_partitions != centroids.len() => {
+            return Err(Error::index(format!(
+                "{mode}: num_partitions {} does not match precomputed IVF centroids length {}",
+                num_partitions,
+                centroids.len()
+            )));
+        }
+        (Some(num_partitions), Some(_)) => num_partitions,
+        // A partition's centroid is what search ranks to choose partitions, so
+        // one built from a handful of vectors prunes nothing and still costs
+        // the quantizer's precision. So the vectors available cap how many
+        // partitions a whole-table build trains, at the IVF sample rate each.
+        //
+        // A fragment subset keeps the count it was given: the segments of one
+        // logical index have to agree on it.
+        (Some(requested), None) if fragment_ids.is_none() => {
+            supported_num_partitions(dataset, column, stages, requested, mode).await?
+        }
+        (Some(num_partitions), None) => num_partitions,
+        (None, Some(centroids)) => centroids.len(),
+        (None, None) => {
+            let target_partition_size = ivf_params0
+                .target_partition_size
+                .unwrap_or_else(|| index_type.target_partition_size());
+            if target_partition_size == 0 {
+                return Err(Error::invalid_input(
+                    "target_partition_size must be greater than zero",
+                ));
+            }
+            let num_rows = match fragment_ids {
+                Some(fragment_ids) => dataset.count_rows_in_fragments(fragment_ids).await?,
+                None => dataset.count_rows(None).await?,
+            };
+            recommended_num_partitions(num_rows, target_partition_size)
+        }
+    };
+    let mut ivf_params = ivf_params0.clone();
+    ivf_params.num_partitions = Some(num_partitions);
+
+    let format_version = dataset_format_version(dataset);
+    let shuffler = create_owned_ivf_shuffler(num_partitions, format_version, Some(progress))?;
+
+    Ok((element_type, index_type, ivf_params, shuffler))
+}
+
+#[cfg(feature = "write")]
+/// Build a Distributed Vector Index for specific fragments
+#[allow(clippy::too_many_arguments)]
+#[instrument(level = "debug", skip(dataset))]
+pub(crate) async fn build_distributed_vector_index(
+    dataset: &Dataset,
+    column: &str,
+    _name: &str,
+    uuid: Uuid,
+    params: &VectorIndexParams,
+    frag_reuse_index: Option<Arc<CompactFragReuseIndex>>,
+    fragment_ids: &[u32],
+    progress: Arc<dyn IndexBuildProgress>,
+) -> Result<(Uuid, Vec<IndexFile>)> {
+    let (element_type, index_type, ivf_params, shuffler) = prepare_vector_segment_build(
+        dataset,
+        column,
+        params,
+        progress.clone(),
+        "Build Distributed Vector Index",
+        true,
+        Some(fragment_ids),
+    )
+    .await?;
+    let stages = &params.stages;
+
+    let ivf_centroids = ivf_params
+        .centroids
+        .as_ref()
+        .expect("precomputed IVF centroids required for distributed indexing; checked above")
+        .as_ref()
+        .clone();
+
+    let filtered_dataset = dataset.clone();
+
+    let segment_uuid = uuid;
+    let index_dir = dataset.indices_dir().join(segment_uuid.to_string());
+
+    let fragment_filter = fragment_ids.to_vec();
+
+    let make_ivf_model = || IvfModel::new(ivf_centroids.clone(), None);
+
+    let make_global_pq = |pq_params: &PQBuildParams| -> Result<ProductQuantizer> {
+        if pq_params.codebook.is_none() {
+            return Err(Error::index(
+                "Build Distributed Vector Index: missing precomputed PQ codebook; \
+            please provide PQBuildParams.codebook for distributed indexing"
+                    .to_string(),
+            ));
+        }
+
+        let dim = crate::index::vector::utils::get_vector_dim(filtered_dataset.schema(), column)?;
+
+        let pre_codebook = pq_params
+            .codebook
+            .clone()
+            .expect("checked above that PQ codebook is present");
+        lance_index::vector::pq::validate_supplied_codebook(
+            pre_codebook.len(),
+            dim,
+            pq_params.num_sub_vectors,
+            pq_params.num_bits,
+        )?;
+        let (_, value_type) =
+            crate::index::vector::utils::get_vector_type(filtered_dataset.schema(), column)?;
+        lance_index::vector::pq::validate_codebook_value_type(
+            pre_codebook.data_type(),
+            &value_type,
+        )?;
+        let codebook_fsl =
+            arrow_array::FixedSizeListArray::try_new_from_values(pre_codebook, dim as i32)?;
+
+        // Codes go to the nearest codeword by L2 for every metric, as in the
+        // single-node build; search takes the metric from the index metadata.
+        Ok(ProductQuantizer::new(
+            pq_params.num_sub_vectors,
+            pq_params.num_bits as u32,
+            dim,
+            codebook_fsl,
+            MetricType::L2,
+        ))
+    };
+
+    match index_type {
+        IndexType::IvfFlat => match element_type {
+            DataType::Float16 | DataType::Float32 | DataType::Float64 => {
+                let ivf_model = make_ivf_model();
+
+                let summary = IvfIndexBuilder::<FlatIndex, FlatQuantizer>::new(
+                    filtered_dataset,
+                    column.to_owned(),
+                    index_dir.clone(),
+                    params.metric_type,
+                    shuffler,
+                    Some(ivf_params),
+                    Some(()),
+                    (),
+                    frag_reuse_index,
+                )?
+                .with_ivf(ivf_model)
+                .with_fragment_filter(fragment_filter)
+                .with_progress(progress.clone())
+                .build()
+                .await?;
+                return Ok((segment_uuid, summary.files));
+            }
+            DataType::UInt8 => {
+                let ivf_model = make_ivf_model();
+
+                let summary = IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new(
+                    filtered_dataset,
+                    column.to_owned(),
+                    index_dir.clone(),
+                    params.metric_type,
+                    shuffler,
+                    Some(ivf_params),
+                    Some(()),
+                    (),
+                    frag_reuse_index,
+                )?
+                .with_ivf(ivf_model)
+                .with_fragment_filter(fragment_filter)
+                .with_progress(progress.clone())
+                .build()
+                .await?;
+                return Ok((segment_uuid, summary.files));
+            }
+            _ => {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid data type: {:?}",
+                    element_type
+                )));
+            }
+        },
+
+        IndexType::IvfPq => {
+            let len = stages.len();
+            let StageParams::PQ(pq_params) = &stages[len - 1] else {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+
+            match params.version {
+                IndexFileVersion::Legacy => {
+                    return Err(Error::index(
+                        "Distributed indexing does not support legacy IVF_PQ format".to_string(),
+                    ));
+                }
+                IndexFileVersion::V3 => {
+                    let ivf_model = make_ivf_model();
+                    let global_pq = make_global_pq(pq_params)?;
+
+                    let summary = IvfIndexBuilder::<FlatIndex, ProductQuantizer>::new(
+                        filtered_dataset,
+                        column.to_owned(),
+                        index_dir.clone(),
+                        params.metric_type,
+                        shuffler,
+                        Some(ivf_params),
+                        Some(pq_params.clone()),
+                        (),
+                        frag_reuse_index,
+                    )?
+                    .with_ivf(ivf_model)
+                    .with_quantizer(global_pq)
+                    // For distributed shards, keep PQ codes in row-major layout.
+                    // A single transpose is performed in the distributed merge stage.
+                    .with_transpose(false)
+                    .with_fragment_filter(fragment_filter)
+                    .with_progress(progress.clone())
+                    .build()
+                    .await?;
+                    return Ok((segment_uuid, summary.files));
+                }
+            }
+        }
+
+        IndexType::IvfSq => {
+            let StageParams::SQ(sq_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+            let summary = IvfIndexBuilder::<FlatIndex, ScalarQuantizer>::new(
+                filtered_dataset,
+                column.to_owned(),
+                index_dir.clone(),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(sq_params.clone()),
+                (),
+                frag_reuse_index,
+            )?
+            .with_fragment_filter(fragment_filter)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            return Ok((segment_uuid, summary.files));
+        }
+
+        IndexType::IvfHnswFlat => {
+            let StageParams::Hnsw(hnsw_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+
+            match element_type {
+                DataType::UInt8 => {
+                    let summary = IvfIndexBuilder::<HNSW, FlatBinQuantizer>::new(
+                        filtered_dataset,
+                        column.to_owned(),
+                        index_dir.clone(),
+                        params.metric_type,
+                        shuffler,
+                        Some(ivf_params),
+                        Some(()),
+                        hnsw_params.clone(),
+                        frag_reuse_index,
+                    )?
+                    .with_fragment_filter(fragment_filter)
+                    .with_progress(progress.clone())
+                    .build()
+                    .await?;
+                    return Ok((segment_uuid, summary.files));
+                }
+                _ => {
+                    let summary = IvfIndexBuilder::<HNSW, FlatQuantizer>::new(
+                        filtered_dataset,
+                        column.to_owned(),
+                        index_dir.clone(),
+                        params.metric_type,
+                        shuffler,
+                        Some(ivf_params),
+                        Some(()),
+                        hnsw_params.clone(),
+                        frag_reuse_index,
+                    )?
+                    .with_fragment_filter(fragment_filter)
+                    .with_progress(progress.clone())
+                    .build()
+                    .await?;
+                    return Ok((segment_uuid, summary.files));
+                }
+            }
+        }
+
+        IndexType::IvfHnswPq => {
+            let StageParams::Hnsw(hnsw_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+            let StageParams::PQ(pq_params) = &stages[2] else {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+
+            let ivf_model = make_ivf_model();
+            let global_pq = make_global_pq(pq_params)?;
+
+            let summary = IvfIndexBuilder::<HNSW, ProductQuantizer>::new(
+                filtered_dataset,
+                column.to_owned(),
+                index_dir.clone(),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(pq_params.clone()),
+                hnsw_params.clone(),
+                frag_reuse_index,
+            )?
+            .with_ivf(ivf_model)
+            .with_quantizer(global_pq)
+            // For distributed shards, keep PQ codes in row-major layout.
+            // A single transpose is performed in the distributed merge stage.
+            .with_transpose(false)
+            .with_fragment_filter(fragment_filter)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            return Ok((segment_uuid, summary.files));
+        }
+
+        IndexType::IvfHnswSq => {
+            let StageParams::Hnsw(hnsw_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+            let StageParams::SQ(sq_params) = &stages[2] else {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+            let summary = IvfIndexBuilder::<HNSW, ScalarQuantizer>::new(
+                filtered_dataset,
+                column.to_owned(),
+                index_dir.clone(),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(sq_params.clone()),
+                hnsw_params.clone(),
+                frag_reuse_index,
+            )?
+            .with_fragment_filter(fragment_filter)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            return Ok((segment_uuid, summary.files));
+        }
+
+        IndexType::IvfHnswRq => {
+            let [
+                _,
+                StageParams::Hnsw(hnsw_params),
+                StageParams::RQ(rq_params),
+            ] = stages.as_slice()
+            else {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid stages: {stages:?}"
+                )));
+            };
+            let ivf_model = make_ivf_model();
+            let summary = IvfIndexBuilder::<HNSW, RabitQuantizer>::new(
+                filtered_dataset,
+                column.to_owned(),
+                index_dir.clone(),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(rq_params.clone()),
+                hnsw_params.clone(),
+                frag_reuse_index,
+            )?
+            .with_ivf(ivf_model)
+            .with_transpose(false)
+            .with_fragment_filter(fragment_filter)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            return Ok((segment_uuid, summary.files));
+        }
+
+        IndexType::IvfRq => {
+            let StageParams::RQ(rq_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Distributed Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+
+            let ivf_model = make_ivf_model();
+
+            let summary = IvfIndexBuilder::<FlatIndex, RabitQuantizer>::new(
+                filtered_dataset,
+                column.to_owned(),
+                index_dir.clone(),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(rq_params.clone()),
+                (),
+                frag_reuse_index,
+            )?
+            .with_ivf(ivf_model)
+            // For distributed shards, keep RQ codes in row-major layout.
+            // A single packing pass is performed in the distributed merge stage.
+            .with_transpose(false)
+            .with_fragment_filter(fragment_filter)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            return Ok((segment_uuid, summary.files));
+        }
+
+        _ => {
+            return Err(Error::index(format!(
+                "Build Distributed Vector Index: invalid index type: {:?}",
+                index_type
+            )));
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+/// The files of a built vector index segment, and the vectors per partition
+/// its IVF model was built for. That size goes into the index details, where
+/// optimize reads it back to decide splits and joins.
+pub(crate) struct BuiltVectorSegment {
+    pub(crate) files: Vec<IndexFile>,
+    /// `None` when the build was neither given a target nor derived one (a
+    /// fragment subset, a multivector column, or a build that shuffled no
+    /// vectors), so optimize falls back to the index type's default.
+    pub(crate) target_partition_size: Option<usize>,
+}
+
+#[cfg(feature = "write")]
+/// Build a Vector Index
+#[instrument(level = "debug", skip(dataset))]
+pub(crate) async fn build_vector_index(
+    dataset: &Dataset,
+    column: &str,
+    name: &str,
+    uuid: Uuid,
+    params: &VectorIndexParams,
+    frag_reuse_index: Option<Arc<CompactFragReuseIndex>>,
+    progress: Arc<dyn IndexBuildProgress>,
+) -> Result<BuiltVectorSegment> {
+    build_vector_index_impl(
+        dataset,
+        column,
+        name,
+        uuid,
+        params,
+        frag_reuse_index,
+        progress,
+        None,
+        false,
+    )
+    .await
+}
+
+#[cfg(feature = "write")]
+/// Train a vector index's IVF model and quantizer from the whole table, or
+/// from `fragment_ids` alone, and write a segment that carries that model and
+/// no rows.
+///
+/// A distributed rebuild hands this segment to every build task as the model
+/// to encode against; the segment itself is never committed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_vector_model_segment(
+    dataset: &Dataset,
+    column: &str,
+    name: &str,
+    uuid: Uuid,
+    params: &VectorIndexParams,
+    frag_reuse_index: Option<Arc<CompactFragReuseIndex>>,
+    fragment_ids: Option<&[u32]>,
+    progress: Arc<dyn IndexBuildProgress>,
+) -> Result<BuiltVectorSegment> {
+    build_vector_index_impl(
+        dataset,
+        column,
+        name,
+        uuid,
+        params,
+        frag_reuse_index,
+        progress,
+        fragment_ids,
+        true,
+    )
+    .await
+}
+
+#[cfg(feature = "write")]
+/// Build a standalone vector index segment over a subset of fragments.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_filtered_vector_index(
+    dataset: &Dataset,
+    column: &str,
+    name: &str,
+    uuid: Uuid,
+    params: &VectorIndexParams,
+    frag_reuse_index: Option<Arc<CompactFragReuseIndex>>,
+    fragment_ids: &[u32],
+    progress: Arc<dyn IndexBuildProgress>,
+) -> Result<BuiltVectorSegment> {
+    build_vector_index_impl(
+        dataset,
+        column,
+        name,
+        uuid,
+        params,
+        frag_reuse_index,
+        progress,
+        Some(fragment_ids),
+        false,
+    )
+    .await
+}
+
+#[cfg(feature = "write")]
+#[allow(clippy::too_many_arguments)]
+async fn build_vector_index_impl(
+    dataset: &Dataset,
+    column: &str,
+    name: &str,
+    uuid: Uuid,
+    params: &VectorIndexParams,
+    frag_reuse_index: Option<Arc<CompactFragReuseIndex>>,
+    progress: Arc<dyn IndexBuildProgress>,
+    fragment_ids: Option<&[u32]>,
+    train_only: bool,
+) -> Result<BuiltVectorSegment> {
+    let (element_type, index_type, ivf_params, shuffler) = prepare_vector_segment_build(
+        dataset,
+        column,
+        params,
+        progress.clone(),
+        "Build Vector Index",
+        false,
+        fragment_ids,
+    )
+    .await?;
+    let stages = &params.stages;
+
+    // RaBitQ encodes against L2 or dot residuals, and its transform rejects
+    // anything else, but only after the IVF model has been trained on a sample.
+    if matches!(index_type, IndexType::IvfRq | IndexType::IvfHnswRq)
+        && params.metric_type == DistanceType::Hamming
+    {
+        return Err(Error::index(format!(
+            "Build Vector Index: {} does not support the {} metric",
+            index_type, params.metric_type
+        )));
+    }
+
+    let explicit_target = ivf_params.target_partition_size;
+    let num_partitions = ivf_params.num_partitions.unwrap_or(0);
+    let summary = match index_type {
+        IndexType::IvfFlat => match element_type {
+            DataType::Float16 | DataType::Float32 | DataType::Float64 => {
+                let summary = IvfIndexBuilder::<FlatIndex, FlatQuantizer>::new(
+                    dataset.clone(),
+                    column.to_owned(),
+                    dataset.indices_dir().clone().join(uuid.to_string()),
+                    params.metric_type,
+                    shuffler,
+                    Some(ivf_params),
+                    Some(()),
+                    (),
+                    frag_reuse_index,
+                )?
+                .with_optional_fragment_filter(fragment_ids)
+                .with_train_only(train_only)
+                .with_progress(progress.clone())
+                .build()
+                .await?;
+                Ok(summary)
+            }
+            DataType::UInt8 => {
+                let summary = IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new(
+                    dataset.clone(),
+                    column.to_owned(),
+                    dataset.indices_dir().clone().join(uuid.to_string()),
+                    params.metric_type,
+                    shuffler,
+                    Some(ivf_params),
+                    Some(()),
+                    (),
+                    frag_reuse_index,
+                )?
+                .with_optional_fragment_filter(fragment_ids)
+                .with_train_only(train_only)
+                .with_progress(progress.clone())
+                .build()
+                .await?;
+                Ok(summary)
+            }
+            _ => Err(Error::index(format!(
+                "Build Vector Index: invalid data type: {:?}",
+                element_type
+            ))),
+        },
+        IndexType::IvfPq => {
+            let len = stages.len();
+            let StageParams::PQ(pq_params) = &stages[len - 1] else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+
+            match params.version {
+                IndexFileVersion::Legacy => {
+                    if fragment_ids.is_some() {
+                        return Err(Error::index(
+                            "Build Vector Index: filtered IVF_PQ builds do not support legacy format"
+                                .to_string(),
+                        ));
+                    }
+                    if train_only {
+                        return Err(Error::index(
+                            "Build Vector Index: model-only IVF_PQ builds do not support legacy format"
+                                .to_string(),
+                        ));
+                    }
+                    let files = build_ivf_pq_index(
+                        dataset,
+                        column,
+                        name,
+                        uuid,
+                        params.metric_type,
+                        &ivf_params,
+                        pq_params,
+                        progress.clone(),
+                    )
+                    .await?;
+                    // The v1 format never splits or joins its partitions, so
+                    // it needs no target.
+                    Ok(VectorIndexBuildSummary {
+                        indices_merged: 0,
+                        files,
+                        num_vectors_shuffled: 0,
+                    })
+                }
+                IndexFileVersion::V3 => {
+                    let mut builder = IvfIndexBuilder::<FlatIndex, ProductQuantizer>::new(
+                        dataset.clone(),
+                        column.to_owned(),
+                        dataset.indices_dir().join(uuid.to_string()),
+                        params.metric_type,
+                        shuffler,
+                        Some(ivf_params),
+                        Some(pq_params.clone()),
+                        (),
+                        frag_reuse_index,
+                    )?;
+
+                    let summary = builder
+                        .with_transpose(!params.skip_transpose)
+                        .with_optional_fragment_filter(fragment_ids)
+                        .with_train_only(train_only)
+                        .with_progress(progress.clone())
+                        .build()
+                        .await?;
+                    Ok(summary)
+                }
+            }
+        }
+        IndexType::IvfSq => {
+            let StageParams::SQ(sq_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+
+            let summary = IvfIndexBuilder::<FlatIndex, ScalarQuantizer>::new(
+                dataset.clone(),
+                column.to_owned(),
+                dataset.indices_dir().clone().join(uuid.to_string()),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(sq_params.clone()),
+                (),
+                frag_reuse_index,
+            )?
+            .with_optional_fragment_filter(fragment_ids)
+            .with_train_only(train_only)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            Ok(summary)
+        }
+        IndexType::IvfRq => {
+            let StageParams::RQ(rq_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+
+            let mut builder = IvfIndexBuilder::<FlatIndex, RabitQuantizer>::new(
+                dataset.clone(),
+                column.to_owned(),
+                dataset.indices_dir().join(uuid.to_string()),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(rq_params.clone()),
+                (),
+                frag_reuse_index,
+            )?;
+
+            let summary = builder
+                .with_transpose(!params.skip_transpose)
+                .with_optional_fragment_filter(fragment_ids)
+                .with_train_only(train_only)
+                .with_progress(progress.clone())
+                .build()
+                .await?;
+            Ok(summary)
+        }
+        IndexType::IvfHnswFlat => {
+            let StageParams::Hnsw(hnsw_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+            match element_type {
+                DataType::UInt8 => {
+                    let summary = IvfIndexBuilder::<HNSW, FlatBinQuantizer>::new(
+                        dataset.clone(),
+                        column.to_owned(),
+                        dataset.indices_dir().clone().join(uuid.to_string()),
+                        params.metric_type,
+                        shuffler,
+                        Some(ivf_params),
+                        Some(()),
+                        hnsw_params.clone(),
+                        frag_reuse_index,
+                    )?
+                    .with_optional_fragment_filter(fragment_ids)
+                    .with_train_only(train_only)
+                    .with_progress(progress.clone())
+                    .build()
+                    .await?;
+                    Ok(summary)
+                }
+                _ => {
+                    let summary = IvfIndexBuilder::<HNSW, FlatQuantizer>::new(
+                        dataset.clone(),
+                        column.to_owned(),
+                        dataset.indices_dir().clone().join(uuid.to_string()),
+                        params.metric_type,
+                        shuffler,
+                        Some(ivf_params),
+                        Some(()),
+                        hnsw_params.clone(),
+                        frag_reuse_index,
+                    )?
+                    .with_optional_fragment_filter(fragment_ids)
+                    .with_train_only(train_only)
+                    .with_progress(progress.clone())
+                    .build()
+                    .await?;
+                    Ok(summary)
+                }
+            }
+        }
+        IndexType::IvfHnswPq => {
+            let StageParams::Hnsw(hnsw_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+            let StageParams::PQ(pq_params) = &stages[2] else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+            let summary = IvfIndexBuilder::<HNSW, ProductQuantizer>::new(
+                dataset.clone(),
+                column.to_owned(),
+                dataset.indices_dir().clone().join(uuid.to_string()),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(pq_params.clone()),
+                hnsw_params.clone(),
+                frag_reuse_index,
+            )?
+            .with_optional_fragment_filter(fragment_ids)
+            .with_train_only(train_only)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            Ok(summary)
+        }
+        IndexType::IvfHnswSq => {
+            let StageParams::Hnsw(hnsw_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+            let StageParams::SQ(sq_params) = &stages[2] else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: invalid stages: {:?}",
+                    stages
+                )));
+            };
+            let summary = IvfIndexBuilder::<HNSW, ScalarQuantizer>::new(
+                dataset.clone(),
+                column.to_owned(),
+                dataset.indices_dir().clone().join(uuid.to_string()),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(sq_params.clone()),
+                hnsw_params.clone(),
+                frag_reuse_index,
+            )?
+            .with_optional_fragment_filter(fragment_ids)
+            .with_train_only(train_only)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            Ok(summary)
+        }
+        IndexType::IvfHnswRq => {
+            let [
+                _,
+                StageParams::Hnsw(hnsw_params),
+                StageParams::RQ(rq_params),
+            ] = stages.as_slice()
+            else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: invalid stages: {stages:?}"
+                )));
+            };
+            let summary = IvfIndexBuilder::<HNSW, RabitQuantizer>::new(
+                dataset.clone(),
+                column.to_owned(),
+                dataset.indices_dir().clone().join(uuid.to_string()),
+                params.metric_type,
+                shuffler,
+                Some(ivf_params),
+                Some(rq_params.clone()),
+                hnsw_params.clone(),
+                frag_reuse_index,
+            )?
+            .with_optional_fragment_filter(fragment_ids)
+            .with_train_only(train_only)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            Ok(summary)
+        }
+        _ => Err(Error::index(format!(
+            "Build Vector Index: invalid index type: {:?}",
+            index_type
+        ))),
+    }?;
+    // An index built from a partition count or centroids has no target
+    // partition size, so optimize would split and join it against the index
+    // type's default and merge every partition built smaller than a quarter of
+    // that. Record the vectors per partition the build indexed instead, counted
+    // by its shuffle rather than taken from the table's rows, which include
+    // null vectors the index never holds. A fragment subset is one segment of
+    // a logical index, and its vectors say nothing about the index's, so it
+    // records nothing, and so does a build that shuffled no vectors (a
+    // train-only model, an all-null column), which has no size to measure. A
+    // multivector column records nothing either: a retrain sizes its partitions
+    // from the table's rows over the recorded target, and with several vectors
+    // to a row a target in vectors would retrain a fraction of the partitions.
+    let partition_count_given = matches!(
+        params.stages.first(),
+        Some(StageParams::Ivf(ivf)) if ivf.num_partitions.is_some() || ivf.centroids.is_some()
+    );
+    let multivector = is_multivector(dataset, column)?;
+    let target_partition_size = explicit_target.or_else(|| {
+        (partition_count_given
+            && fragment_ids.is_none()
+            && !multivector
+            && num_partitions > 0
+            && summary.num_vectors_shuffled > 0)
+            .then(|| summary.num_vectors_shuffled.div_ceil(num_partitions))
+    });
+    Ok(BuiltVectorSegment {
+        files: summary.files,
+        target_partition_size,
+    })
+}
+
+#[cfg(feature = "write")]
+/// Build a Vector Index incrementally using an existing index's IVF model and quantizer
+/// This creates a delta index that shares centroids with the source index
+#[instrument(level = "debug", skip(dataset, existing_index, frag_reuse_index))]
+pub(crate) async fn build_vector_index_incremental(
+    dataset: &Dataset,
+    column: &str,
+    uuid: Uuid,
+    params: &VectorIndexParams,
+    existing_index: Arc<dyn VectorIndex>,
+    frag_reuse_index: Option<Arc<CompactFragReuseIndex>>,
+    progress: Arc<dyn IndexBuildProgress>,
+) -> Result<VectorIndexBuildSummary> {
+    let stages = &params.stages;
+
+    if stages.is_empty() {
+        return Err(Error::index(
+            "Build Vector Index: must have at least 1 stage".to_string(),
+        ));
+    };
+
+    let StageParams::Ivf(ivf_params) = &stages[0] else {
+        return Err(Error::index(format!(
+            "Build Vector Index: invalid stages: {:?}",
+            stages
+        )));
+    };
+
+    let (vector_type, _) = get_vector_type(dataset.schema(), column)?;
+    if let DataType::List(_) = vector_type
+        && params.metric_type != DistanceType::Cosine
+    {
+        return Err(Error::index(
+            "Build Vector Index: multivector type supports only cosine distance".to_string(),
+        ));
+    }
+
+    // Extract IVF model and quantizer from existing index
+    let ivf_model = existing_index.ivf_model().clone();
+    let quantizer = existing_index.quantizer();
+
+    // Ensure the number of partitions matches
+    let expected_partitions = ivf_params
+        .num_partitions
+        .unwrap_or(ivf_model.num_partitions());
+    if ivf_model.num_partitions() != expected_partitions {
+        return Err(Error::index(format!(
+            "Number of partitions mismatch: existing index has {} partitions, but params specify {}",
+            ivf_model.num_partitions(),
+            expected_partitions
+        )));
+    }
+
+    let format_version = dataset_format_version(dataset);
+
+    let shuffler = create_owned_ivf_shuffler(
+        ivf_model.num_partitions(),
+        format_version,
+        Some(progress.clone()),
+    )?;
+
+    let index_dir = dataset.indices_dir().join(uuid.to_string());
+
+    // Determine the index type and build incrementally
+    let (sub_index_type, quantization_type) = existing_index.sub_index_type();
+
+    match (sub_index_type, quantization_type) {
+        // IVF_FLAT
+        (SubIndexType::Flat, QuantizationType::Flat) => {
+            let summary = IvfIndexBuilder::<FlatIndex, FlatQuantizer>::new_incremental(
+                dataset.clone(),
+                column.to_owned(),
+                index_dir,
+                params.metric_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                OptimizeOptions::append(),
+            )?
+            .with_ivf(ivf_model)
+            .with_quantizer(quantizer.try_into()?)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            return Ok(summary);
+        }
+        (SubIndexType::Flat, QuantizationType::FlatBin) => {
+            let summary = IvfIndexBuilder::<FlatIndex, FlatBinQuantizer>::new_incremental(
+                dataset.clone(),
+                column.to_owned(),
+                index_dir,
+                params.metric_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                OptimizeOptions::append(),
+            )?
+            .with_ivf(ivf_model)
+            .with_quantizer(quantizer.try_into()?)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            return Ok(summary);
+        }
+        // IVF_PQ
+        (SubIndexType::Flat, QuantizationType::Product) => {
+            let mut builder = IvfIndexBuilder::<FlatIndex, ProductQuantizer>::new_incremental(
+                dataset.clone(),
+                column.to_owned(),
+                index_dir,
+                params.metric_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                OptimizeOptions::append(),
+            )?;
+            let summary = builder
+                .with_ivf(ivf_model)
+                .with_quantizer(quantizer.try_into()?)
+                .with_transpose(!params.skip_transpose)
+                .with_progress(progress.clone())
+                .build()
+                .await?;
+            return Ok(summary);
+        }
+        // IVF_SQ
+        (SubIndexType::Flat, QuantizationType::Scalar) => {
+            let summary = IvfIndexBuilder::<FlatIndex, ScalarQuantizer>::new_incremental(
+                dataset.clone(),
+                column.to_owned(),
+                index_dir,
+                params.metric_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                OptimizeOptions::append(),
+            )?
+            .with_ivf(ivf_model)
+            .with_quantizer(quantizer.try_into()?)
+            .with_progress(progress.clone())
+            .build()
+            .await?;
+            return Ok(summary);
+        }
+        // IVF_RQ
+        (SubIndexType::Flat, QuantizationType::Rabit) => {
+            let mut builder = IvfIndexBuilder::<FlatIndex, RabitQuantizer>::new_incremental(
+                dataset.clone(),
+                column.to_owned(),
+                index_dir,
+                params.metric_type,
+                shuffler,
+                (),
+                frag_reuse_index,
+                OptimizeOptions::append(),
+            )?;
+            let summary = builder
+                .with_ivf(ivf_model)
+                .with_quantizer(quantizer.try_into()?)
+                .with_transpose(!params.skip_transpose)
+                .with_progress(progress.clone())
+                .build()
+                .await?;
+            return Ok(summary);
+        }
+        // IVF_HNSW variants
+        (SubIndexType::Hnsw, quantization_type) => {
+            let StageParams::Hnsw(hnsw_params) = &stages[1] else {
+                return Err(Error::index(format!(
+                    "Build Vector Index: HNSW index missing HNSW params in stages: {:?}",
+                    stages
+                )));
+            };
+
+            match quantization_type {
+                QuantizationType::Flat => {
+                    let summary = IvfIndexBuilder::<HNSW, FlatQuantizer>::new_incremental(
+                        dataset.clone(),
+                        column.to_owned(),
+                        index_dir,
+                        params.metric_type,
+                        shuffler,
+                        hnsw_params.clone(),
+                        frag_reuse_index,
+                        OptimizeOptions::append(),
+                    )?
+                    .with_ivf(ivf_model)
+                    .with_quantizer(quantizer.try_into()?)
+                    .with_progress(progress.clone())
+                    .build()
+                    .await?;
+                    return Ok(summary);
+                }
+                QuantizationType::FlatBin => {
+                    let summary = IvfIndexBuilder::<HNSW, FlatBinQuantizer>::new_incremental(
+                        dataset.clone(),
+                        column.to_owned(),
+                        index_dir,
+                        params.metric_type,
+                        shuffler,
+                        hnsw_params.clone(),
+                        frag_reuse_index,
+                        OptimizeOptions::append(),
+                    )?
+                    .with_ivf(ivf_model)
+                    .with_quantizer(quantizer.try_into()?)
+                    .with_progress(progress.clone())
+                    .build()
+                    .await?;
+                    return Ok(summary);
+                }
+                QuantizationType::Product => {
+                    let summary = IvfIndexBuilder::<HNSW, ProductQuantizer>::new_incremental(
+                        dataset.clone(),
+                        column.to_owned(),
+                        index_dir,
+                        params.metric_type,
+                        shuffler,
+                        hnsw_params.clone(),
+                        frag_reuse_index,
+                        OptimizeOptions::append(),
+                    )?
+                    .with_ivf(ivf_model)
+                    .with_quantizer(quantizer.try_into()?)
+                    .with_progress(progress.clone())
+                    .build()
+                    .await?;
+                    return Ok(summary);
+                }
+                QuantizationType::Scalar => {
+                    let summary = IvfIndexBuilder::<HNSW, ScalarQuantizer>::new_incremental(
+                        dataset.clone(),
+                        column.to_owned(),
+                        index_dir,
+                        params.metric_type,
+                        shuffler,
+                        hnsw_params.clone(),
+                        frag_reuse_index,
+                        OptimizeOptions::append(),
+                    )?
+                    .with_ivf(ivf_model)
+                    .with_quantizer(quantizer.try_into()?)
+                    .with_progress(progress.clone())
+                    .build()
+                    .await?;
+                    return Ok(summary);
+                }
+                QuantizationType::Rabit => {
+                    let summary = IvfIndexBuilder::<HNSW, RabitQuantizer>::new_incremental(
+                        dataset.clone(),
+                        column.to_owned(),
+                        index_dir,
+                        params.metric_type,
+                        shuffler,
+                        hnsw_params.clone(),
+                        frag_reuse_index,
+                        OptimizeOptions::append(),
+                    )?
+                    .with_ivf(ivf_model)
+                    .with_quantizer(quantizer.try_into()?)
+                    .with_progress(progress.clone())
+                    .build()
+                    .await?;
+                    return Ok(summary);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+/// Create a vector index that carries its definition and no data.
+///
+/// The parameters live in the index's `index_details` and the fragment bitmap
+/// is empty, so it covers no rows and has no file to open. `optimize_indices`
+/// trains it once the column holds enough vectors.
+#[instrument(level = "debug", skip_all)]
+pub(crate) async fn build_empty_vector_index(
+    _dataset: &Dataset,
+    _column: &str,
+    _name: &str,
+    _uuid: Uuid,
+    _params: &VectorIndexParams,
+) -> Result<Vec<IndexFile>> {
+    Ok(Vec::new())
+}
+
+#[cfg(feature = "write")]
+#[instrument(level = "debug", skip_all, fields(old_uuid = old_uuid.to_string(), new_uuid = new_uuid.to_string()))]
+pub(crate) async fn remap_vector_index(
+    dataset: Arc<Dataset>,
+    column: &str,
+    old_uuid: &Uuid,
+    new_uuid: &Uuid,
+    old_metadata: &IndexMetadata,
+    mapping: &RowAddrTranslator,
+    owned_fragments: Option<&RoaringBitmap>,
+) -> Result<Vec<IndexFile>> {
+    let old_index = dataset
+        .open_vector_index(column, old_uuid, &NoOpMetricsCollector)
+        .await?;
+
+    if let Some(ivf_index) = old_index.as_any().downcast_ref::<IVFIndex>() {
+        let file = remap_index_file(
+            dataset.as_ref(),
+            old_uuid,
+            new_uuid,
+            old_metadata.dataset_version,
+            ivf_index,
+            mapping,
+            old_metadata.name.clone(),
+            column.to_string(),
+            // We can safely assume there are no transforms today.  We assert above that the
+            // top stage is IVF and IVF does not support transforms between IVF and PQ.  This
+            // will be fixed in the future.
+            vec![],
+        )
+        .await?;
+        Ok(vec![file])
+    } else {
+        // it's v3 index
+        let files = remap_index_file_v3(
+            dataset.as_ref(),
+            new_uuid,
+            old_index,
+            mapping,
+            column.to_string(),
+            owned_fragments,
+        )
+        .await?;
+        Ok(files)
+    }
 }
 
 /// Open the Vector index on dataset, specified by the `uuid`.
@@ -769,8 +2354,373 @@ pub(crate) async fn open_vector_index_v2(
     Ok(index)
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(feature = "write")]
+/// Initialize a vector index from a source dataset
+/// This will reuse the centroids from the source dataset,
+/// making the new indices basically a "delta index" of the source dataset,
+/// until the new dataset fully retains the index.
+pub async fn initialize_vector_index(
+    target_dataset: &mut Dataset,
+    source_dataset: &Dataset,
+    source_index: &IndexMetadata,
+    field_names: &[&str],
+) -> Result<()> {
+    if field_names.is_empty() || field_names.len() > 1 {
+        return Err(Error::index(format!(
+            "Unsupported fields for vector index: {:?}",
+            field_names
+        )));
+    }
+
+    // Vector indices currently support only single fields, use the first one
+    let column_name = field_names[0];
+
+    let source_vector_index = source_dataset
+        .open_vector_index(column_name, &source_index.uuid, &NoOpMetricsCollector)
+        .await?;
+
+    let metric_type = source_vector_index.metric_type();
+    let ivf_model = source_vector_index.ivf_model();
+    let quantizer = source_vector_index.quantizer();
+    let (sub_index_type, quantization_type) = source_vector_index.sub_index_type();
+    let ivf_params = derive_ivf_params(ivf_model);
+
+    let params = match (sub_index_type, quantization_type) {
+        (SubIndexType::Flat, QuantizationType::Flat)
+        | (SubIndexType::Flat, QuantizationType::FlatBin) => {
+            VectorIndexParams::with_ivf_flat_params(metric_type, ivf_params)
+        }
+        (SubIndexType::Flat, QuantizationType::Product) => {
+            let pq_quantizer: ProductQuantizer = quantizer.try_into()?;
+            let pq_params = derive_pq_params(&pq_quantizer);
+            VectorIndexParams::with_ivf_pq_params(metric_type, ivf_params, pq_params)
+        }
+        (SubIndexType::Flat, QuantizationType::Scalar) => {
+            let sq_quantizer: ScalarQuantizer = quantizer.try_into()?;
+            let sq_params = derive_sq_params(&sq_quantizer);
+            VectorIndexParams::with_ivf_sq_params(metric_type, ivf_params, sq_params)
+        }
+        (SubIndexType::Flat, QuantizationType::Rabit) => {
+            let rabit_quantizer: RabitQuantizer = quantizer.try_into()?;
+            let rabit_params = derive_rabit_params(&rabit_quantizer);
+            VectorIndexParams::with_ivf_rq_params(metric_type, ivf_params, rabit_params)
+        }
+        (SubIndexType::Hnsw, quantization_type) => {
+            let hnsw_params = derive_hnsw_params(source_vector_index.as_ref());
+            match quantization_type {
+                QuantizationType::Flat | QuantizationType::FlatBin => {
+                    VectorIndexParams::ivf_hnsw(metric_type, ivf_params, hnsw_params)
+                }
+                QuantizationType::Product => {
+                    let pq_quantizer: ProductQuantizer = quantizer.try_into()?;
+                    let pq_params = derive_pq_params(&pq_quantizer);
+                    VectorIndexParams::with_ivf_hnsw_pq_params(
+                        metric_type,
+                        ivf_params,
+                        hnsw_params,
+                        pq_params,
+                    )
+                }
+                QuantizationType::Scalar => {
+                    let sq_quantizer: ScalarQuantizer = quantizer.try_into()?;
+                    let sq_params = derive_sq_params(&sq_quantizer);
+                    VectorIndexParams::with_ivf_hnsw_sq_params(
+                        metric_type,
+                        ivf_params,
+                        hnsw_params,
+                        sq_params,
+                    )
+                }
+                QuantizationType::Rabit => {
+                    let rabit_quantizer: RabitQuantizer = quantizer.try_into()?;
+                    let rabit_params = derive_rabit_params(&rabit_quantizer);
+                    VectorIndexParams::with_ivf_hnsw_rq_params(
+                        metric_type,
+                        ivf_params,
+                        hnsw_params,
+                        rabit_params,
+                    )
+                }
+            }
+        }
+    };
+
+    let new_uuid = Uuid::new_v4();
+    let frag_reuse_index = target_dataset
+        .open_frag_reuse_index(&NoOpMetricsCollector)
+        .await?;
+
+    let summary = build_vector_index_incremental(
+        target_dataset,
+        column_name,
+        new_uuid,
+        &params,
+        source_vector_index,
+        frag_reuse_index,
+        noop_progress(),
+    )
+    .await?;
+
+    let field = target_dataset.schema().field(column_name).ok_or_else(|| {
+        Error::index(format!(
+            "Column '{}' not found in target dataset",
+            column_name
+        ))
+    })?;
+
+    let fragment_bitmap = Some(target_dataset.table_state.fragment_bitmap.as_ref().clone());
+
+    let new_idx = IndexMetadata {
+        uuid: new_uuid,
+        name: source_index.name.clone(),
+        fields: vec![field.id],
+        covering_fields: vec![],
+        dataset_version: target_dataset.manifest.version,
+        fragment_bitmap,
+        index_details: source_index.index_details.clone(),
+        index_version: source_index.index_version,
+        created_at: Some(chrono::Utc::now()),
+        base_id: None,
+        files: Some(summary.files),
+        clustering_id: None,
+        metadata: Default::default(),
+    };
+
+    let transaction = Transaction::new(
+        target_dataset.manifest.version,
+        Operation::CreateIndex {
+            new_indices: vec![new_idx],
+            removed_indices: vec![],
+        },
+        None,
+    );
+
+    target_dataset
+        .apply_commit(transaction, &Default::default(), &Default::default())
+        .await?;
+
+    Ok(())
+}
+
+#[cfg(feature = "write")]
+/// Create IVF build parameters for delta index creation from an existing IVF model
+/// TODO: support deriving all the original parameters
+fn derive_ivf_params(ivf_model: &IvfModel) -> IvfBuildParams {
+    IvfBuildParams {
+        num_partitions: Some(ivf_model.num_partitions()),
+        target_partition_size: None,
+        max_iters: 50, // Default
+        centroids: ivf_model.centroids.clone().map(Arc::new),
+        #[allow(deprecated)]
+        retrain: false, // Don't retrain since we have centroids
+        sample_rate: 256, // Default
+        streaming_sample_rate: None,
+        streaming_coreset_rate: None,
+        streaming_refine_passes: 0,
+        precomputed_partitions_file: None,
+        precomputed_shuffle_buffers: None,
+        shuffle_partition_batches: 1024 * 10, // Default
+        shuffle_partition_concurrency: 2,     // Default
+        storage_options: None,
+    }
+}
+
+#[cfg(feature = "write")]
+/// Create PQ build parameters from a ProductQuantizer
+/// TODO: support consistently deriving all the original parameters
+fn derive_pq_params(pq_quantizer: &ProductQuantizer) -> PQBuildParams {
+    PQBuildParams {
+        num_sub_vectors: pq_quantizer.num_sub_vectors,
+        num_bits: pq_quantizer.num_bits as usize,
+        max_iters: 50,   // Default
+        kmeans_redos: 1, // Default
+        codebook: Some(Arc::new(pq_quantizer.codebook.clone())),
+        sample_rate: 256, // Default
+    }
+}
+
+#[cfg(feature = "write")]
+/// Create SQ build parameters from a ScalarQuantizer
+/// TODO: support consistently deriving all the original parameters
+fn derive_sq_params(sq_quantizer: &ScalarQuantizer) -> SQBuildParams {
+    SQBuildParams {
+        num_bits: sq_quantizer.num_bits(),
+        sample_rate: 256, // Default
+    }
+}
+
+#[cfg(feature = "write")]
+/// Create Rabit build parameters from a RabitQuantizer
+/// TODO: support consistently deriving all the original parameters
+fn derive_rabit_params(rabit_quantizer: &RabitQuantizer) -> RQBuildParams {
+    RQBuildParams {
+        num_bits: rabit_quantizer.num_bits(),
+        rotation_type: rabit_quantizer.rotation_type(),
+        rotation: None,
+    }
+}
+
+#[cfg(feature = "write")]
+/// Extract HNSW build parameters from the source vector index statistics.
+/// Returns default parameters if extraction fails.
+/// TODO: support consistently deriving all the original parameters
+pub(crate) fn derive_hnsw_params(source_index: &dyn VectorIndex) -> HnswBuildParams {
+    let default_params = HnswBuildParams {
+        max_level: 4,
+        m: 20,
+        ef_construction: 100,
+        prefetch_distance: None,
+    };
+
+    let Ok(stats) = source_index.statistics() else {
+        return default_params;
+    };
+
+    let Some(sub_index) = stats.get("sub_index") else {
+        return default_params;
+    };
+
+    // Extract HNSW parameters from sub_index.params
+    if let Some(params) = sub_index.get("params") {
+        let max_level = params
+            .get("max_level")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u16)
+            .unwrap_or(4);
+        let m = params
+            .get("m")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(20);
+        let ef_construction = params
+            .get("ef_construction")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(100);
+        let prefetch_distance = params
+            .get("prefetch_distance")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
+
+        return HnswBuildParams {
+            max_level,
+            m,
+            ef_construction,
+            prefetch_distance,
+        };
+    }
+
+    default_params
+}
+
+#[cfg(feature = "write")]
+fn vector_index_type(index: &dyn VectorIndex) -> IndexType {
+    match index.sub_index_type() {
+        (SubIndexType::Flat, QuantizationType::Flat | QuantizationType::FlatBin) => {
+            IndexType::IvfFlat
+        }
+        (SubIndexType::Flat, QuantizationType::Product) => IndexType::IvfPq,
+        (SubIndexType::Flat, QuantizationType::Scalar) => IndexType::IvfSq,
+        (SubIndexType::Flat, QuantizationType::Rabit) => IndexType::IvfRq,
+        (SubIndexType::Hnsw, QuantizationType::Flat | QuantizationType::FlatBin) => {
+            IndexType::IvfHnswFlat
+        }
+        (SubIndexType::Hnsw, QuantizationType::Product) => IndexType::IvfHnswPq,
+        (SubIndexType::Hnsw, QuantizationType::Scalar) => IndexType::IvfHnswSq,
+        (SubIndexType::Hnsw, QuantizationType::Rabit) => IndexType::IvfHnswRq,
+    }
+}
+
+#[cfg(feature = "write")]
+/// Derive structural build parameters for a new, independently trained segment.
+///
+/// Learned IVF centroids, quantizer codebooks, and rotations are deliberately
+/// omitted so the new segment is valid for its own fragment set.
+pub(crate) fn fresh_vector_segment_params(
+    metadata: &IndexMetadata,
+    index: &dyn VectorIndex,
+) -> Result<VectorIndexParams> {
+    if let Some(params) = metadata
+        .index_details
+        .as_deref()
+        .and_then(details::vector_params_from_details)
+        && params.metric_type == index.metric_type()
+        && params.index_type() == vector_index_type(index)
+    {
+        return Ok(params);
+    }
+
+    let mut ivf_params = derive_ivf_params(index.ivf_model());
+    ivf_params.centroids = None;
+    #[allow(deprecated)]
+    {
+        ivf_params.retrain = false;
+    }
+
+    let metric_type = index.metric_type();
+    let quantizer = index.quantizer();
+    Ok(match index.sub_index_type() {
+        (SubIndexType::Flat, QuantizationType::Flat | QuantizationType::FlatBin) => {
+            VectorIndexParams::with_ivf_flat_params(metric_type, ivf_params)
+        }
+        (SubIndexType::Flat, QuantizationType::Product) => {
+            let quantizer: ProductQuantizer = quantizer.try_into()?;
+            let mut pq_params = derive_pq_params(&quantizer);
+            pq_params.codebook = None;
+            VectorIndexParams::with_ivf_pq_params(metric_type, ivf_params, pq_params)
+        }
+        (SubIndexType::Flat, QuantizationType::Scalar) => {
+            let quantizer: ScalarQuantizer = quantizer.try_into()?;
+            VectorIndexParams::with_ivf_sq_params(
+                metric_type,
+                ivf_params,
+                derive_sq_params(&quantizer),
+            )
+        }
+        (SubIndexType::Flat, QuantizationType::Rabit) => {
+            let quantizer: RabitQuantizer = quantizer.try_into()?;
+            VectorIndexParams::with_ivf_rq_params(
+                metric_type,
+                ivf_params,
+                derive_rabit_params(&quantizer),
+            )
+        }
+        (SubIndexType::Hnsw, QuantizationType::Flat | QuantizationType::FlatBin) => {
+            VectorIndexParams::ivf_hnsw(metric_type, ivf_params, derive_hnsw_params(index))
+        }
+        (SubIndexType::Hnsw, QuantizationType::Product) => {
+            let quantizer: ProductQuantizer = quantizer.try_into()?;
+            let mut pq_params = derive_pq_params(&quantizer);
+            pq_params.codebook = None;
+            VectorIndexParams::with_ivf_hnsw_pq_params(
+                metric_type,
+                ivf_params,
+                derive_hnsw_params(index),
+                pq_params,
+            )
+        }
+        (SubIndexType::Hnsw, QuantizationType::Scalar) => {
+            let quantizer: ScalarQuantizer = quantizer.try_into()?;
+            VectorIndexParams::with_ivf_hnsw_sq_params(
+                metric_type,
+                ivf_params,
+                derive_hnsw_params(index),
+                derive_sq_params(&quantizer),
+            )
+        }
+        (SubIndexType::Hnsw, QuantizationType::Rabit) => {
+            let quantizer: RabitQuantizer = quantizer.try_into()?;
+            VectorIndexParams::with_ivf_hnsw_rq_params(
+                metric_type,
+                ivf_params,
+                derive_hnsw_params(index),
+                derive_rabit_params(&quantizer),
+            )
+        }
+    })
+}
+
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use crate::dataset::{Dataset, WriteParams};

@@ -74,6 +74,40 @@ fn training_sample_readahead(
     Ok(io_parallelism.min((prefetch_budget / TRAINING_SAMPLE_BATCH_BYTES).max(1)))
 }
 
+#[cfg(feature = "write")]
+/// Sets how many consecutive rows each random draw of a FixedSizeList IVF
+/// training sample reads. Unset or `1` samples rows independently. A larger
+/// value reads the same number of rows as contiguous runs, which object storage
+/// serves in about one request per run, at the cost of a sample correlated
+/// within a run. Quantizer samples are too small to stay representative in
+/// runs, so they always draw independent rows.
+const IVF_TRAINING_SAMPLE_BLOCK_ROWS_ENV: &str = "LANCE_IVF_TRAINING_SAMPLE_BLOCK_ROWS";
+
+#[cfg(feature = "write")]
+/// Parse the value of [`IVF_TRAINING_SAMPLE_BLOCK_ROWS_ENV`]; `None` means unset.
+fn parse_ivf_training_sample_block_rows(raw: Option<&str>) -> Result<usize> {
+    let Some(raw) = raw else {
+        return Ok(1);
+    };
+    raw.parse::<usize>()
+        .ok()
+        .filter(|block_rows| *block_rows > 0)
+        .ok_or_else(|| {
+            Error::invalid_input(format!(
+                "{IVF_TRAINING_SAMPLE_BLOCK_ROWS_ENV} must be a positive integer, got '{raw}'"
+            ))
+        })
+}
+
+#[cfg(feature = "write")]
+fn ivf_training_sample_block_rows() -> Result<usize> {
+    parse_ivf_training_sample_block_rows(
+        std::env::var(IVF_TRAINING_SAMPLE_BLOCK_ROWS_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// Helper function to extract a column from a RecordBatch, supporting nested field paths.
 ///
 /// This function handles:
@@ -332,6 +366,19 @@ pub async fn maybe_sample_training_data(
     sample_or_scan_training_data(dataset, column, sample_size_hint, fragment_ids, 1).await
 }
 
+#[cfg(feature = "write")]
+/// [`maybe_sample_training_data`] for the IVF centroid sample, which honors
+/// [`IVF_TRAINING_SAMPLE_BLOCK_ROWS_ENV`].
+pub(crate) async fn maybe_sample_ivf_training_data(
+    dataset: &Dataset,
+    column: &str,
+    sample_size_hint: usize,
+    fragment_ids: Option<&[u32]>,
+) -> Result<FixedSizeListArray> {
+    let block_rows = ivf_training_sample_block_rows()?;
+    sample_or_scan_training_data(dataset, column, sample_size_hint, fragment_ids, block_rows).await
+}
+
 async fn sample_or_scan_training_data(
     dataset: &Dataset,
     column: &str,
@@ -401,6 +448,70 @@ async fn sample_or_scan_training_data(
         let batch = scan_all_training_data(dataset, column, is_nullable, fragment_ids).await?;
         vector_column_to_fsl(&batch, column)
     }
+}
+
+#[cfg(feature = "write")]
+/// Sample `sample_size` non-null vectors from a FixedSizeList column, drawing
+/// only rows that no earlier call sharing `drawn_offsets` drew.
+///
+/// The set holds row offsets within the selected fragments, so every call
+/// sharing it must select the same fragments. Drawing stops once the set holds
+/// `max_drawn` offsets, nulls included, so the sample can hold fewer vectors.
+pub(crate) async fn sample_unseen_training_data(
+    dataset: &Dataset,
+    column: &str,
+    sample_size: usize,
+    fragment_ids: Option<&[u32]>,
+    drawn_offsets: Arc<Mutex<RoaringTreemap>>,
+    max_drawn: usize,
+) -> Result<FixedSizeListArray> {
+    let vector_field = dataset.schema().field(column).ok_or(Error::index(format!(
+        "Sample training data: column {} does not exist in schema",
+        column
+    )))?;
+    if !matches!(vector_field.data_type(), DataType::FixedSizeList(_, _)) {
+        return Err(Error::index(format!(
+            "Sample training data: column {} is not a FixedSizeList vector column",
+            column
+        )));
+    }
+    let byte_width = vector_field
+        .data_type()
+        .byte_width_opt()
+        .unwrap_or(4 * 1024);
+    let num_rows = count_rows(dataset, fragment_ids).await?;
+    // Reserve no more than the rows the cap still lets this call draw
+    let sample_size = sample_size.min(
+        max_drawn
+            .min(num_rows)
+            .saturating_sub(drawn_offsets.lock().await.len() as usize),
+    );
+    let still_needed = Arc::new(AtomicUsize::new(sample_size));
+    let scan = sample_training_data_scan_by_indices(
+        dataset,
+        column,
+        num_rows,
+        training_sample_batch_rows(byte_width)?,
+        training_sample_readahead(
+            sample_size,
+            byte_width,
+            dataset.table_state.object_store.io_parallelism(),
+        )?,
+        fragment_ids,
+        still_needed.clone(),
+        Some(drawn_offsets),
+        Some(max_drawn),
+        ivf_training_sample_block_rows()?,
+    )?;
+    sample_nullable_fsl(
+        column,
+        sample_size,
+        byte_width,
+        vector_field,
+        scan,
+        Some(still_needed),
+    )
+    .await
 }
 
 /// Filter out non-finite vectors from sampled training data.
@@ -1348,8 +1459,7 @@ fn random_ranges(
     })
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

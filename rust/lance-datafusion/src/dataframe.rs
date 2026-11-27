@@ -11,11 +11,52 @@ use std::task::{Context, Poll};
 use arrow_array::RecordBatch;
 use arrow_ord::partition::partition;
 use arrow_schema::Schema;
+#[cfg(feature = "write")]
+use datafusion::dataframe::DataFrame;
 use datafusion_common::Result as DFResult;
 use datafusion_common::ScalarValue;
 use datafusion_physical_plan::SendableRecordBatchStream;
 use futures::{Stream, StreamExt};
 use lance_arrow::RecordBatchExt;
+
+#[cfg(feature = "write")]
+#[async_trait::async_trait]
+pub trait DataFrameExt {
+    /// Execute the query and return as a grouped stream.
+    ///
+    /// The data is assumed to have already been sorted by the partition columns.
+    async fn group_by_stream(self, partition_columns: &[&str]) -> DFResult<BatchStreamGrouper>;
+}
+
+#[cfg(feature = "write")]
+#[async_trait::async_trait]
+impl DataFrameExt for DataFrame {
+    async fn group_by_stream(self, partition_columns: &[&str]) -> DFResult<BatchStreamGrouper> {
+        if partition_columns.is_empty() {
+            return Err(datafusion_common::DataFusionError::Execution(
+                "No partition columns specified".into(),
+            ));
+        }
+        if partition_columns.len() > 1 {
+            return Err(datafusion_common::DataFusionError::NotImplemented(
+                "Only one partition column supported".into(),
+            ));
+        }
+        for col in partition_columns {
+            if self.schema().field_with_name(None, col).is_err() {
+                return Err(datafusion_common::DataFusionError::Execution(format!(
+                    "Partition column '{}' not found",
+                    col
+                )));
+            }
+        }
+
+        Ok(BatchStreamGrouper::new(
+            self.execute_stream().await?,
+            partition_columns[0].into(),
+        ))
+    }
+}
 
 type GroupRange = (ScalarValue, Range<usize>);
 

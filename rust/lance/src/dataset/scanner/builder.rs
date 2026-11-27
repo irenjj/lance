@@ -950,6 +950,11 @@ impl Scanner {
         Ok(self)
     }
 
+    #[cfg(all(test, feature = "write"))]
+    pub(super) fn nearest_mut(&mut self) -> Option<&mut Query> {
+        self.nearest.as_mut()
+    }
+
     /// Set the distance thresholds for the nearest neighbor search.
     pub fn distance_range(
         &mut self,
@@ -1598,8 +1603,7 @@ impl Scanner {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
 

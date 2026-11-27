@@ -859,8 +859,7 @@ impl ExecutionPlan for TakeExec {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::*;
     use datafusion::physical_plan::ChildrenPropertiesMode;

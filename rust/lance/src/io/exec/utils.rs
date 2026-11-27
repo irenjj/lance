@@ -1159,6 +1159,12 @@ impl IndexMetrics {
     pub fn flush_io(&self) {
         self.io_metrics.record_stats(self.io_stats.snapshot());
     }
+
+    #[cfg(feature = "write")]
+    pub(crate) fn with_segment_tracking(mut self, segments: Arc<Mutex<BTreeSet<String>>>) -> Self {
+        self.selected_segments = Some(segments);
+        self
+    }
 }
 
 impl MetricsCollector for IndexMetrics {
@@ -1440,8 +1446,7 @@ pub(crate) fn estimated_total_byte_size(
     Precision::Inexact((*rows as f64 * bytes_per_row).ceil() as usize)
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use super::LanceField;
     use super::LanceSchema;

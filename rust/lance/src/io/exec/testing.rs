@@ -24,6 +24,20 @@ pub struct TestingExec {
     properties: Arc<PlanProperties>,
 }
 
+#[cfg(feature = "write")]
+pub(crate) fn new(batches: Vec<RecordBatch>) -> Self {
+    let properties = Arc::new(PlanProperties::new(
+        EquivalenceProperties::new(batches[0].schema()),
+        Partitioning::RoundRobinBatch(1),
+        EmissionType::Incremental,
+        Boundedness::Bounded,
+    ));
+    Self {
+        batches,
+        properties,
+    }
+}
+
 impl TestingExec {}
 
 impl DisplayAs for TestingExec {

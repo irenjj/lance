@@ -221,8 +221,7 @@ impl SegmentCoverage {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use arrow_array::{RecordBatchIterator, record_batch};
     use rstest::rstest;

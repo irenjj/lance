@@ -509,8 +509,7 @@ fn max_rows(read: &FilteredReadExec) -> Option<usize> {
         .sum()
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::{

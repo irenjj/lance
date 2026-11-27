@@ -16,6 +16,8 @@ use arrow_schema::{DataType, Field as ArrowField, Fields};
 use async_trait::async_trait;
 use lance_core::cache::{CacheKey, CacheKeySchema, KeyBuilder};
 use lance_core::datatypes::{Field, Schema as LanceSchema};
+#[cfg(feature = "write")]
+use lance_core::utils::tracing::IO_TYPE_OPEN_MEM_WAL;
 use lance_core::utils::tracing::{IO_TYPE_OPEN_FRAG_REUSE, IO_TYPE_OPEN_VECTOR, TRACE_IO_EVENTS};
 use lance_file::reader::FileReaderOptions;
 use lance_file::versions::v1::reader::FileReader as V1FileReader;
@@ -41,6 +43,8 @@ use lance_index::{
     pb::{self, index::Implementation},
     vector::VectorIndex,
 };
+#[cfg(feature = "write")]
+use lance_index::{is_system_index, mem_wal::MemWalIndex};
 use lance_io::scheduler::{ScanScheduler, SchedulerConfig};
 use lance_io::traits::Reader;
 use lance_io::utils::{
@@ -57,7 +61,11 @@ use crate::index::api::DatasetIndexExt;
 use crate::index::frag_reuse::{self, load_frag_reuse_index_details, open_frag_reuse_index};
 use crate::index::frag_reuse_with_stable_row_ids::warn_about_indices_hidden_by_frag_reuse;
 use crate::index::legacy_details::LegacyVectorDetails;
+#[cfg(feature = "write")]
+use crate::index::mem_wal::open_mem_wal_index;
 use crate::index::scalar::{self, IndexDetails, fetch_index_details, list_element};
+#[cfg(feature = "write")]
+use crate::index::segment::index_is_usable;
 use crate::index::segment::{
     index_has_supported_field_dependencies, index_type_is_known, segment_has_vector_details,
     unsupported_index_version,
@@ -198,6 +206,45 @@ impl CacheKey for FragReuseIndexCacheKey<'_> {
     }
 }
 
+#[cfg(feature = "write")]
+#[derive(Debug, Clone)]
+pub(crate) struct MemWalCacheKey<'a> {
+    pub uuid: &'a Uuid,
+    pub fri_uuid: Option<&'a Uuid>,
+}
+
+#[cfg(feature = "write")]
+impl<'a> MemWalCacheKey<'a> {
+    pub fn new(uuid: &'a Uuid, fri_uuid: Option<&'a Uuid>) -> Self {
+        Self { uuid, fri_uuid }
+    }
+}
+
+#[cfg(feature = "write")]
+impl CacheKey for MemWalCacheKey<'_> {
+    type ValueType = MemWalIndex;
+
+    fn key(&self) -> std::borrow::Cow<'_, str> {
+        if let Some(fri_uuid) = self.fri_uuid {
+            format!("{}-{}", self.uuid, fri_uuid).into()
+        } else {
+            self.uuid.to_string().into()
+        }
+    }
+
+    fn type_name() -> &'static str {
+        "MemWalIndex"
+    }
+
+    fn schema() -> CacheKeySchema {
+        CacheKeySchema::new("lance.index.mem-wal-key", 1)
+    }
+
+    fn write_key(&self, builder: &mut KeyBuilder) {
+        write_index_identity(builder, self.uuid, self.fri_uuid);
+    }
+}
+
 /// Snapshot of every scalar index on a dataset, captured at planning time
 /// and consumed by the scalar/aggregate pushdown machinery.
 ///
@@ -303,6 +350,10 @@ pub(crate) fn warn_about_unsupported_indices(manifest: &Manifest, indices: &[Ind
 }
 
 /// Every index the manifest names, including entries without a query reader.
+///
+/// A query listing only exposes usable segments. Writers also need unknown
+/// segments when reserving names and seeding the next manifest so they can
+/// preserve entries they cannot open.
 pub(crate) async fn load_all_indices(dataset: &Dataset) -> Result<Arc<Vec<IndexMetadata>>> {
     let legacy_details = LegacyVectorDetails(&dataset.session);
     lance_table_runtime::commit::load_indices_with_legacy_details(
@@ -319,6 +370,23 @@ pub(super) fn reject_mem_wal_index(index: &IndexMetadata) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(feature = "write")]
+/// The segments named `name`, including any this build has no reader for.
+///
+/// The bookkeeping counterpart to [`DatasetIndexExt::load_indices_by_name`]. See
+/// [`load_all_indices`] for which of the two a call site wants.
+pub(crate) async fn load_all_indices_by_name(
+    dataset: &Dataset,
+    name: &str,
+) -> Result<Vec<IndexMetadata>> {
+    Ok(load_all_indices(dataset)
+        .await?
+        .iter()
+        .filter(|idx| idx.name == name)
+        .cloned()
+        .collect())
 }
 
 /// Find the FRI entry from the raw manifest listing (bookkeeping path).
@@ -368,6 +436,48 @@ pub trait DatasetIndexInternalExt: DatasetIndexExt {
         index_meta: &IndexMetadata,
         metrics: &dyn MetricsCollector,
     ) -> Result<Arc<dyn VectorIndex>>;
+
+    #[cfg(feature = "write")]
+    /// [`Self::open_generic_index`] for maintenance (merge, rebuild, remap):
+    /// a registered segment the tagged reader excludes from the listing opens
+    /// as contributing nothing instead of failing. Never for queries.
+    async fn open_generic_index_for_maintenance(
+        &self,
+        column: &str,
+        uuid: &Uuid,
+        metrics: &dyn MetricsCollector,
+    ) -> Result<Arc<dyn Index>>;
+
+    #[cfg(feature = "write")]
+    /// [`Self::open_scalar_index`] for maintenance; see
+    /// [`Self::open_generic_index_for_maintenance`].
+    async fn open_scalar_index_for_maintenance(
+        &self,
+        column: &str,
+        uuid: &Uuid,
+        metrics: &dyn MetricsCollector,
+    ) -> Result<Arc<dyn ScalarIndex>>;
+
+    #[cfg(feature = "write")]
+    /// [`Self::open_vector_index`] for maintenance; see
+    /// [`Self::open_generic_index_for_maintenance`].
+    async fn open_vector_index_for_maintenance(
+        &self,
+        column: &str,
+        uuid: &Uuid,
+        metrics: &dyn MetricsCollector,
+    ) -> Result<Arc<dyn VectorIndex>>;
+
+    #[cfg(feature = "write")]
+    /// [`Self::open_logical_vector_index`] for maintenance: every segment of
+    /// the name from the manifest, one the tagged reader excludes from the
+    /// listing included (it opens as contributing nothing, to be rebuilt).
+    async fn open_logical_vector_index_for_maintenance(
+        &self,
+        column: &str,
+        name: &str,
+    ) -> Result<LogicalVectorIndex>;
+
     /// Opens all segments for one logical vector index and returns a materialized snapshot.
     async fn open_logical_vector_index(
         &self,
@@ -380,6 +490,13 @@ pub trait DatasetIndexInternalExt: DatasetIndexExt {
         &self,
         metrics: &dyn MetricsCollector,
     ) -> Result<Option<Arc<CompactFragReuseIndex>>>;
+
+    #[cfg(feature = "write")]
+    /// Opens the MemWAL index
+    async fn open_mem_wal_index(
+        &self,
+        metrics: &dyn MetricsCollector,
+    ) -> Result<Option<Arc<MemWalIndex>>>;
 
     /// Gets the fragment reuse index UUID from the current manifest, if it exists
     async fn frag_reuse_index_uuid(&self) -> Option<Uuid>;
@@ -398,6 +515,15 @@ pub trait DatasetIndexInternalExt: DatasetIndexExt {
 
     /// Return the fragments that are covered by each of the deltas of the index.
     async fn indexed_fragments(&self, idx_name: &str) -> Result<Vec<Vec<Fragment>>>;
+
+    #[cfg(feature = "write")]
+    /// Initialize a specific index on this dataset based on an index from a source dataset.
+    async fn initialize_index(&mut self, source_dataset: &Dataset, index_name: &str) -> Result<()>;
+
+    #[cfg(feature = "write")]
+    /// Initialize all indices on this dataset based on indices from a source dataset.
+    /// This will call `initialize_index` for each non-system index in the source dataset.
+    async fn initialize_indices(&mut self, source_dataset: &Dataset) -> Result<()>;
 }
 
 /// The FRI identity that belongs in the vector cache keys before any remapping
@@ -903,7 +1029,15 @@ impl Dataset {
 
         if is_vector_index {
             let index = self
-                .open_vector_index_from_metadata_with_plan(column, &index_meta, metrics)
+                .open_vector_index_from_metadata_with_plan(
+                    column,
+                    &index_meta,
+                    #[cfg(feature = "write")]
+                    None,
+                    #[cfg(feature = "write")]
+                    frag_reuse::OpenPurpose::Query,
+                    metrics,
+                )
                 .await?;
             Ok(index.as_index())
         } else {
@@ -926,7 +1060,17 @@ impl Dataset {
             .await?
             .ok_or_else(|| Error::index(format!("Index with id {} does not exist", uuid)))?;
 
-        scalar::open_scalar_index_with_plan(self, column, &index_meta, metrics).await
+        scalar::open_scalar_index_with_plan(
+            self,
+            column,
+            &index_meta,
+            #[cfg(feature = "write")]
+            None,
+            #[cfg(feature = "write")]
+            frag_reuse::OpenPurpose::Query,
+            metrics,
+        )
+        .await
     }
 
     pub(crate) async fn open_vector_index_impl(
@@ -939,7 +1083,161 @@ impl Dataset {
             .load_index(uuid)
             .await?
             .ok_or_else(|| Error::index(format!("Index with id {} does not exist", uuid)))?;
-        self.open_vector_index_from_metadata_with_plan(column, &index_meta, metrics)
+        self.open_vector_index_from_metadata_with_plan(
+            column,
+            &index_meta,
+            #[cfg(feature = "write")]
+            None,
+            #[cfg(feature = "write")]
+            frag_reuse::OpenPurpose::Query,
+            metrics,
+        )
+        .await
+    }
+
+    #[cfg(feature = "write")]
+    /// The segment's metadata for the given purpose. A query sees the derived
+    /// listing only. Maintenance also reaches a registered segment the tagged
+    /// reader left out of the listing (its coverage was withdrawn by an
+    /// in-place rewrite, or its translation cannot be honored): it gets the
+    /// stored metadata and opens the segment as contributing nothing, to
+    /// rebuild or replace it.
+    pub(crate) async fn load_index_with_purpose(
+        &self,
+        uuid: &Uuid,
+        purpose: frag_reuse::OpenPurpose,
+    ) -> Result<Option<IndexMetadata>> {
+        if let Some(index) = self
+            .load_indices()
+            .await?
+            .iter()
+            .find(|idx| idx.uuid == *uuid)
+        {
+            return Ok(Some(index.clone()));
+        }
+        if purpose == frag_reuse::OpenPurpose::Query {
+            return Ok(None);
+        }
+        Ok(load_all_indices(self)
+            .await?
+            .iter()
+            .find(|idx| idx.uuid == *uuid && !is_system_index(idx) && index_is_usable(idx))
+            .cloned())
+    }
+
+    #[cfg(feature = "write")]
+    pub(crate) async fn open_generic_index_with_purpose(
+        &self,
+        column: &str,
+        uuid: &Uuid,
+        metrics: &dyn MetricsCollector,
+        purpose: frag_reuse::OpenPurpose,
+    ) -> Result<Arc<dyn Index>> {
+        // Checking for cache existence is cheap so we just check the vector caches.
+        // Scalar indices cache themselves inside `open_scalar_index` (the cache
+        // key is a plugin detail), so there is no cheap scalar check here.
+        let frag_reuse_uuid = v0_frag_reuse_cache_id(self).await;
+
+        // Portable state is looked up after resolving the segment's physical
+        // location and current remapping below. A UUID-only probe cannot check
+        // either, and must not bypass the current segment's visibility rules.
+        // Fallback: in-memory cache for legacy indices.
+        let vector_cache_key = LegacyVectorIndexCacheKey::new(uuid, frag_reuse_uuid.as_ref());
+        if let Some(cached) = self.index_cache.get_with_key(&vector_cache_key).await {
+            return Ok(cached.0.clone().as_index());
+        }
+
+        let frag_reuse_cache_key = FragReuseIndexCacheKey::new(uuid, frag_reuse_uuid.as_ref());
+        if let Some(index) = self.index_cache.get_with_key(&frag_reuse_cache_key).await {
+            return Ok(Arc::new(CompactFragReuseIndexHandle(index)).as_index());
+        }
+
+        // Sometimes we want to open an index and we don't care if it is a scalar or vector index.
+        // For example, we might want to get statistics for an index, regardless of type.
+        //
+        // We determine if this is a vector index by checking if INDEX_FILE_NAME exists in the
+        // file list (available since file sizes tracking was added). If the file list is not
+        // available (older indices), we fall back to checking file existence via HEAD request.
+        let index_meta = self
+            .load_index_with_purpose(uuid, purpose)
+            .await?
+            .ok_or_else(|| Error::index(format!("Index with id {} does not exist", uuid)))?;
+
+        // Declared type first, and the legacy file name only for segments that
+        // predate details: an index awaiting training declares itself a vector
+        // index and has no file, so a file-based answer would send it to the
+        // scalar reader.
+        let is_vector_index = if index_meta.index_details.is_some() {
+            segment_has_vector_details(&index_meta)
+        } else if let Some(files) = &index_meta.files {
+            files.iter().any(|f| f.path == INDEX_FILE_NAME)
+        } else {
+            let index_dir = self.indice_files_dir(&index_meta)?;
+            let index_file = index_dir
+                .clone()
+                .join(uuid.to_string())
+                .join(INDEX_FILE_NAME);
+            let object_store = self.object_store_for_index(&index_meta).await?;
+            object_store.exists(&index_file).await?
+        };
+
+        if is_vector_index {
+            let index = self
+                .open_vector_index_from_metadata_with_purpose(column, &index_meta, metrics, purpose)
+                .await?;
+            Ok(index.as_index())
+        } else {
+            let index = self
+                .open_scalar_index_with_purpose(column, uuid, metrics, purpose)
+                .await?;
+            Ok(index.as_index())
+        }
+    }
+
+    #[cfg(feature = "write")]
+    #[instrument(level = "debug", skip_all)]
+    pub(crate) async fn open_scalar_index_with_purpose(
+        &self,
+        column: &str,
+        uuid: &Uuid,
+        metrics: &dyn MetricsCollector,
+        purpose: frag_reuse::OpenPurpose,
+    ) -> Result<Arc<dyn ScalarIndex>> {
+        // Caching (including the choice of in-memory vs. serializable state) is
+        // a plugin implementation detail handled inside `scalar::open_scalar_index`.
+        let index_meta = self
+            .load_index_with_purpose(uuid, purpose)
+            .await?
+            .ok_or_else(|| Error::index(format!("Index with id {} does not exist", uuid)))?;
+
+        scalar::open_scalar_index_with_plan(self, column, &index_meta, None, purpose, metrics).await
+    }
+
+    #[cfg(feature = "write")]
+    pub(crate) async fn open_vector_index_with_purpose(
+        &self,
+        column: &str,
+        uuid: &Uuid,
+        metrics: &dyn MetricsCollector,
+        purpose: frag_reuse::OpenPurpose,
+    ) -> Result<Arc<dyn VectorIndex>> {
+        let index_meta = self
+            .load_index_with_purpose(uuid, purpose)
+            .await?
+            .ok_or_else(|| Error::index(format!("Index with id {} does not exist", uuid)))?;
+        self.open_vector_index_from_metadata_with_purpose(column, &index_meta, metrics, purpose)
+            .await
+    }
+
+    #[cfg(feature = "write")]
+    pub(crate) async fn open_vector_index_from_metadata_with_purpose(
+        &self,
+        column: &str,
+        index_meta: &IndexMetadata,
+        metrics: &dyn MetricsCollector,
+        purpose: frag_reuse::OpenPurpose,
+    ) -> Result<Arc<dyn VectorIndex>> {
+        self.open_vector_index_from_metadata_with_plan(column, index_meta, None, purpose, metrics)
             .await
     }
 
@@ -947,6 +1245,8 @@ impl Dataset {
         &self,
         column: &str,
         index_meta: &IndexMetadata,
+        #[cfg(feature = "write")] staged: Option<&frag_reuse::SegmentRemappingPlan>,
+        #[cfg(feature = "write")] purpose: frag_reuse::OpenPurpose,
         metrics: &dyn MetricsCollector,
     ) -> Result<Arc<dyn VectorIndex>> {
         reject_mem_wal_index(index_meta)?;
@@ -978,8 +1278,16 @@ impl Dataset {
             resident_columns_handle,
             io_stats: metrics.io_stats(),
         };
-        let resolved =
-            frag_reuse::open_row_id_remapping_with_plan(self, index_meta, metrics).await?;
+        let resolved = frag_reuse::open_row_id_remapping_with_plan(
+            self,
+            index_meta,
+            #[cfg(feature = "write")]
+            staged,
+            #[cfg(feature = "write")]
+            purpose,
+            metrics,
+        )
+        .await?;
         // Portable file state is independent of this mapping. Legacy live
         // indices and decoded partitions still use the resolved translation
         // identity, including the current v0 history or tagged fingerprint.
@@ -1388,8 +1696,64 @@ impl DatasetIndexInternalExt for Dataset {
         index_meta: &IndexMetadata,
         metrics: &dyn MetricsCollector,
     ) -> Result<Arc<dyn VectorIndex>> {
-        self.open_vector_index_from_metadata_with_plan(column, index_meta, metrics)
-            .await
+        self.open_vector_index_from_metadata_with_plan(
+            column,
+            index_meta,
+            #[cfg(feature = "write")]
+            None,
+            #[cfg(feature = "write")]
+            frag_reuse::OpenPurpose::Query,
+            metrics,
+        )
+        .await
+    }
+
+    #[cfg(feature = "write")]
+    async fn open_generic_index_for_maintenance(
+        &self,
+        column: &str,
+        uuid: &Uuid,
+        metrics: &dyn MetricsCollector,
+    ) -> Result<Arc<dyn Index>> {
+        self.open_generic_index_with_purpose(
+            column,
+            uuid,
+            metrics,
+            frag_reuse::OpenPurpose::Maintenance,
+        )
+        .await
+    }
+
+    #[cfg(feature = "write")]
+    async fn open_scalar_index_for_maintenance(
+        &self,
+        column: &str,
+        uuid: &Uuid,
+        metrics: &dyn MetricsCollector,
+    ) -> Result<Arc<dyn ScalarIndex>> {
+        self.open_scalar_index_with_purpose(
+            column,
+            uuid,
+            metrics,
+            frag_reuse::OpenPurpose::Maintenance,
+        )
+        .await
+    }
+
+    #[cfg(feature = "write")]
+    async fn open_vector_index_for_maintenance(
+        &self,
+        column: &str,
+        uuid: &Uuid,
+        metrics: &dyn MetricsCollector,
+    ) -> Result<Arc<dyn VectorIndex>> {
+        self.open_vector_index_with_purpose(
+            column,
+            uuid,
+            metrics,
+            frag_reuse::OpenPurpose::Maintenance,
+        )
+        .await
     }
 
     async fn open_logical_vector_index(
@@ -1421,6 +1785,55 @@ impl DatasetIndexInternalExt for Dataset {
             segments.push((metadata, index));
         }
 
+        LogicalVectorIndex::try_new(name.to_string(), column.to_string(), segments)
+    }
+
+    #[cfg(feature = "write")]
+    async fn open_logical_vector_index_for_maintenance(
+        &self,
+        column: &str,
+        name: &str,
+    ) -> Result<LogicalVectorIndex> {
+        // Every segment of the name the manifest registers, each with the
+        // metadata its open sees: the listed one (derived coverage) for a
+        // listed segment, the stored one for a segment the reader excludes.
+        let registered: Vec<Uuid> = load_all_indices(self)
+            .await?
+            .iter()
+            .filter(|metadata| {
+                metadata.name == name && !is_system_index(metadata) && index_is_usable(metadata)
+            })
+            .map(|metadata| metadata.uuid)
+            .collect();
+        let mut metadatas = Vec::with_capacity(registered.len());
+        for uuid in registered {
+            if let Some(metadata) = self
+                .load_index_with_purpose(&uuid, frag_reuse::OpenPurpose::Maintenance)
+                .await?
+            {
+                metadatas.push(metadata);
+            }
+        }
+        if metadatas.is_empty() {
+            return Err(Error::index_not_found(format!("name={name}")));
+        }
+        let field_id = self.schema().field_id(column)?;
+        if let Some(invalid_metadata) = metadatas
+            .iter()
+            .find(|metadata| metadata.fields.first() != Some(&field_id))
+        {
+            return Err(Error::invalid_input(format!(
+                "Logical vector index '{}' contains segment {} that does not belong to column '{}'",
+                name, invalid_metadata.uuid, column
+            )));
+        }
+        let mut segments = Vec::with_capacity(metadatas.len());
+        for metadata in metadatas {
+            let index = self
+                .open_vector_index_for_maintenance(column, &metadata.uuid, &NoOpMetricsCollector)
+                .await?;
+            segments.push((metadata, index));
+        }
         LogicalVectorIndex::try_new(name.to_string(), column.to_string(), segments)
     }
 
@@ -1467,6 +1880,39 @@ impl DatasetIndexInternalExt for Dataset {
         } else {
             Ok(None)
         }
+    }
+
+    #[cfg(feature = "write")]
+    async fn open_mem_wal_index(
+        &self,
+        metrics: &dyn MetricsCollector,
+    ) -> Result<Option<Arc<MemWalIndex>>> {
+        let Some(mem_wal_meta) = self.load_index_by_name(MEM_WAL_INDEX_NAME).await? else {
+            return Ok(None);
+        };
+
+        let frag_reuse_uuid = frag_reuse_cache_scope(self).await;
+        let cache_key = MemWalCacheKey::new(&mem_wal_meta.uuid, frag_reuse_uuid.as_ref());
+        if let Some(index) = self.index_cache.get_with_key(&cache_key).await {
+            log::debug!("Found MemWAL index in cache uuid: {}", mem_wal_meta.uuid);
+            return Ok(Some(index));
+        }
+
+        let uuid = mem_wal_meta.uuid;
+
+        let index_meta = self
+            .load_index(&uuid)
+            .await?
+            .ok_or_else(|| Error::index(format!("Index with id {} does not exist", uuid)))?;
+        let index = open_mem_wal_index(index_meta)?;
+
+        info!(target: TRACE_IO_EVENTS, index_uuid=%uuid, r#type=IO_TYPE_OPEN_MEM_WAL);
+        metrics.record_index_load();
+
+        self.index_cache
+            .insert_with_key(&cache_key, index.clone())
+            .await;
+        Ok(Some(index))
     }
 
     async fn frag_reuse_index_uuid(&self) -> Option<Uuid> {
@@ -1532,6 +1978,114 @@ impl DatasetIndexInternalExt for Dataset {
             })
             .collect()
     }
+
+    #[cfg(feature = "write")]
+    async fn initialize_index(&mut self, source_dataset: &Dataset, index_name: &str) -> Result<()> {
+        let source_indices = source_dataset.load_indices_by_name(index_name).await?;
+
+        if source_indices.is_empty() {
+            return Err(Error::index(format!(
+                "Index '{}' not found in source dataset",
+                index_name
+            )));
+        }
+
+        let source_index = source_indices
+            .iter()
+            .min_by_key(|idx| idx.created_at)
+            .ok_or_else(|| {
+                Error::index(format!(
+                    "Could not determine oldest index for '{}'",
+                    index_name
+                ))
+            })?;
+
+        // Rebuild from the query inputs. The target build records its own field
+        // IDs for additional dependencies and does not read carried columns.
+        let keyed_fields = input_field_ids(source_index)?;
+        let mut field_paths = Vec::with_capacity(keyed_fields.len());
+        for field_id in keyed_fields.iter() {
+            let source_field = source_dataset
+                .schema()
+                .field_by_id(*field_id)
+                .ok_or_else(|| {
+                    Error::index(format!(
+                        "Field with id {} not found in source dataset",
+                        field_id
+                    ))
+                })?;
+            let source_field_path = source_dataset.schema().field_path(*field_id)?;
+
+            let target_field = self.schema().field(&source_field_path).ok_or_else(|| {
+                Error::index(format!(
+                    "Field '{}' required by index '{}' not found in target dataset",
+                    source_field_path, index_name
+                ))
+            })?;
+
+            if source_field.data_type() != target_field.data_type() {
+                return Err(Error::index(format!(
+                    "Field '{}' has different types in source ({:?}) and target ({:?}) datasets",
+                    source_field_path,
+                    source_field.data_type(),
+                    target_field.data_type()
+                )));
+            }
+
+            field_paths.push(source_field_path);
+        }
+
+        if field_paths.is_empty() {
+            return Err(Error::index(format!(
+                "Index '{}' has no fields",
+                index_name
+            )));
+        }
+
+        let field_names = field_paths.iter().map(String::as_str).collect::<Vec<_>>();
+        if let Some(index_details) = &source_index.index_details {
+            let index_details_wrapper = IndexDetails(index_details.clone());
+
+            if index_details_wrapper.is_vector() {
+                vector::initialize_vector_index(self, source_dataset, source_index, &field_names)
+                    .await?;
+            } else {
+                scalar::initialize_scalar_index(self, source_dataset, source_index, &field_names)
+                    .await?;
+            }
+        } else {
+            log::warn!(
+                "Index '{}' has no index_details, skipping",
+                source_index.name
+            );
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "write")]
+    async fn initialize_indices(&mut self, source_dataset: &Dataset) -> Result<()> {
+        let source_indices = source_dataset.load_indices().await?;
+        let non_system_indices: Vec<_> = source_indices
+            .iter()
+            .filter(|idx| !lance_index::is_system_index(idx))
+            .collect();
+
+        if non_system_indices.is_empty() {
+            return Ok(());
+        }
+
+        let mut unique_index_names = HashSet::new();
+        for index in non_system_indices.iter() {
+            unique_index_names.insert(index.name.clone());
+        }
+
+        for index_name in unique_index_names {
+            self.initialize_index(source_dataset, &index_name).await?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Resolves the column name and field for an index operation.
@@ -1575,3 +2129,6 @@ fn resolve_index_column(
         column_arg
     )))
 }
+
+#[cfg(all(test, feature = "write"))]
+mod tests;

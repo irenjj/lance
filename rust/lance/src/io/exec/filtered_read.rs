@@ -4317,8 +4317,7 @@ impl ExecutionPlan for FilteredReadExec {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use datafusion::physical_plan::ChildrenPropertiesMode;
     use datafusion::physical_plan::ReplaceChildrenOptions;

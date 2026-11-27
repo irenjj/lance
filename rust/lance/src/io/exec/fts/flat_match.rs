@@ -1289,8 +1289,7 @@ impl ExecutionPlan for FlatMatchQueryExec {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     mod empty_segments;
     mod filter_binding;

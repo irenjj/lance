@@ -1404,8 +1404,7 @@ impl ExecutionPlan for MaterializeIndexExec {
     }
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod tests {
     use datafusion::physical_plan::StatisticsArgs;
     use datafusion::physical_plan::StatisticsContext;

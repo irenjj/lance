@@ -12,13 +12,21 @@ use std::{
 
 use chrono::{DateTime, Utc};
 
+#[cfg(feature = "write")]
+use arrow_schema::Schema as ArrowSchema;
+#[cfg(feature = "write")]
+use datafusion::{dataframe::DataFrame, execution::context::SessionContext};
 use datafusion_catalog::TableProvider;
+#[cfg(feature = "write")]
+use datafusion_catalog::streaming::StreamingTable;
 use datafusion_common::config::ConfigNonZeroUsize;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_execution::memory_pool::PeakRecordingPool;
 use datafusion_execution::{TaskContext, runtime_env::RuntimeEnv};
 use datafusion_expr::LogicalPlan;
 use datafusion_physical_expr::PhysicalExpr;
+#[cfg(feature = "write")]
+use datafusion_physical_plan::streaming::PartitionStream;
 use datafusion_physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
     analyze::AnalyzeExec, coalesce_partitions::CoalescePartitionsExec, metrics::MetricType,
@@ -605,6 +613,72 @@ pub fn format_plan(plan: Arc<dyn ExecutionPlan>) -> String {
     }
     let wrapper = PrintWrapper { plan };
     format!("{}", wrapper)
+}
+
+#[cfg(feature = "write")]
+pub trait SessionContextExt {
+    /// Creates a DataFrame for reading a stream of data
+    ///
+    /// This dataframe may only be queried once, future queries will fail
+    fn read_one_shot(
+        &self,
+        data: SendableRecordBatchStream,
+    ) -> datafusion::common::Result<DataFrame>;
+}
+
+#[cfg(feature = "write")]
+pub struct OneShotPartitionStream {
+    data: Arc<Mutex<Option<SendableRecordBatchStream>>>,
+    schema: Arc<ArrowSchema>,
+}
+
+#[cfg(feature = "write")]
+impl std::fmt::Debug for OneShotPartitionStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let data = self.data.lock().unwrap();
+        f.debug_struct("OneShotPartitionStream")
+            .field("exhausted", &data.is_none())
+            .field("schema", self.schema.as_ref())
+            .finish()
+    }
+}
+
+#[cfg(feature = "write")]
+impl OneShotPartitionStream {
+    pub fn new(data: SendableRecordBatchStream) -> Self {
+        let schema = data.schema();
+        Self {
+            data: Arc::new(Mutex::new(Some(data))),
+            schema,
+        }
+    }
+}
+
+#[cfg(feature = "write")]
+impl PartitionStream for OneShotPartitionStream {
+    fn schema(&self) -> &arrow_schema::SchemaRef {
+        &self.schema
+    }
+
+    fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let mut stream = self.data.lock().unwrap();
+        stream
+            .take()
+            .expect("Attempt to consume a one shot dataframe multiple times")
+    }
+}
+
+#[cfg(feature = "write")]
+impl SessionContextExt for SessionContext {
+    fn read_one_shot(
+        &self,
+        data: SendableRecordBatchStream,
+    ) -> datafusion::common::Result<DataFrame> {
+        let schema = data.schema();
+        let part_stream = Arc::new(OneShotPartitionStream::new(data));
+        let provider = StreamingTable::try_new(schema, vec![part_stream])?;
+        self.read_table(Arc::new(provider))
+    }
 }
 
 /// Scan a [`TableProvider`] into a single-partition [`SendableRecordBatchStream`].

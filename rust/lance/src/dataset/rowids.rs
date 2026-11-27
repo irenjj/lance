@@ -17,11 +17,18 @@ use lance_table::{
 use std::sync::Arc;
 
 pub use lance_table_runtime::rowids::RowVersionKind;
+#[cfg(feature = "write")]
+pub(crate) use spill::place_carried_row_lineage;
 pub use spill::{
     DEFAULT_INLINE_ROW_LINEAGE_MAX_BYTES, INLINE_ROW_LINEAGE_MAX_BYTES_CONFIG_KEY,
     PlacedRowLineage, RowLineage, SPILL_ROW_LINEAGE_CONFIG_KEY, inline_row_lineage_max_bytes,
     place_row_lineage,
 };
+#[cfg(all(test, feature = "write"))]
+pub(crate) use spill::{RowLineagePlan, RowLineageSpill, plan_row_lineage_spill};
+
+#[cfg(all(test, feature = "write"))]
+mod validate;
 
 /// Load a row id sequence from the given dataset and fragment.
 pub async fn load_row_id_sequence(
@@ -406,8 +413,7 @@ pub(crate) async fn live_row_addr_to_row_id_lookup(
     })
 }
 
-#[cfg(any())]
-#[rustfmt::skip]
+#[cfg(all(test, feature = "write"))]
 mod test {
     use crate::session::index_caches::RowIdIndexKey;
     use lance_table::format::RowIdMeta;
